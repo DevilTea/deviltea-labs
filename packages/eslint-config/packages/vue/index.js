@@ -2,6 +2,9 @@ module.exports = {
   env: {
     'vue/setup-compiler-macros': true,
   },
+  parserOptions: {
+    extraFileExtensions: ['.vue'],
+  },
   extends: [
     'plugin:vue/vue3-recommended',
     '@deviltea/eslint-config-ts',
