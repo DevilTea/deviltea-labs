@@ -169,4 +169,7 @@ module.exports = {
       },
     },
   ],
+  ignorePatterns: [
+    '!.*',
+  ],
 }
