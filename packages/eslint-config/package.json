@@ -11,7 +11,7 @@
     "release": "lerna publish --conventional-commits"
   },
   "devDependencies": {
-    "@deviltea/eslint-config-base": "0.0.0",
+    "@deviltea/eslint-config-base": "workspace:latest",
     "eslint": "^8.8.0",
     "lerna": "^4.0.0",
     "typescript": "^4.5.5"
