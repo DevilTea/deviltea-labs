@@ -3,6 +3,17 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## [1.0.2](https://github.com/DevilTea/eslint-config/compare/v1.0.1...v1.0.2) (2022-01-31)
+
+
+### Bug Fixes
+
+* cancel ignoring dotfiles by default ([4702b54](https://github.com/DevilTea/eslint-config/commit/4702b547b1e9a6d62e13592b0e937e66810e5a43))
+
+
+
+
+
 ## [1.0.1](https://github.com/DevilTea/eslint-config/compare/v1.0.0...v1.0.1) (2022-01-30)
 
 
