@@ -30,6 +30,7 @@ module.exports = {
         parser: '@typescript-eslint/parser',
       },
       rules: {
+        'import/no-default-export': 'off',
         'no-unused-vars': 'off',
         'no-undef': 'off',
         '@typescript-eslint/no-unused-vars': 'off',
