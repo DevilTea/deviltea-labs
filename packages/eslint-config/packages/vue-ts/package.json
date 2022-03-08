@@ -1,6 +1,6 @@
 {
   "name": "@deviltea/eslint-config-vue-ts",
-  "version": "1.0.5",
+  "version": "2.0.0",
   "description": "",
   "license": "MIT",
   "author": "DevilTea <ch19980814@gmail.com> (https://github.com/DevilTea/)",
@@ -11,8 +11,8 @@
     "vue": ">=3.0.0"
   },
   "dependencies": {
-    "@deviltea/eslint-config-ts": "^1.0.5",
-    "@deviltea/eslint-config-vue": "^1.0.5",
+    "@deviltea/eslint-config-ts": "^2.0.0",
+    "@deviltea/eslint-config-vue": "^2.0.0",
     "eslint-plugin-vue": "^8.4.0"
   },
   "devDependencies": {
