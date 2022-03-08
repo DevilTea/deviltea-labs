@@ -1,12 +1,7 @@
 const vueBase = require('@deviltea/eslint-config-vue')
 
 module.exports = {
-  env: {
-    'vue/setup-compiler-macros': true,
-  },
-  parserOptions: {
-    extraFileExtensions: ['.vue'],
-  },
+  ...vueBase,
   extends: [
     'plugin:vue/vue3-recommended',
     '@deviltea/eslint-config-ts',
