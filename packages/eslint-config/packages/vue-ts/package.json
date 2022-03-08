@@ -1,5 +1,5 @@
 {
-  "name": "@deviltea/eslint-config-vue",
+  "name": "@deviltea/eslint-config-vue-ts",
   "version": "1.0.5",
   "description": "",
   "license": "MIT",
@@ -11,7 +11,8 @@
     "vue": ">=3.0.0"
   },
   "dependencies": {
-    "@deviltea/eslint-config-base": "^1.0.5",
+    "@deviltea/eslint-config-ts": "^1.0.5",
+    "@deviltea/eslint-config-vue": "^1.0.5",
     "eslint-plugin-vue": "^8.4.0"
   },
   "devDependencies": {
