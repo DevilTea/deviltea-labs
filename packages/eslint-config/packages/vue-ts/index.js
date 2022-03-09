@@ -3,7 +3,7 @@ const vueBase = require('@deviltea/eslint-config-vue')
 module.exports = {
   ...vueBase,
   extends: [
-    'plugin:vue/vue3-recommended',
+    '@deviltea/eslint-config-vue',
     '@deviltea/eslint-config-ts',
   ],
   rules: {
