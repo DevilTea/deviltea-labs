@@ -3,6 +3,14 @@
 All notable changes to this project will be documented in this file.
 See [Conventional Commits](https://conventionalcommits.org) for commit guidelines.
 
+## [2.0.3](https://github.com/DevilTea/eslint-config/compare/v2.0.2...v2.0.3) (2022-04-02)
+
+**Note:** Version bump only for package @deviltea/eslint-config-vue-ts
+
+
+
+
+
 ## [2.0.2](https://github.com/DevilTea/eslint-config/compare/v2.0.1...v2.0.2) (2022-03-09)
 
 
