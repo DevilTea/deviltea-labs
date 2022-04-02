@@ -93,7 +93,6 @@ module.exports = {
         quotes: ['error', 'double'],
         'quote-props': ['error', 'always'],
         'comma-dangle': ['error', 'never'],
-        'eol-last': ['error', 'never'],
         // turn off ts rules for json files
         '@typescript-eslint/naming-convention': 'off',
         '@typescript-eslint/dot-notation': 'off',
