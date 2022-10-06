@@ -1,21 +1,15 @@
-# @deviltea/eslint-config-monorepo
-## @deviltea/eslint-config-[base/ts/vue]
+# @deviltea/eslint-config
 
-[![npm](https://img.shields.io/npm/v/@deviltea/eslint-config-base)](https://npmjs.com/package/@deviltea/eslint-config-base)
+[![npm](https://img.shields.io/npm/v/@deviltea/eslint-config)](https://npmjs.com/package/@deviltea/eslint-config)
+
+Extends [`@antfu/eslint-config`](https://github.com/antfu/eslint-config)
 
 ## Usage
 
 ### Install
 
 ```bash
-# @deviltea/eslint-config-base (extends airbnb)
-pnpm add -D eslint @deviltea/eslint-config-base
-
-# @deviltea/eslint-config-ts (extends base)
-pnpm add -D eslint @deviltea/eslint-config-ts
-
-# @deviltea/eslint-config-vue (extends ts)
-pnpm add -D eslint @deviltea/eslint-config-vue
+pnpm add -D eslint @deviltea/eslint-config
 ```
 
 ### Config `.eslintrc`
@@ -23,7 +17,7 @@ pnpm add -D eslint @deviltea/eslint-config-vue
 ```json
 {
   "extends": [
-    "@deviltea/eslint-config-vue"
+    "@deviltea"
   ]
 }
 ```
@@ -62,6 +56,6 @@ Create `.vscode/settings.json`
     "javascript",
     "vue",
     "json"
-  ],
+  ]
 }
 ```
