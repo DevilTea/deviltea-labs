@@ -14,8 +14,8 @@
   },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "lint": "npx eslint --ext .js,.json,.vue --fix .",
-    "release": "release:bump && release:copy && release:publish && release:restore",
+    "lint": "eslint --ext .js,.json,.vue --fix .",
+    "release": "pnpm release:bump && pnpm release:copy && pnpm release:publish && pnpm release:restore",
     "release:bump": "bumpp package.json --commit --push --tag",
     "release:copy": "cp .eslintrc.js index.js",
     "release:publish": "pnpm publish --access public",
