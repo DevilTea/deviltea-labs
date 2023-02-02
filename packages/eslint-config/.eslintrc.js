@@ -25,12 +25,4 @@ module.exports = {
     'import/first': ['off'],
     'import/no-duplicates': ['off'],
   },
-  overrides: [
-    {
-      files: ['*.vue'],
-      rules: {
-        '@typescript-eslint/no-unused-vars': 'off',
-      },
-    },
-  ],
 }
