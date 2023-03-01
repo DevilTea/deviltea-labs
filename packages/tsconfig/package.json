@@ -1,25 +1,18 @@
 {
-  "name": "@vue/tsconfig",
-  "version": "0.1.3",
-  "description": "A base TSConfig for working with Vue.js",
+  "name": "@deviltea/tsconfig",
+  "version": "0.0.1",
+  "description": "My preferred tsconfig.",
   "main": "tsconfig.json",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vuejs/tsconfig.git"
+    "url": "git+https://github.com/DevilTea/tsconfig.git"
   },
-  "keywords": [
-    "vue",
-    "tsconfig"
-  ],
-  "author": "Haoqun Jiang <haoqunjiang+npm@gmail.com>",
+  "keywords": [],
+  "author": "DevilTea <ch19980814@gmail.com>",
   "license": "MIT",
-  "bugs": {
-    "url": "https://github.com/vuejs/tsconfig/issues"
-  },
-  "homepage": "https://github.com/vuejs/tsconfig#readme",
   "peerDependencies": {
     "@types/node": "*"
   },

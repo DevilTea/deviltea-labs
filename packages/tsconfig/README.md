@@ -1,13 +1,15 @@
-# `@vue/tsconfig`
+# `@deviltea/tsconfig`
 
-TSConfigs for Vue projects to extend.
+> Forked from [`@vue/tsconfig`](https://github.com/vuejs/tsconfig)
+
+TSConfigs for projects to extend.
 
 Requires TypeScript >= 4.5.
 
 Install:
 
 ```sh
-npm add -D @vue/tsconfig
+npm add -D @deviltea/tsconfig
 ```
 
 Add one of the available configurations to your `tsconfig.json`:
@@ -15,17 +17,17 @@ Add one of the available configurations to your `tsconfig.json`:
 The base configuration (runtime-agnostic):
 
 ```json
-"extends": "@vue/tsconfig/tsconfig.json"
+"extends": "@deviltea/tsconfig/tsconfig.json"
 ```
 
 Configuration for Browser environment:
 
 ```json
-"extends": "@vue/tsconfig/tsconfig.web.json"
+"extends": "@deviltea/tsconfig/tsconfig.web.json"
 ```
 
 Configuration for Node environment:
 
 ```json
-"extends": "@vue/tsconfig/tsconfig.node.json"
+"extends": "@deviltea/tsconfig/tsconfig.node.json"
 ```
