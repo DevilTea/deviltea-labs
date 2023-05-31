@@ -1,0 +1,19 @@
+lockfileVersion: 5.4
+
+specifiers:
+  '@tsconfig/recommended': ^1.0.2
+  '@tsconfig/strictest': ^2.0.1
+
+dependencies:
+  '@tsconfig/recommended': 1.0.2
+  '@tsconfig/strictest': 2.0.1
+
+packages:
+
+  /@tsconfig/recommended/1.0.2:
+    resolution: {integrity: sha512-dbHBtbWBOjq0/otpopAE02NT2Cm05Qe2JsEKeCf/wjSYbI2hz8nCqnpnOJWHATgjDz4fd3dchs3Wy1gQGjfN6w==}
+    dev: false
+
+  /@tsconfig/strictest/2.0.1:
+    resolution: {integrity: sha512-7JHHCbyCsGUxLd0pDbp24yz3zjxw2t673W5oAP6HCEdr/UUhaRhYd3SSnUsGCk+VnPVJVA4mXROzbhI+nyIk+w==}
+    dev: false

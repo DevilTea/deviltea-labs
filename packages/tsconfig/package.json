@@ -1,19 +1,25 @@
 {
   "name": "@deviltea/tsconfig",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "My preferred tsconfig.",
-  "main": "tsconfig.json",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+  "exports": {
+    "./base": "./tsconfig.base.json",
+    "./node": "./tsconfig.node.json",
+    "./dom": "./tsconfig.dom.json"
   },
+  "author": "DevilTea <ch19980814@gmail.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/DevilTea/tsconfig.git"
   },
-  "keywords": [],
-  "author": "DevilTea <ch19980814@gmail.com>",
+  "keywords": ["tsconfig", "typescript"],
   "license": "MIT",
+  "dependencies": {
+    "@tsconfig/recommended": "^1.0.2",
+    "@tsconfig/strictest": "^2.0.1"
+  },
   "peerDependencies": {
+    "typescript": ">=5.0.4",
     "@types/node": "*"
   },
   "peerDependenciesMeta": {
