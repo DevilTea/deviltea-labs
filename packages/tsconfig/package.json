@@ -1,6 +1,6 @@
 {
   "name": "@deviltea/tsconfig",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "My preferred tsconfig.",
   "exports": {
     "./base": "./tsconfig.base.json",
@@ -17,10 +17,6 @@
     "typescript"
   ],
   "license": "MIT",
-  "dependencies": {
-    "@tsconfig/recommended": "^1.0.2",
-    "@tsconfig/strictest": "^2.0.1"
-  },
   "peerDependencies": {
     "@types/node": "*",
     "typescript": ">=5.0.4"

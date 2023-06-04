@@ -1,8 +1,4 @@
 {
-  "extends": [
-    "@tsconfig/recommended/tsconfig.json",
-    "@tsconfig/strictest/tsconfig.json",
-  ],
   "compilerOptions": {
     "target": "ESNext",
     "module": "ESNext",
@@ -12,6 +8,20 @@
     "jsx": "preserve",
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
+    "strict": true,
+    "allowUnusedLabels": false,
+    "allowUnreachableCode": false,
+    "exactOptionalPropertyTypes": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "checkJs": true,
     "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
   }
 }
