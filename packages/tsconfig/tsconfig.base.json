@@ -11,8 +11,7 @@
     "useDefineForClassFields": true,
     "jsx": "preserve",
     "isolatedModules": true,
-    "preserveValueImports": true,
-    "importsNotUsedAsValues": "error",
+    "verbatimModuleSyntax": true,
     "esModuleInterop": true,
   }
 }
