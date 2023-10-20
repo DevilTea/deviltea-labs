@@ -45,6 +45,7 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => {
 				'vue/prefer-define-options': 'error',
 				'vue/require-macro-variable-name': ['error', { defineProps: 'props', defineEmits: 'emit', defineSlots: 'slots', useSlots: 'slots', useAttrs: 'attrs' }],
 				'vue/valid-define-options': 'error',
+				'vue/component-name-in-template-casing': ['error', 'PascalCase', { registeredComponentsOnly: false }],
 				...options?.overrides?.vue,
 			},
 		},
