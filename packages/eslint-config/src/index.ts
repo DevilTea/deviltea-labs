@@ -20,99 +20,37 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => {
 			...options?.overrides,
 			javascript: {
 				'no-magic-numbers': 'error',
-				'complexity': [
-					'error',
-					MAX_COMPLEXITY,
-				],
-				'max-params': [
-					'error',
-					MAX_PARAMS,
-				],
-				'max-depth': [
-					'error',
-					MAX_DEPTH,
-				],
+				'complexity': ['error', MAX_COMPLEXITY],
+				'max-params': ['error', MAX_PARAMS],
+				'max-depth': ['error', MAX_DEPTH],
 				'no-lonely-if': 'error',
 				...options?.overrides?.javascript,
 			},
 			typescript: {
 				'no-magic-numbers': 'off',
 				'ts/no-magic-numbers': 'error',
-				'complexity': [
-					'error',
-					MAX_COMPLEXITY,
-				],
-				'max-params': [
-					'error',
-					MAX_PARAMS,
-				],
-				'max-depth': [
-					'error',
-					MAX_DEPTH,
-				],
+				'complexity': ['error', MAX_COMPLEXITY],
+				'max-params': ['error', MAX_PARAMS],
+				'max-depth': ['error', MAX_DEPTH],
 				'no-lonely-if': 'error',
 				...options?.overrides?.typescript,
 			},
 			vue: {
-				'vue/attribute-hyphenation': [
-					'error',
-					'never',
-				],
-				'vue/max-attributes-per-line': [
-					'error',
-					{
-						singleline: {
-							max: 1,
-						},
-						multiline: {
-							max: 1,
-						},
-					},
-				],
+				'vue/attribute-hyphenation': ['error', 'never'],
+				'vue/max-attributes-per-line': ['error', { singleline: { max: 1 }, multiline: { max: 1 } }],
+				'vue/component-api-style': ['error', ['script-setup', 'composition']],
+				'vue/define-emits-declaration': ['error', 'type-based'],
+				'vue/define-props-declaration': ['error', 'type-based'],
+				'vue/no-template-target-blank': 'error',
+				'vue/prefer-define-options': 'error',
+				'vue/require-macro-variable-name': ['error', { defineProps: 'props', defineEmits: 'emit', defineSlots: 'slots', useSlots: 'slots', useAttrs: 'attrs' }],
+				'vue/valid-define-options': 'error',
 				...options?.overrides?.vue,
 			},
 		},
 		rules: {
-			'style/max-len': [
-				'error',
-				{
-					code: 120,
-				},
-			],
-			'style/newline-per-chained-call': [
-				'error',
-				{
-					ignoreChainWithDepth: 2,
-				},
-			],
-			'vue/component-api-style': [
-				'error',
-				[
-					'script-setup',
-					'composition',
-				],
-			],
-			'vue/define-emits-declaration': [
-				'error',
-				'type-based',
-			],
-			'vue/define-props-declaration': [
-				'error',
-				'type-based',
-			],
-			'vue/no-template-target-blank': 'error',
-			'vue/prefer-define-options': 'error',
-			'vue/require-macro-variable-name': [
-				'error',
-				{
-					defineProps: 'props',
-					defineEmits: 'emit',
-					defineSlots: 'slots',
-					useSlots: 'slots',
-					useAttrs: 'attrs',
-				},
-			],
-			'vue/valid-define-options': 'error',
+			'style/max-len': ['error', { code: 120 }],
+			'style/newline-per-chained-call': ['error', { ignoreChainWithDepth: 2 }],
 			...options?.rules,
 		},
 	}
