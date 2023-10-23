@@ -19,7 +19,6 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => {
 		overrides: {
 			...options?.overrides,
 			javascript: {
-				'no-magic-numbers': 'error',
 				'complexity': ['error', MAX_COMPLEXITY],
 				'max-params': ['error', MAX_PARAMS],
 				'max-depth': ['error', MAX_DEPTH],
@@ -27,8 +26,6 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => {
 				...options?.overrides?.javascript,
 			},
 			typescript: {
-				'no-magic-numbers': 'off',
-				'ts/no-magic-numbers': 'error',
 				'complexity': ['error', MAX_COMPLEXITY],
 				'max-params': ['error', MAX_PARAMS],
 				'max-depth': ['error', MAX_DEPTH],
