@@ -47,7 +47,6 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => {
 			},
 		},
 		rules: {
-			'style/max-len': ['error', { code: 120 }],
 			'style/newline-per-chained-call': ['error', { ignoreChainWithDepth: 2 }],
 			...options?.rules,
 		},
