@@ -4,7 +4,7 @@
 
 TSConfigs for projects to extend.
 
-Requires TypeScript >= 4.5.
+Requires TypeScript >= 5.0.4
 
 Install:
 
@@ -23,7 +23,7 @@ The base configuration (runtime-agnostic):
 Configuration for Browser environment:
 
 ```json
-"extends": "@deviltea/tsconfig/tsconfig.web.json"
+"extends": "@deviltea/tsconfig/tsconfig.dom.json"
 ```
 
 Configuration for Node environment:
