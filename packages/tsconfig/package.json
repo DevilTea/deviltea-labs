@@ -1,35 +1,43 @@
 {
-  "name": "@deviltea/tsconfig",
-  "version": "0.0.3",
-  "description": "My preferred tsconfig.",
-  "exports": {
-    "./base": "./tsconfig.base.json",
-    "./node": "./tsconfig.node.json",
-    "./dom": "./tsconfig.dom.json"
-  },
-  "author": "DevilTea <ch19980814@gmail.com>",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/DevilTea/tsconfig.git"
-  },
-  "keywords": [
-    "tsconfig",
-    "typescript"
-  ],
-  "license": "MIT",
-  "peerDependencies": {
-    "@types/node": "*",
-    "typescript": ">=5.0.4"
-  },
-  "peerDependenciesMeta": {
-    "@types/node": {
-      "optional": true
-    }
-  },
-  "publishConfig": {
-    "access": "public"
-  },
-  "devDependencies": {
-    "typescript": "^5.0.4"
-  }
+	"name": "@deviltea/tsconfig",
+	"type": "module",
+	"version": "0.0.3",
+	"description": "My preferred tsconfig.",
+	"author": "DevilTea <ch19980814@gmail.com>",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/DevilTea/tsconfig.git"
+	},
+	"keywords": [
+		"tsconfig",
+		"typescript"
+	],
+	"exports": {
+		"./base": "./tsconfig.base.json",
+		"./node": "./tsconfig.node.json",
+		"./dom": "./tsconfig.dom.json"
+	},
+	"scripts": {
+		"lint": "eslint . --fix",
+		"release": "bumpp"
+	},
+	"peerDependencies": {
+		"@types/node": "*",
+		"typescript": ">=5.0.4"
+	},
+	"peerDependenciesMeta": {
+		"@types/node": {
+			"optional": true
+		}
+	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"devDependencies": {
+		"@deviltea/eslint-config": "^2.0.6",
+		"bumpp": "^9.2.0",
+		"eslint": "^8.52.0",
+		"typescript": "^5.0.4"
+	}
 }
