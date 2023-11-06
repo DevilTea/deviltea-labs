@@ -34,6 +34,7 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => {
 			},
 			vue: {
 				'vue/attribute-hyphenation': ['error', 'never'],
+				'vue/v-on-event-hyphenation': ['error', 'never'],
 				'vue/max-attributes-per-line': ['error', { singleline: { max: 1 }, multiline: { max: 1 } }],
 				'vue/component-api-style': ['error', ['script-setup', 'composition']],
 				'vue/define-emits-declaration': ['error', 'type-based'],
