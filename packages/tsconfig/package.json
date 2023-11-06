@@ -1,7 +1,7 @@
 {
 	"name": "@deviltea/tsconfig",
 	"type": "module",
-	"version": "0.0.4",
+	"version": "0.0.5",
 	"description": "My preferred tsconfig.",
 	"author": "DevilTea <ch19980814@gmail.com>",
 	"license": "MIT",
