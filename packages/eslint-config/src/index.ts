@@ -1,4 +1,4 @@
-import type { ConfigItem, OptionsConfig } from '@antfu/eslint-config'
+import type { FlatConfigItem, OptionsConfig } from '@antfu/eslint-config'
 import { antfu } from '@antfu/eslint-config'
 
 type FactoryFn = typeof antfu
@@ -8,7 +8,7 @@ const MAX_PARAMS = 3
 const MAX_DEPTH = 3
 
 const deviltea: FactoryFn = (options?, ...userConfigs) => {
-	const mixedOptions: OptionsConfig & ConfigItem = {
+	const mixedOptions: OptionsConfig & FlatConfigItem = {
 		...options,
 		stylistic: typeof options?.stylistic === 'boolean'
 			? options.stylistic
