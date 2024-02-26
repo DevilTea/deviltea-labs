@@ -37,12 +37,12 @@
 		"eslint": ">=8.26.0"
 	},
 	"dependencies": {
-		"@antfu/eslint-config": "2.2.2"
+		"@antfu/eslint-config": "2.6.4"
 	},
 	"devDependencies": {
-		"bumpp": "9.2.0",
-		"eslint": "8.55.0",
-		"tsup": "8.0.1",
+		"bumpp": "9.3.0",
+		"eslint": "8.57.0",
+		"tsup": "8.0.2",
 		"typescript": "5.2.2"
 	}
 }
