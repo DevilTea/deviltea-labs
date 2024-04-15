@@ -35,9 +35,9 @@
 		"access": "public"
 	},
 	"devDependencies": {
-		"@deviltea/eslint-config": "^2.0.6",
+		"@deviltea/eslint-config": "3.2.0",
 		"bumpp": "^9.2.0",
-		"eslint": "^8.52.0",
-		"typescript": "^5.0.4"
+		"eslint": "^8.57.0",
+		"typescript": "^5.4.5"
 	}
 }
