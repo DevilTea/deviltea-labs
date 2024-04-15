@@ -34,10 +34,10 @@
 		"release": "bumpp"
 	},
 	"peerDependencies": {
-		"eslint": ">=8.26.0"
+		"eslint": ">=8.40.0"
 	},
 	"dependencies": {
-		"@antfu/eslint-config": "2.6.4"
+		"@antfu/eslint-config": "2.13.3"
 	},
 	"devDependencies": {
 		"bumpp": "9.3.0",
