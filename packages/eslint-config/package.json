@@ -31,7 +31,8 @@
 		"build": "tsup src/index.ts --format esm,cjs --clean --dts",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
-		"release": "bumpp"
+		"prepublishOnly": "pnpm build",
+		"release": "bumpp && pnpm publish"
 	},
 	"dependencies": {
 		"@antfu/eslint-config": "2.23.0"
