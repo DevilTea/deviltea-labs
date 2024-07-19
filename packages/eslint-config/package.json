@@ -3,9 +3,6 @@
 	"type": "module",
 	"version": "3.3.0",
 	"packageManager": "pnpm@9.4.0",
-	"engines": {
-		"node": ">=20.9.0"
-	},
 	"description": "",
 	"author": "DevilTea <ch19980814@gmail.com> (https://github.com/DevilTea/)",
 	"license": "MIT",
@@ -27,6 +24,9 @@
 	"files": [
 		"dist"
 	],
+	"engines": {
+		"node": ">=20.9.0"
+	},
 	"scripts": {
 		"build": "tsup src/index.ts --format esm,cjs --clean --dts",
 		"lint": "eslint .",
