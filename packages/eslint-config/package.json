@@ -2,7 +2,7 @@
 	"name": "@deviltea/eslint-config",
 	"type": "module",
 	"version": "4.0.0",
-	"packageManager": "pnpm@9.4.0",
+	"packageManager": "pnpm@10.14.0",
 	"description": "",
 	"author": "DevilTea <ch19980814@gmail.com> (https://github.com/DevilTea/)",
 	"license": "MIT",
@@ -11,14 +11,9 @@
 			"import": {
 				"types": "./dist/index.d.ts",
 				"default": "./dist/index.js"
-			},
-			"require": {
-				"types": "./dist/index.d.cts",
-				"default": "./dist/index.cjs"
 			}
 		}
 	},
-	"main": "./dist/index.cjs",
 	"module": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [
@@ -28,19 +23,19 @@
 		"node": ">=20.9.0"
 	},
 	"scripts": {
-		"build": "tsup src/index.ts --format esm,cjs --clean --dts",
+		"build": "tsup src/index.ts --format esm --clean --dts",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"prepublishOnly": "pnpm build",
 		"release": "bumpp && pnpm publish"
 	},
 	"dependencies": {
-		"@antfu/eslint-config": "3.12.1"
+		"@antfu/eslint-config": "5.2.0"
 	},
 	"devDependencies": {
-		"bumpp": "9.4.1",
-		"eslint": "9.17.0",
-		"tsup": "8.1.2",
-		"typescript": "5.5.2"
+		"bumpp": "10.2.2",
+		"eslint": "9.33.0",
+		"tsup": "8.5.0",
+		"typescript": "5.9.2"
 	}
 }
