@@ -17,17 +17,23 @@ Add one of the available configurations to your `tsconfig.json`:
 The base configuration (runtime-agnostic):
 
 ```json
-"extends": "@deviltea/tsconfig/tsconfig.json"
+{
+	"extends": "@deviltea/tsconfig/tsconfig.json"
+}
 ```
 
 Configuration for Browser environment:
 
 ```json
-"extends": "@deviltea/tsconfig/tsconfig.dom.json"
+{
+	"extends": "@deviltea/tsconfig/tsconfig.dom.json"
+}
 ```
 
 Configuration for Node environment:
 
 ```json
-"extends": "@deviltea/tsconfig/tsconfig.node.json"
+{
+	"extends": "@deviltea/tsconfig/tsconfig.node.json"
+}
 ```
