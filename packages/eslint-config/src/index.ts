@@ -1,4 +1,3 @@
-/* eslint-disable complexity */
 import type { OptionsConfig, TypedFlatConfigItem } from '@antfu/eslint-config'
 import { antfu } from '@antfu/eslint-config'
 
