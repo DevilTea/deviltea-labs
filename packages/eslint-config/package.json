@@ -30,12 +30,12 @@
 		"release": "bumpp && pnpm publish"
 	},
 	"dependencies": {
-		"@antfu/eslint-config": "5.2.0"
+		"@antfu/eslint-config": "6.2.0"
 	},
 	"devDependencies": {
-		"bumpp": "10.2.2",
-		"eslint": "9.33.0",
-		"tsup": "8.5.0",
-		"typescript": "5.9.2"
+		"bumpp": "10.3.1",
+		"eslint": "9.39.1",
+		"tsup": "8.5.1",
+		"typescript": "5.9.3"
 	}
 }
