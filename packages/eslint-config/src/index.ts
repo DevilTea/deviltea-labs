@@ -2,7 +2,6 @@ import type { OptionsConfig, TypedFlatConfigItem } from '@antfu/eslint-config'
 import { antfu } from '@antfu/eslint-config'
 
 type FactoryFn = typeof antfu
-
 const deviltea: FactoryFn = (options?, ...userConfigs) => {
 	const mixedOptions: OptionsConfig & TypedFlatConfigItem = {
 		...options,
@@ -12,7 +11,8 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => {
 					indent: 'tab',
 					...options?.stylistic,
 					overrides: {
-						'style/newline-per-chained-call': ['error', { ignoreChainWithDepth: 2 }],
+						'style/newline-per-chained-call': ['error', { ignoreChainWithDepth: 1 }],
+						'antfu/consistent-chaining': 'off',
 						...options?.stylistic?.overrides,
 					},
 				},
