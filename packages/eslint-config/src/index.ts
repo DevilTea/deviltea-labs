@@ -1,10 +1,11 @@
-import type { OptionsConfig, TypedFlatConfigItem } from '@antfu/eslint-config'
 import { antfu } from '@antfu/eslint-config'
 
 type FactoryFn = typeof antfu
-const deviltea: FactoryFn = (options?, ...userConfigs) => {
-	const mixedOptions: OptionsConfig & TypedFlatConfigItem = {
+
+const deviltea: FactoryFn = (options?, ...userConfigs) => antfu(
+	{
 		...options,
+
 		stylistic: typeof options?.stylistic === 'boolean'
 			? options.stylistic
 			: {
@@ -53,9 +54,8 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => {
 						...options?.vue?.overrides,
 					},
 				},
-	}
-
-	return antfu(mixedOptions, ...userConfigs)
-}
+	},
+	...userConfigs,
+)
 
 export default deviltea
