@@ -4,12 +4,12 @@
 
 TSConfigs for projects to extend.
 
-Requires TypeScript >= 5.0.4
+Requires TypeScript >= 5.9
 
 Install:
 
 ```sh
-npm add -D @deviltea/tsconfig
+pnpm add -D @deviltea/tsconfig
 ```
 
 Add one of the available configurations to your `tsconfig.json`:
