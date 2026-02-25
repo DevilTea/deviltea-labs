@@ -9,13 +9,13 @@
 	"exports": {
 		".": {
 			"import": {
-				"types": "./dist/index.d.ts",
-				"default": "./dist/index.js"
+				"types": "./dist/index.d.mts",
+				"default": "./dist/index.mjs"
 			}
 		}
 	},
-	"module": "./dist/index.js",
-	"types": "./dist/index.d.ts",
+	"module": "./dist/index.mjs",
+	"types": "./dist/index.d.mts",
 	"files": [
 		"dist"
 	],
@@ -23,7 +23,7 @@
 		"node": ">=20.19.0"
 	},
 	"scripts": {
-		"build": "tsup src/index.ts --format esm --clean --dts",
+		"build": "tsdown src/index.ts --format esm --clean --dts --publint",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"prepublishOnly": "pnpm build",
@@ -35,7 +35,8 @@
 	"devDependencies": {
 		"bumpp": "^10.4.1",
 		"eslint": "^10.0.2",
-		"tsup": "8.5.1",
+		"publint": "^0.3.17",
+		"tsdown": "^0.20.3",
 		"typescript": "~5.9.3"
 	}
 }
