@@ -3,6 +3,9 @@
 	"type": "module",
 	"version": "0.0.9",
 	"packageManager": "pnpm@10.34.4",
+	"engines": {
+		"node": ">=24"
+	},
 	"description": "My preferred tsconfig.",
 	"author": "DevilTea <ch19980814@gmail.com>",
 	"license": "MIT",
