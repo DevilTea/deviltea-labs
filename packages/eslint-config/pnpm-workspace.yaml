@@ -1,5 +1,7 @@
 # Supply-chain security baseline (see DevilTea/hub templates/pnpm-security.md)
 minimumReleaseAge: 4320
+shellEmulator: true
+
 trustPolicy: no-downgrade
 blockExoticSubdeps: true
 strictDepBuilds: true
