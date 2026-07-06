@@ -2,7 +2,7 @@
 	"name": "@deviltea/eslint-config",
 	"type": "module",
 	"version": "7.0.0",
-	"packageManager": "pnpm@10.14.0",
+	"packageManager": "pnpm@10.34.4",
 	"description": "",
 	"author": "DevilTea <ch19980814@gmail.com> (https://github.com/DevilTea/)",
 	"license": "MIT",
