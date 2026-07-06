@@ -3,9 +3,6 @@
 	"type": "module",
 	"version": "0.0.9",
 	"packageManager": "pnpm@10.34.4",
-	"engines": {
-		"node": ">=24"
-	},
 	"description": "My preferred tsconfig.",
 	"author": "DevilTea <ch19980814@gmail.com>",
 	"license": "MIT",
@@ -21,6 +18,9 @@
 		"./base": "./tsconfig.base.json",
 		"./node": "./tsconfig.node.json",
 		"./dom": "./tsconfig.dom.json"
+	},
+	"engines": {
+		"node": ">=24"
 	},
 	"scripts": {
 		"lint": "eslint . --fix",
@@ -41,7 +41,7 @@
 	"devDependencies": {
 		"@deviltea/eslint-config": "7.0.0",
 		"bumpp": "^10.4.1",
-		"eslint": "^10.0.2",
+		"eslint": "^10.6.0",
 		"typescript": "^5.9.3"
 	}
 }
