@@ -33,8 +33,10 @@
 		"prepublishOnly": "pnpm build",
 		"release": "bumpp && pnpm publish"
 	},
+	"dependencies": {
+		"@antfu/eslint-config": "^9.1.0"
+	},
 	"devDependencies": {
-		"@antfu/eslint-config": "^9.1.0",
 		"bumpp": "^11.1.0",
 		"eslint": "^10.6.0",
 		"publint": "^0.3.21",
