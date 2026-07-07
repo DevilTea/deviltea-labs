@@ -38,4 +38,3 @@ pnpm lint
 
 - `pnpm-workspace.yaml` exists only to hold pnpm supply-chain security settings (this is a single-package repo); `strictDepBuilds` is on — new deps that need build scripts must be reviewed into `onlyBuiltDependencies`/`ignoredBuiltDependencies`
 - Node >= 24 required (`engines`); consumers need TypeScript >= 5.9 (peer dependency)
-- README usage examples (`"extends": "@deviltea/tsconfig/tsconfig.json"` etc.) do not match the actual `exports` map (`./base`, `./node`, `./dom`) — verify against `package.json` before touching either

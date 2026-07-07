@@ -18,7 +18,7 @@ The base configuration (runtime-agnostic):
 
 ```json
 {
-	"extends": "@deviltea/tsconfig/tsconfig.json"
+	"extends": "@deviltea/tsconfig/base"
 }
 ```
 
@@ -26,7 +26,7 @@ Configuration for Browser environment:
 
 ```json
 {
-	"extends": "@deviltea/tsconfig/tsconfig.dom.json"
+	"extends": "@deviltea/tsconfig/dom"
 }
 ```
 
@@ -34,6 +34,6 @@ Configuration for Node environment:
 
 ```json
 {
-	"extends": "@deviltea/tsconfig/tsconfig.node.json"
+	"extends": "@deviltea/tsconfig/node"
 }
 ```
