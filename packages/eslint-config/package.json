@@ -23,20 +23,18 @@
 		"node": ">=24"
 	},
 	"scripts": {
-		"build": "tsdown src/index.ts --format esm --clean --dts --publint",
+		"build": "tsdown",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"prepublishOnly": "pnpm build",
 		"release": "bumpp && pnpm publish"
 	},
-	"dependencies": {
-		"@antfu/eslint-config": "^7.7.3"
-	},
 	"devDependencies": {
-		"bumpp": "^10.4.1",
+		"@antfu/eslint-config": "^9.1.0",
+		"bumpp": "^11.1.0",
 		"eslint": "^10.6.0",
 		"publint": "^0.3.21",
-		"tsdown": "^0.20.3",
+		"tsdown": "^0.22.3",
 		"typescript": "~5.9.3"
 	}
 }

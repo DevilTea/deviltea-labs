@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`@deviltea/eslint-config` is a published npm package that wraps [`@antfu/eslint-config`](https://github.com/antfu/eslint-config) (v7) with personal customizations: tab indentation, stricter chaining/newline stylistic rules, `no-lonely-if` for JS/TS, and a set of Vue SFC conventions (script-setup + composition API, type-based `defineProps`/`defineEmits`, PascalCase components). Exported as a single ESM factory function with the same signature as `antfu()`.
+`@deviltea/eslint-config` is a published npm package that wraps [`@antfu/eslint-config`](https://github.com/antfu/eslint-config) (v9) with personal customizations: tab indentation, stricter chaining/newline stylistic rules, `no-lonely-if` for JS/TS, and a set of Vue SFC conventions (script-setup + composition API, type-based `defineProps`/`defineEmits`, PascalCase components). Exported as a single ESM factory function with the same signature as `antfu()`.
 
 **Repository structure:**
 ```
@@ -19,7 +19,7 @@ pnpm-workspace.yaml # pnpm supply-chain security settings only (single-package r
 # Install dependencies
 pnpm install
 
-# Build (tsdown -> dist/, ESM + dts, runs publint)
+# Build (tsdown -> dist/, ESM + dts, runs publint; options live in tsdown.config.ts)
 pnpm build
 
 # Lint and fix (requires a prior build — see Gotchas)
