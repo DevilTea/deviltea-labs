@@ -1,7 +1,8 @@
 name: Release
 
 permissions:
-  contents: write
+  id-token: write # npm trusted publishing (OIDC)
+  contents: write # bumpp pushes the version commit + tag; changelogithub creates the GitHub release
 
 on:
   workflow_dispatch:
@@ -33,15 +34,22 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      - run: |
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: validate
+        run: pnpm build && pnpm lint
+
+      - name: bump version
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          npx bumpp ${{ github.event.inputs.bump_type }} -y
+          pnpm exec bumpp ${{ github.event.inputs.bump_type }} -y
 
-      - run: pnpm install --frozen-lockfile && pnpm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: publish (npm trusted publishing)
+        run: pnpm publish
 
-      - run: npx changelogithub
+      - name: generate release notes
+        run: npx changelogithub
         env:
-          GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

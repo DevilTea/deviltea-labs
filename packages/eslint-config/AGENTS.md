@@ -40,8 +40,8 @@ pnpm release
 
 ## Release
 
-- Local: `pnpm release` runs `bumpp` then `pnpm publish`; `prepublishOnly` builds automatically
-- CI: `.github/workflows/release.yml` via manual `workflow_dispatch` with a `bump_type` input (patch/minor/major) — runs `bumpp -y`, publishes with `NPM_TOKEN`, then `changelogithub` generates GitHub release notes
+- Releases run in CI: trigger the `Release` workflow (workflow_dispatch) with a `bump_type` (patch/minor/major). It validates (`pnpm build && pnpm lint`), bumps the version with `bumpp` (pushes the release commit + `v*` tag), publishes to npm via trusted publishing (OIDC — no token secret), then generates GitHub release notes with `changelogithub`.
+- The local `pnpm release` script bypasses CI validation and produces no GitHub release notes — prefer the workflow.
 
 ## Gotchas
 
