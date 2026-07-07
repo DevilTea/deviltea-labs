@@ -6,6 +6,10 @@
 	"description": "",
 	"author": "DevilTea <ch19980814@gmail.com> (https://github.com/DevilTea/)",
 	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/DevilTea/eslint-config.git"
+	},
 	"exports": {
 		".": {
 			"import": {
