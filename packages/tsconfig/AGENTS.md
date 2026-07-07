@@ -31,8 +31,9 @@ pnpm lint
 
 ## Release
 
-- `pnpm release` — runs `bumpp` (version bump + git tag + push) then `pnpm publish`
-- No release CI workflow; the only workflow is a weekly `security-audit.yml` running `pnpm audit --audit-level=moderate`
+- Releases run in CI: trigger the `Release` workflow (workflow_dispatch) with a `bump_type` (patch/minor/major). It validates (`pnpm lint`), bumps the version with `bumpp` (pushes the release commit + `v*` tag), publishes to npm via trusted publishing (OIDC — no token secret), then generates GitHub release notes with `changelogithub`.
+- The local `pnpm release` script bypasses CI validation and produces no GitHub release notes — prefer the workflow.
+- A weekly `security-audit.yml` workflow runs `pnpm audit --audit-level=moderate`
 
 ## Gotchas
 
