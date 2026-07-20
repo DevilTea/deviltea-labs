@@ -28,12 +28,16 @@
 	},
 	"scripts": {
 		"build": "tsdown",
-		"check": "pnpm test && pnpm lint",
+		"check": "pnpm test && pnpm test:package && pnpm lint",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"prepublishOnly": "pnpm build",
 		"release": "bumpp && pnpm publish",
-		"test": "pnpm build && node --test"
+		"test": "pnpm build && node --test test/index.test.mjs",
+		"test:package": "pnpm build && node test/package-smoke.mjs"
+	},
+	"peerDependencies": {
+		"eslint": "^10.4.0"
 	},
 	"dependencies": {
 		"@antfu/eslint-config": "^9.1.0"

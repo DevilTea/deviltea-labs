@@ -7,11 +7,11 @@
 **Repository structure:**
 ```
 src/index.ts        # Entire implementation: factory wrapping antfu() with option overrides
-test/               # Node test runner coverage for factory option forwarding and override precedence
+test/               # Wrapper unit tests and packed-package consumer smoke tests
 dist/               # tsdown output (index.mjs + index.d.mts) — the published artifact
 eslint.config.js    # Self-lints using ./dist/index.mjs (dogfooding)
 pnpm-workspace.yaml # pnpm supply-chain security settings only (single-package repo)
-.github/workflows/  # ci.yml (build+test+lint), release.yml (manual dispatch), security-audit.yml (weekly pnpm audit)
+.github/workflows/  # ci.yml (unit/lint + ESLint compatibility matrix), release.yml, security-audit.yml
 ```
 
 ## Setup Commands
@@ -23,10 +23,13 @@ pnpm install
 # Build (tsdown -> dist/, ESM + dts, runs publint; options live in tsdown.config.ts)
 pnpm build
 
-# Test (builds first, then runs the Node.js test runner)
+# Unit tests for wrapper behavior (builds first)
 pnpm test
 
-# Run the same build, test, and lint validation used by CI
+# Pack and install the package into a temporary consumer, then verify runtime, types, and JS/TS/Vue lint
+pnpm test:package
+
+# Run the complete local validation suite
 pnpm check
 
 # Lint and fix (requires a prior build — see Gotchas)
@@ -47,10 +50,12 @@ pnpm release
 
 ## Testing
 
-- Tests use the built-in Node.js test runner and require Node >= 24.
-- Tests intercept the external `@antfu/eslint-config` import and assert the exact options passed by the wrapper.
-- Keep tests focused on this package's contract: default rules, nested option preservation, override precedence, booleans, and user config forwarding.
+- Unit tests use the built-in Node.js test runner and require Node >= 24.
+- Unit tests intercept the external `@antfu/eslint-config` import and assert the exact options passed by the wrapper.
+- Keep unit tests focused on this package's contract: default rules, nested option preservation, override precedence, booleans, and user config forwarding.
 - Do not snapshot the full resolved upstream ESLint config; that would make routine upstream upgrades unnecessarily brittle.
+- `test/package-smoke.mjs` packs the publishable tarball, installs it into a temporary consumer with strict peer dependency checks, and validates runtime import, generated declarations, and JS/TS/Vue lint behavior.
+- CI runs the package smoke test against ESLint 10.4.0, the minimum supported version imposed by the current dependency graph, and the latest compatible ESLint 10 release. Set `ESLINT_VERSION` to reproduce a specific matrix entry locally.
 
 ## Release
 
