@@ -15,9 +15,15 @@
 		"typescript"
 	],
 	"exports": {
-		"./base": "./tsconfig.base.json",
+		"./strict": "./tsconfig.strict.json",
+		"./neutral": "./tsconfig.neutral.json",
+		"./browser": "./tsconfig.browser.json",
+		"./node-bundler": "./tsconfig.node-bundler.json",
 		"./node": "./tsconfig.node.json",
-		"./dom": "./tsconfig.dom.json"
+		"./tooling": "./tsconfig.tooling.json",
+		"./base": "./tsconfig.base.json",
+		"./dom": "./tsconfig.dom.json",
+		"./legacy-node": "./tsconfig.legacy-node.json"
 	},
 	"engines": {
 		"node": ">=24"

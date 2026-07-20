@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
@@ -10,7 +10,11 @@ const typescriptVersion = readArgument('--typescript') ?? '6.0.3'
 const typescriptMajor = Number.parseInt(typescriptVersion, 10)
 const workspace = await mkdtemp(join(tmpdir(), 'deviltea-tsconfig-contracts-'))
 
-const fixtures = [
+const nodeTypes = {
+	'@types/node': '22.20.0',
+}
+
+const legacyFixtures = [
 	{
 		name: 'base',
 		checks: [
@@ -39,23 +43,167 @@ const fixtures = [
 	},
 	{
 		name: 'node',
-		dependencies: {
-			'@types/node': '22.20.0',
-		},
+		dependencies: nodeTypes,
 		checks: [['tsconfig.json', true]],
 		assertConfig(config) {
-			assert(config.compilerOptions.types.includes('node'), 'node preset must include Node types')
-			assertEqual(config.compilerOptions.moduleResolution, 'bundler', 'legacy node moduleResolution')
+			assert(config.compilerOptions.types.includes('node'), 'legacy Node preset must include Node types')
+			assertEqual(config.compilerOptions.moduleResolution, 'bundler', 'legacy Node moduleResolution')
 		},
 	},
 	{
 		name: 'ambient-default',
-		dependencies: {
-			'@types/node': '22.20.0',
-		},
+		dependencies: nodeTypes,
 		checks: [['tsconfig.json', typescriptMajor < 6]],
 	},
 ]
+
+const modernFixtures = [
+	{
+		name: 'strict',
+		files: {
+			'tsconfig.json': createConfig('@deviltea/tsconfig/strict', ['positive.ts'], {
+				lib: ['ES2022'],
+				module: 'Preserve',
+				moduleResolution: 'Bundler',
+				noEmit: true,
+				target: 'ES2022',
+				types: [],
+			}),
+			'tsconfig.failure.json': createConfig('./tsconfig.json', ['strict-failure.ts']),
+			'positive.ts': source('export const value: number = 1'),
+			'strict-failure.ts': source(
+				'export function maybeValue(flag: boolean): number {',
+				'\tif (flag)',
+				'\t\treturn 1',
+				'}',
+			),
+		},
+		checks: [
+			['tsconfig.json', true],
+			['tsconfig.failure.json', false],
+		],
+		assertConfig(config) {
+			assertEqual(config.compilerOptions.strict, true, 'strict policy')
+			assertEqual(config.compilerOptions.noUncheckedSideEffectImports, true, 'side-effect import checking')
+		},
+	},
+	{
+		name: 'neutral',
+		dependencies: nodeTypes,
+		files: {
+			'tsconfig.json': createConfig('@deviltea/tsconfig/neutral', ['positive.ts']),
+			'tsconfig.dom.json': createConfig('./tsconfig.json', ['dom-global.ts']),
+			'tsconfig.node.json': createConfig('./tsconfig.json', ['node-global.ts']),
+			'positive.ts': source('export const values = new Map<string, number>([[\'one\', 1]])'),
+			'dom-global.ts': source('export const title = document.title'),
+			'node-global.ts': source('export const platform = process.platform'),
+		},
+		checks: [
+			['tsconfig.json', true],
+			['tsconfig.dom.json', false],
+			['tsconfig.node.json', false],
+		],
+		assertConfig(config) {
+			assertEqual(config.compilerOptions.module, 'preserve', 'neutral module')
+			assertEqual(config.compilerOptions.moduleResolution, 'bundler', 'neutral moduleResolution')
+			assertEqual(config.compilerOptions.target, 'es2022', 'neutral target')
+			assertEqual(config.compilerOptions.types.length, 0, 'neutral ambient types')
+		},
+	},
+	{
+		name: 'browser',
+		dependencies: nodeTypes,
+		files: {
+			'tsconfig.json': createConfig('@deviltea/tsconfig/browser', ['positive.ts']),
+			'tsconfig.node.json': createConfig('./tsconfig.json', ['node-global.ts']),
+			'positive.ts': source(
+				'document.title = \'contract\'',
+				'export const href = window.location.href',
+			),
+			'node-global.ts': source('export const platform = process.platform'),
+		},
+		checks: [
+			['tsconfig.json', true],
+			['tsconfig.node.json', false],
+		],
+		assertConfig(config) {
+			assert(config.compilerOptions.lib.some(value => value.includes('dom')), 'browser preset must include DOM')
+			assertEqual(config.compilerOptions.types.length, 0, 'browser ambient types')
+		},
+	},
+	{
+		name: 'node-bundler',
+		dependencies: nodeTypes,
+		files: {
+			'tsconfig.json': createConfig('@deviltea/tsconfig/node-bundler', ['main.ts', 'sibling.ts']),
+			'main.ts': source(
+				'import process from \'node:process\'',
+				'import { value } from \'./sibling\'',
+				'export const result = process.platform + \':\' + value',
+			),
+			'sibling.ts': source('export const value = 1'),
+		},
+		checks: [['tsconfig.json', true]],
+		assertConfig(config) {
+			assertEqual(config.compilerOptions.module, 'preserve', 'node-bundler module')
+			assertEqual(config.compilerOptions.moduleResolution, 'bundler', 'node-bundler moduleResolution')
+		},
+	},
+	{
+		name: 'node-native',
+		dependencies: nodeTypes,
+		files: {
+			'tsconfig.json': createConfig('@deviltea/tsconfig/node', ['positive.ts', 'sibling.ts']),
+			'tsconfig.extensionless.json': createConfig('./tsconfig.json', ['extensionless.ts', 'sibling.ts']),
+			'positive.ts': source(
+				'import process from \'node:process\'',
+				'import { value } from \'./sibling.js\'',
+				'export const result = process.platform + \':\' + value',
+			),
+			'extensionless.ts': source(
+				'import { value } from \'./sibling\'',
+				'export { value }',
+			),
+			'sibling.ts': source('export const value = 1'),
+		},
+		checks: [
+			['tsconfig.json', true],
+			['tsconfig.extensionless.json', false],
+		],
+		assertConfig(config) {
+			assertEqual(config.compilerOptions.module, 'nodenext', 'native Node module')
+			assertEqual(config.compilerOptions.moduleResolution, 'nodenext', 'native Node moduleResolution')
+		},
+	},
+	{
+		name: 'tooling',
+		dependencies: nodeTypes,
+		files: {
+			'tsconfig.json': createConfig('@deviltea/tsconfig/tooling', ['tooling.js']),
+			'tooling.js': source(
+				'import process from \'node:process\'',
+				'export const platform = process.platform',
+			),
+		},
+		checks: [['tsconfig.json', true]],
+		assertConfig(config) {
+			assertEqual(config.compilerOptions.checkJs, true, 'tooling checkJs')
+			assertEqual(config.compilerOptions.target, 'es2024', 'tooling target')
+		},
+	},
+	{
+		name: 'internal-export',
+		files: {
+			'tsconfig.json': createConfig('@deviltea/tsconfig/_bundler', ['positive.ts']),
+			'positive.ts': source('export const value = 1'),
+		},
+		checks: [['tsconfig.json', false]],
+	},
+]
+
+const fixtures = typescriptMajor >= 6
+	? [...legacyFixtures, ...modernFixtures]
+	: legacyFixtures
 
 try {
 	const packResult = run('npm', ['pack', '--json', '--pack-destination', workspace], root)
@@ -73,7 +221,18 @@ finally {
 
 async function runFixture(fixture, tarball) {
 	const fixtureRoot = join(workspace, fixture.name)
-	await cp(join(root, 'tests', 'fixtures', fixture.name), fixtureRoot, { recursive: true })
+	if (fixture.files) {
+		await mkdir(fixtureRoot, { recursive: true })
+		for (const [path, content] of Object.entries(fixture.files)) {
+			const filePath = join(fixtureRoot, path)
+			await mkdir(dirname(filePath), { recursive: true })
+			await writeFile(filePath, content)
+		}
+	}
+	else {
+		await cp(join(root, 'tests', 'fixtures', fixture.name), fixtureRoot, { recursive: true })
+	}
+
 	await writeFile(
 		join(fixtureRoot, 'package.json'),
 		`${JSON.stringify({
@@ -112,6 +271,21 @@ async function runFixture(fixture, tarball) {
 		)
 		fixture.assertConfig(JSON.parse(result.stdout))
 	}
+}
+
+function createConfig(extendsConfig, files, compilerOptions = {}) {
+	return `${JSON.stringify({
+		extends: extendsConfig,
+		compilerOptions: {
+			noEmit: true,
+			...compilerOptions,
+		},
+		files,
+	}, null, '\t')}\n`
+}
+
+function source(...lines) {
+	return `${lines.join('\n')}\n`
 }
 
 function readArgument(name) {

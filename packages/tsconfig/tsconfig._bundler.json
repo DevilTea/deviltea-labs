@@ -2,17 +2,11 @@
 	"$schema": "https://json.schemastore.org/tsconfig",
 	"extends": "./tsconfig.strict.json",
 	"compilerOptions": {
-		"target": "ES2022",
-		"lib": [
-			"ES2024"
-		],
 		"moduleDetection": "force",
-		"module": "NodeNext",
-		"moduleResolution": "NodeNext",
+		"module": "Preserve",
+		"moduleResolution": "Bundler",
 		"resolveJsonModule": true,
-		"types": [
-			"node"
-		],
+		"isolatedModules": true,
 		"verbatimModuleSyntax": true
 	}
 }
