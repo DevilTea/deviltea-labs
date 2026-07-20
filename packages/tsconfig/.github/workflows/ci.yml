@@ -1,0 +1,85 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: setup node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: lint
+        run: pnpm exec eslint . --format json --output-file lint-report.json
+
+      - name: upload lint diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lint-report
+          path: lint-report.json
+          retention-days: 7
+
+      - name: inspect package contents
+        run: npm pack --dry-run
+
+  contracts:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        typescript:
+          - 5.9.3
+          - 6.0.3
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: setup pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: setup node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: test TypeScript ${{ matrix.typescript }} contracts
+        run: |
+          set +e
+          node ./scripts/test-contracts.mjs --typescript ${{ matrix.typescript }} > contract-report.log 2>&1
+          status=$?
+          cat contract-report.log
+          exit $status
+
+      - name: upload contract diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: contract-report-typescript-${{ matrix.typescript }}
+          path: contract-report.log
+          retention-days: 7

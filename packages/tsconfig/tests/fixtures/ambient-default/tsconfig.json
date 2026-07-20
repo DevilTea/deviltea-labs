@@ -1,0 +1,9 @@
+{
+	"extends": "@deviltea/tsconfig/base",
+	"compilerOptions": {
+		"noEmit": true
+	},
+	"files": [
+		"node-global.ts"
+	]
+}

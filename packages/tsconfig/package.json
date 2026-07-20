@@ -23,7 +23,12 @@
 		"node": ">=24"
 	},
 	"scripts": {
-		"lint": "eslint . --fix",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"test:contracts": "node ./scripts/test-contracts.mjs",
+		"test:contracts:ts5": "node ./scripts/test-contracts.mjs --typescript 5.9.3",
+		"test:contracts:ts6": "node ./scripts/test-contracts.mjs --typescript 6.0.3",
+		"validate": "pnpm lint && pnpm test:contracts:ts5 && pnpm test:contracts:ts6",
 		"release": "bumpp && pnpm publish"
 	},
 	"peerDependencies": {
