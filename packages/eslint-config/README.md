@@ -2,31 +2,64 @@
 
 [![npm](https://img.shields.io/npm/v/@deviltea/eslint-config)](https://npmjs.com/package/@deviltea/eslint-config)
 
-Extends from awesome [`@antfu/eslint-config`](https://github.com/antfu/eslint-config), with some personal customizations.
+An opinionated ESLint flat config for JavaScript, TypeScript, and Vue, built on [`@antfu/eslint-config`](https://github.com/antfu/eslint-config).
 
-- Preferred tabs instead of spaces.
-	> According to the [discussion](https://github.com/microsoft/vscode/issues/156304#issue-1318328510), I prefer to use tabs instead of spaces.
+This package keeps Antfu's composable factory API while applying DevilTea's project conventions. It is intentionally a personal, strongly opinionated config rather than a general-purpose preset.
 
-The way to customize the rules is the same as [`@antfu/eslint-config`](https://github.com/antfu/eslint-config/tree/main#customization).
+## Requirements
+
+| Runtime | Supported version |
+| --- | --- |
+| Node.js | `>=24` |
+| ESLint | `^10.4.0` |
+| Configuration format | ESLint flat config |
+
+TypeScript and Vue support are enabled by default. They can be disabled explicitly when a project does not need them.
+
+## Opinionated defaults
+
+The package inherits all defaults from `@antfu/eslint-config@9.1.0` and adds the following rules.
+
+### Stylistic
+
+- Tabs for indentation.
+- Require a newline for chained calls deeper than one level.
+- Disable `antfu/consistent-chaining` in favor of `style/newline-per-chained-call`.
+
+### JavaScript and TypeScript
+
+- Enable `no-lonely-if`.
+
+### Vue
+
+- Use non-hyphenated attributes and event names.
+- Limit attributes to one per line.
+- Require Composition API or `<script setup>` component style.
+- Require type-based `defineProps` and `defineEmits` declarations.
+- Require the conventional macro variable names `props`, `emit`, `slots`, and `attrs`.
+- Prefer `defineOptions` and validate its usage.
+- Disallow unsafe `_blank` template targets.
+- Require PascalCase component names in templates, including unregistered components.
+
+User-provided nested options are preserved, and user rule overrides take precedence over these defaults.
+
+## Installation
+
+```bash
+pnpm add -D eslint@^10.4.0 @deviltea/eslint-config
+```
 
 ## Usage
 
-### Install
-
-```bash
-pnpm add -D eslint @deviltea/eslint-config
-```
+Create `eslint.config.mjs`:
 
 ```mjs
-// eslint.config.mjs
 import deviltea from '@deviltea/eslint-config'
 
 export default deviltea()
 ```
 
-### Add script for package.json
-
-For example:
+Add scripts to `package.json`:
 
 ```json
 {
@@ -37,67 +70,150 @@ For example:
 }
 ```
 
-## VS Code support (auto fix)
+## Customization
 
-Install [VS Code ESLint extension](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint)
+The factory accepts the same option shape and returns the same composer type as [`@antfu/eslint-config`](https://github.com/antfu/eslint-config#customization).
 
-Add the following settings to your `.vscode/settings.json`:
+### Override rules
+
+Pass additional flat config objects after the options object:
+
+```mjs
+import deviltea from '@deviltea/eslint-config'
+
+export default deviltea(
+	{},
+	{
+		rules: {
+			'no-console': 'warn',
+		},
+	},
+)
+```
+
+Nested overrides take precedence over this package's defaults:
+
+```mjs
+import deviltea from '@deviltea/eslint-config'
+
+export default deviltea({
+	typescript: {
+		overrides: {
+			'no-lonely-if': 'off',
+		},
+	},
+	vue: {
+		overrides: {
+			'vue/attribute-hyphenation': 'off',
+		},
+	},
+})
+```
+
+### Type-aware TypeScript rules
+
+Upstream TypeScript options are preserved while this package merges its default rule overrides:
+
+```mjs
+import deviltea from '@deviltea/eslint-config'
+
+export default deviltea({
+	typescript: {
+		tsconfigPath: './tsconfig.json',
+		overridesTypeAware: {
+			'ts/no-floating-promises': 'error',
+		},
+	},
+})
+```
+
+### Vue options
+
+Upstream Vue options are preserved while this package merges its default rule overrides:
+
+```mjs
+import deviltea from '@deviltea/eslint-config'
+
+export default deviltea({
+	vue: {
+		a11y: true,
+		vueVersion: 3,
+	},
+})
+```
+
+### Disable TypeScript or Vue
+
+```mjs
+import deviltea from '@deviltea/eslint-config'
+
+export default deviltea({
+	typescript: false,
+	vue: false,
+})
+```
+
+### Composer API
+
+The returned config supports the upstream flat-config composer methods:
+
+```mjs
+import deviltea from '@deviltea/eslint-config'
+
+export default deviltea()
+	.prepend({
+		ignores: ['coverage/**'],
+	})
+```
+
+## VS Code
+
+Install the [VS Code ESLint extension](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint), then add the following to `.vscode/settings.json`:
 
 ```jsonc
 {
-	// Disable the default formatter, use eslint instead
+	// Let ESLint own formatting and fixes.
 	"prettier.enable": false,
 	"editor.formatOnSave": false,
-
-	// Auto fix
 	"editor.codeActionsOnSave": {
 		"source.fixAll.eslint": "explicit",
 		"source.organizeImports": "never"
 	},
 
-	// Silent the stylistic rules in you IDE, but still auto fix them
+	// Hide fixable stylistic diagnostics in the editor while preserving save fixes.
 	"eslint.rules.customizations": [
-		{ "rule": "style/*", "severity": "off" },
-		{ "rule": "format/*", "severity": "off" },
-		{ "rule": "*-indent", "severity": "off" },
-		{ "rule": "*-spacing", "severity": "off" },
-		{ "rule": "*-spaces", "severity": "off" },
-		{ "rule": "*-order", "severity": "off" },
-		{ "rule": "*-dangle", "severity": "off" },
-		{ "rule": "*-newline", "severity": "off" },
-		{ "rule": "*quotes", "severity": "off" },
-		{ "rule": "*semi", "severity": "off" }
+		{ "rule": "style/*", "severity": "off", "fixable": true },
+		{ "rule": "format/*", "severity": "off", "fixable": true },
+		{ "rule": "*-indent", "severity": "off", "fixable": true },
+		{ "rule": "*-spacing", "severity": "off", "fixable": true },
+		{ "rule": "*-spaces", "severity": "off", "fixable": true },
+		{ "rule": "*-order", "severity": "off", "fixable": true },
+		{ "rule": "*-dangle", "severity": "off", "fixable": true },
+		{ "rule": "*-newline", "severity": "off", "fixable": true },
+		{ "rule": "*quotes", "severity": "off", "fixable": true },
+		{ "rule": "*semi", "severity": "off", "fixable": true }
 	],
 
-	// Enable eslint for all supported languages
+	// Extend this list with other languages used by the project.
 	"eslint.validate": [
 		"javascript",
 		"javascriptreact",
 		"typescript",
 		"typescriptreact",
 		"vue",
-		"html",
-		"markdown",
 		"json",
 		"jsonc",
 		"yaml",
-		"toml",
-		"xml",
-		"gql",
-		"graphql",
-		"astro",
-		"css",
-		"less",
-		"scss",
-		"pcss",
-		"postcss"
+		"markdown"
 	]
 }
 ```
 
-### Lint Staged
+The `fixable` filter is important: it suppresses only diagnostics that ESLint can automatically fix, without hiding non-fixable correctness rules.
 
-If you want to apply lint and auto-fix before every commit, you can add the following to your `package.json`:
+## Lint staged files
+
+To apply fixes before each commit:
 
 ```json
 {
@@ -110,11 +226,13 @@ If you want to apply lint and auto-fix before every commit, you can add the foll
 }
 ```
 
-and then
-
 ```bash
 pnpm add -D lint-staged simple-git-hooks
-
-// to active the hooks
 pnpm exec simple-git-hooks
 ```
+
+## Compatibility and upgrades
+
+`@antfu/eslint-config` is pinned exactly so reinstalling the same `@deviltea/eslint-config` version cannot silently change lint behavior. Upstream upgrades are reviewed and released deliberately.
+
+Changes to the supported Node.js or ESLint range, enabled config families, or existing opinionated rule behavior are treated as breaking changes and released as a new major version.
