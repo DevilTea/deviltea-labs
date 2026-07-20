@@ -1,7 +1,7 @@
 {
 	"name": "@deviltea/eslint-config",
 	"type": "module",
-	"version": "8.0.2",
+	"version": "9.0.0",
 	"packageManager": "pnpm@10.34.4",
 	"description": "DevilTea's opinionated ESLint flat config for JavaScript, TypeScript, and Vue.",
 	"author": "DevilTea <ch19980814@gmail.com> (https://github.com/DevilTea/)",
