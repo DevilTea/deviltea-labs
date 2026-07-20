@@ -21,6 +21,7 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => antfu(
 		javascript: typeof options?.javascript === 'boolean'
 			? options.javascript
 			: {
+					...options?.javascript,
 					overrides: {
 						'no-lonely-if': 'error',
 						...options?.javascript?.overrides,
@@ -30,6 +31,7 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => antfu(
 		typescript: typeof options?.typescript === 'boolean'
 			? options.typescript
 			: {
+					...options?.typescript,
 					overrides: {
 						'no-lonely-if': 'error',
 						...options?.typescript?.overrides,
@@ -39,6 +41,7 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => antfu(
 		vue: typeof options?.vue === 'boolean'
 			? options.vue
 			: {
+					...options?.vue,
 					overrides: {
 						'vue/attribute-hyphenation': ['error', 'never'],
 						'vue/v-on-event-hyphenation': ['error', 'never'],
