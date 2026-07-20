@@ -2,7 +2,7 @@ name: Release
 
 permissions:
   id-token: write # npm trusted publishing (OIDC)
-  contents: write # bumpp pushes the version commit + tag; changelogithub creates the GitHub release
+  contents: write # bumpp pushes the version commit + tag; gh creates the GitHub release
 
 on:
   workflow_dispatch:
@@ -16,6 +16,10 @@ on:
           - patch
           - minor
           - major
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -38,18 +42,21 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: validate
-        run: pnpm build && pnpm lint
+        run: pnpm check
 
       - name: bump version
+        id: bump
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           pnpm exec bumpp ${{ github.event.inputs.bump_type }} -y
+          VERSION=$(node -e "process.stdout.write(require('./package.json').version)")
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: publish (npm trusted publishing)
         run: pnpm publish
 
       - name: generate release notes
-        run: npx changelogithub
+        run: gh release create "${{ steps.bump.outputs.tag }}" --generate-notes --verify-tag --fail-on-no-commits
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

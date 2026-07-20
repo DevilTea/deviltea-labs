@@ -36,7 +36,7 @@ pnpm check
 pnpm lint
 pnpm lint:fix
 
-# Version bump + publish (local path; CI path exists too — see Release)
+# Validate, bump, and publish locally (the CI workflow remains preferred)
 pnpm release
 ```
 
@@ -47,6 +47,12 @@ pnpm release
 - ESLint flat config; the repo lints itself with its own built output
 - The whole package lives in `src/index.ts` — keep it single-file; `@antfu/eslint-config` is the only runtime dependency
 - ESM-only package (`type: module`, `import` export condition only)
+
+## Dependency Policy
+
+- Pin `@antfu/eslint-config` exactly. A shareable config must not change lint behavior when consumers reinstall the same `@deviltea/eslint-config` version.
+- Upgrade the upstream config through a dedicated PR with unit, packed-consumer, and effective-rule review.
+- Avoid adding release-only npm tools when the GitHub-hosted runner already provides an equivalent trusted platform command. The release workflow uses the preinstalled GitHub CLI for release notes.
 
 ## Testing
 
@@ -59,8 +65,9 @@ pnpm release
 
 ## Release
 
-- Releases run in CI: trigger the `Release` workflow (workflow_dispatch) with a `bump_type` (patch/minor/major). It validates (`pnpm build && pnpm lint`), bumps the version with `bumpp` (pushes the release commit + `v*` tag), publishes to npm via trusted publishing (OIDC — no token secret), then generates GitHub release notes with `changelogithub`.
-- The local `pnpm release` script bypasses CI validation and produces no GitHub release notes — prefer the workflow.
+- Trigger the `Release` workflow (`workflow_dispatch`) with a `bump_type` (`patch`, `minor`, or `major`).
+- The workflow serializes releases, installs the frozen lockfile, runs the complete `pnpm check` suite, bumps and tags with `bumpp`, publishes through npm trusted publishing (OIDC), and creates GitHub-generated release notes for the verified remote tag.
+- The local `pnpm release` script also runs `pnpm check` before bumping and publishing, but it does not create GitHub release notes; prefer the workflow for official releases.
 
 ## Gotchas
 

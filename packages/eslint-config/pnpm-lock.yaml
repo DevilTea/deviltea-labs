@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@antfu/eslint-config':
-        specifier: ^9.1.0
+        specifier: 9.1.0
         version: 9.1.0(@typescript-eslint/rule-tester@8.62.1(eslint@10.6.0(jiti@2.7.0))(typescript@5.9.3))(@typescript-eslint/typescript-estree@8.62.1(typescript@5.9.3))(@typescript-eslint/utils@8.62.1(eslint@10.6.0(jiti@2.7.0))(typescript@5.9.3))(@vue/compiler-sfc@3.5.39)(eslint@10.6.0(jiti@2.7.0))(typescript@5.9.3)
     devDependencies:
       bumpp:
