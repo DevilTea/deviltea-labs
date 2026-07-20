@@ -1,9 +1,0 @@
-{
-	"extends": "@deviltea/tsconfig/legacy-node",
-	"compilerOptions": {
-		"noEmit": true
-	},
-	"files": [
-		"positive.ts"
-	]
-}

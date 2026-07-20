@@ -3,16 +3,24 @@
 	"type": "module",
 	"version": "0.0.10",
 	"packageManager": "pnpm@10.34.4",
-	"description": "My preferred tsconfig.",
+	"description": "Strict TypeScript 6 presets for platform-neutral, browser, Node.js, and repository tooling projects.",
 	"author": "DevilTea <ch19980814@gmail.com>",
 	"license": "MIT",
+	"homepage": "https://github.com/DevilTea/tsconfig#readme",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/DevilTea/tsconfig.git"
 	},
+	"bugs": {
+		"url": "https://github.com/DevilTea/tsconfig/issues"
+	},
 	"keywords": [
 		"tsconfig",
-		"typescript"
+		"typescript",
+		"strict",
+		"browser",
+		"node",
+		"bundler"
 	],
 	"exports": {
 		"./strict": "./tsconfig.strict.json",
@@ -20,26 +28,22 @@
 		"./browser": "./tsconfig.browser.json",
 		"./node-bundler": "./tsconfig.node-bundler.json",
 		"./node": "./tsconfig.node.json",
-		"./tooling": "./tsconfig.tooling.json",
-		"./base": "./tsconfig.base.json",
-		"./dom": "./tsconfig.dom.json",
-		"./legacy-node": "./tsconfig.legacy-node.json"
+		"./tooling": "./tsconfig.tooling.json"
 	},
-	"engines": {
-		"node": ">=24"
-	},
+	"files": [
+		"docs",
+		"tsconfig.*.json"
+	],
 	"scripts": {
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
-		"test:contracts": "node ./scripts/test-contracts.mjs",
-		"test:contracts:ts5": "node ./scripts/test-contracts.mjs --typescript 5.9.3",
-		"test:contracts:ts6": "node ./scripts/test-contracts.mjs --typescript 6.0.3",
-		"validate": "pnpm lint && pnpm test:contracts:ts5 && pnpm test:contracts:ts6",
+		"test:contracts": "node ./scripts/test-contracts.mjs --typescript 6.0.3",
+		"validate": "pnpm lint && pnpm test:contracts",
 		"release": "bumpp && pnpm publish"
 	},
 	"peerDependencies": {
 		"@types/node": "*",
-		"typescript": ">=5.9"
+		"typescript": ">=6.0.0 <7.0.0"
 	},
 	"peerDependenciesMeta": {
 		"@types/node": {

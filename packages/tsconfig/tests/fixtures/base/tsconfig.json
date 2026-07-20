@@ -1,9 +1,0 @@
-{
-	"extends": "@deviltea/tsconfig/base",
-	"compilerOptions": {
-		"noEmit": true
-	},
-	"files": [
-		"positive.ts"
-	]
-}

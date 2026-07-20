@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
@@ -7,57 +7,13 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const typescriptVersion = readArgument('--typescript') ?? '6.0.3'
-const typescriptMajor = Number.parseInt(typescriptVersion, 10)
 const workspace = await mkdtemp(join(tmpdir(), 'deviltea-tsconfig-contracts-'))
 
 const nodeTypes = {
 	'@types/node': '22.20.0',
 }
 
-const legacyFixtures = [
-	{
-		name: 'base',
-		checks: [
-			['tsconfig.json', true],
-			['tsconfig.dom-global.json', true],
-			['tsconfig.strict-failure.json', false],
-		],
-		assertConfig(config) {
-			assertEqual(config.compilerOptions.module, 'esnext', 'base module')
-			assertEqual(config.compilerOptions.moduleResolution, 'bundler', 'base moduleResolution')
-			assertEqual(config.compilerOptions.strict, true, 'base strict')
-		},
-	},
-	{
-		name: 'dom',
-		checks: [
-			['tsconfig.json', true],
-			['tsconfig.node-global.json', false],
-		],
-		assertConfig(config) {
-			assert(
-				config.compilerOptions.lib.some(value => value.includes('dom')),
-				'dom preset must include the DOM library',
-			)
-		},
-	},
-	{
-		name: 'node',
-		dependencies: nodeTypes,
-		checks: [['tsconfig.json', true]],
-		assertConfig(config) {
-			assert(config.compilerOptions.types.includes('node'), 'legacy Node preset must include Node types')
-			assertEqual(config.compilerOptions.moduleResolution, 'bundler', 'legacy Node moduleResolution')
-		},
-	},
-	{
-		name: 'ambient-default',
-		dependencies: nodeTypes,
-		checks: [['tsconfig.json', typescriptMajor < 6]],
-	},
-]
-
-const modernFixtures = [
+const fixtures = [
 	{
 		name: 'strict',
 		files: {
@@ -201,10 +157,6 @@ const modernFixtures = [
 	},
 ]
 
-const fixtures = typescriptMajor >= 6
-	? [...legacyFixtures, ...modernFixtures]
-	: legacyFixtures
-
 try {
 	const packResult = run('npm', ['pack', '--json', '--pack-destination', workspace], root)
 	const [{ filename }] = JSON.parse(packResult.stdout)
@@ -221,16 +173,11 @@ finally {
 
 async function runFixture(fixture, tarball) {
 	const fixtureRoot = join(workspace, fixture.name)
-	if (fixture.files) {
-		await mkdir(fixtureRoot, { recursive: true })
-		for (const [path, content] of Object.entries(fixture.files)) {
-			const filePath = join(fixtureRoot, path)
-			await mkdir(dirname(filePath), { recursive: true })
-			await writeFile(filePath, content)
-		}
-	}
-	else {
-		await cp(join(root, 'tests', 'fixtures', fixture.name), fixtureRoot, { recursive: true })
+	await mkdir(fixtureRoot, { recursive: true })
+	for (const [path, content] of Object.entries(fixture.files)) {
+		const filePath = join(fixtureRoot, path)
+		await mkdir(dirname(filePath), { recursive: true })
+		await writeFile(filePath, content)
 	}
 
 	await writeFile(
