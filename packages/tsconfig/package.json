@@ -1,7 +1,7 @@
 {
 	"name": "@deviltea/tsconfig",
 	"type": "module",
-	"version": "0.0.10",
+	"version": "1.0.0",
 	"packageManager": "pnpm@10.34.4",
 	"description": "Strict TypeScript 6 presets for platform-neutral, browser, Node.js, and repository tooling projects.",
 	"author": "DevilTea <ch19980814@gmail.com>",
