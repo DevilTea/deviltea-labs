@@ -1,5 +1,7 @@
 # @deviltea/tiny-state-machine-vue
 
+> ESM-only package.
+
 [![npm version][npm-version-src]][npm-version-href]
 [![npm downloads][npm-downloads-src]][npm-downloads-href]
 [![bundle][bundle-src]][bundle-href]

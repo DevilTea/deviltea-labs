@@ -9,7 +9,7 @@
 src/index.ts          # handleMiddlewares + defineMiddleware (whole runtime)
 src/types.ts          # Middleware type + vue-router RouteMeta augmentation
 test/index.test.ts    # Vitest suite (runtime + type tests)
-build.config.ts       # unbuild config (dual ESM/CJS -> dist/)
+tsdown.config.ts      # tsdown config (ESM + declarations -> dist/)
 vitest.config.ts      # coverage + typecheck enabled on every test run
 tsconfig.*.json       # Split configs: lib / node / test
 pnpm-workspace.yaml   # pnpm supply-chain security settings only
@@ -22,7 +22,7 @@ pnpm-workspace.yaml   # pnpm supply-chain security settings only
 # Install dependencies
 pnpm install
 
-# Build (unbuild -> dist/)
+# Build (tsdown -> dist/)
 pnpm build
 
 # Build in stub mode for local development
@@ -44,7 +44,7 @@ pnpm typecheck
 
 - TypeScript strict mode via `@deviltea/tsconfig`
 - ESLint flat config extending `@deviltea/eslint-config` (single quotes, no semicolons, tabs)
-- Runtime lives in `src/index.ts`, types in `src/types.ts` — keep it dependency-free (peer deps only)
+- Runtime lives in `src/index.ts`, types in `src/types.ts` — keep it dependency-free (peer deps only) and ESM-only
 - `sideEffects: false`; keep exports tree-shakable
 
 ## Testing

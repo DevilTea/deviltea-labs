@@ -32,7 +32,6 @@
 		"simple-git-hooks": "catalog:",
 		"tsx": "catalog:",
 		"typescript": "catalog:",
-		"unbuild": "catalog:",
 		"vite": "catalog:",
 		"vitepress": "catalog:",
 		"vitepress-plugin-group-icons": "catalog:",

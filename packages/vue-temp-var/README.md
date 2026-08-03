@@ -1,5 +1,7 @@
 # vue-temp-var
 
+> ESM-only package.
+
 A Vue component for defining temporary variables in the template with type inference.
 
 > Checkout the discussion of https://github.com/vuejs/rfcs/discussions/505
