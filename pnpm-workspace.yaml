@@ -1,0 +1,22 @@
+packages:
+  - 'packages/*'
+  - 'docs/*'
+
+catalog:
+  '@deviltea/eslint-config': workspace:^
+  '@deviltea/tsconfig': workspace:^
+
+# Supply-chain security baseline retained from the source workspaces.
+minimumReleaseAge: 4320
+minimumReleaseAgeExclude:
+  - '@deviltea/eslint-config'
+  - '@deviltea/tsconfig'
+trustPolicy: no-downgrade
+blockExoticSubdeps: true
+strictDepBuilds: true
+shellEmulator: true
+ignoredBuiltDependencies:
+  - esbuild
+  - simple-git-hooks
+  - unrs-resolver
+onlyBuiltDependencies: []
