@@ -6,7 +6,6 @@
 		"composite": true
 	},
 	"include": [
-		"env.d.ts",
 		"src/**/*.ts",
 		"src/**/*.vue"
 	]

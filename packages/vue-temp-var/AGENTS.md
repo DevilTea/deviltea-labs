@@ -2,17 +2,14 @@
 
 ## Project Overview
 
-`vue-temp-var` is a single-component Vue library for defining temporary variables inside a template with full type inference: `<TempVar v-slot="{ x }" :define="{ x: … }">` passes the `define` prop through a scoped slot, so destructured values keep their types and stay reactive (see vuejs/rfcs#505). Published as dual ESM/CJS with a `vue >=3.3` peer dependency.
+`vue-temp-var` is an ESM-only single-component Vue library for defining temporary variables inside a template with full type inference: `<TempVar v-slot="{ x }" :define="{ x: … }">` passes the `define` prop through a scoped slot, so destructured values keep their types and stay reactive (see vuejs/rfcs#505). It has a `vue >=3.3` peer dependency.
 
 **Repository structure:**
 ```
 src/TempVar.vue       # The entire component (generic script-setup + slot passthrough)
 src/index.ts          # Re-exports the component as default
-vite.config.ts        # vite lib build (es + cjs) + vite-plugin-dts + d.cts copy hook
-tsconfig.lib.json     # Library sources (extends @deviltea/tsconfig/dom)
-tsconfig.node.json    # vite.config.* (extends @deviltea/tsconfig/node)
-pnpm-workspace.yaml   # pnpm supply-chain security settings only (single-package repo)
-.github/workflows/    # release.yml (CI release), security-audit.yml (weekly pnpm audit)
+tsdown.config.ts      # tsdown Vue SFC build (ESM + declarations -> dist/)
+tsconfig.lib.json     # Library sources (extends @deviltea/tsconfig/browser)
 ```
 
 ## Setup Commands
@@ -21,7 +18,7 @@ pnpm-workspace.yaml   # pnpm supply-chain security settings only (single-package
 # Install dependencies
 pnpm install
 
-# Build (runs type-check + vite build in parallel -> dist/)
+# Build (runs type-check + tsdown -> dist/)
 pnpm build
 
 # Rebuild on change during development
@@ -37,7 +34,7 @@ pnpm lint:fix
 
 ## Code Style
 
-- TypeScript strict mode via `@deviltea/tsconfig` (`/dom` for src, `/node` for vite config)
+- TypeScript strict mode via `@deviltea/tsconfig/browser`
 - ESLint flat config extending `@deviltea/eslint-config` (tabs, single quotes, no semicolons)
 - The whole library is `src/TempVar.vue` — keep it a single generic component with zero runtime dependencies (peer `vue` only)
 
@@ -53,7 +50,7 @@ No test suite — validation is `pnpm build` (includes vue-tsc type-check) + `pn
 
 ## Gotchas
 
-- vite-plugin-dts >=5 emits declarations directly into `dist/` (custom `outDir` is no longer supported); the `afterBuild` hook copies `dist/index.d.ts` to `dist/index.d.cts` so the `require` export condition passes publint — keep package.json `exports` paths in sync with this layout
+- tsdown uses `unplugin-vue/rolldown` to compile the Vue SFC and `dts.vue` to emit the ESM declaration entry; keep package.json `exports` paths in sync with its `dist/index.mjs` and `dist/index.d.mts` output
 - `pnpm-workspace.yaml` exists only to hold pnpm supply-chain security settings; `strictDepBuilds` is on (only `esbuild` is in `ignoredBuiltDependencies`) — new deps that need build scripts must be reviewed into the lists
 - `shellEmulator: true` — keep any glob in package.json scripts quoted
 - Node >= 24 required (`engines`)

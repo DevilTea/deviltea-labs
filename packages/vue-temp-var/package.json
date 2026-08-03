@@ -24,11 +24,11 @@
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
-			"import": "./dist/vue-temp-var.js"
+			"import": "./dist/index.js"
 		}
 	},
-	"main": "./dist/vue-temp-var.js",
-	"module": "./dist/vue-temp-var.js",
+	"main": "./dist/index.js",
+	"module": "./dist/index.js",
 	"types": "./dist/index.d.ts",
 	"files": [
 		"dist"
@@ -37,10 +37,8 @@
 		"node": ">=24"
 	},
 	"scripts": {
-		"dev": "vite build --watch",
-		"build": "run-p type-check build-only",
-		"preview": "vite preview",
-		"build-only": "vite build",
+		"dev": "tsdown --watch",
+		"build": "pnpm type-check && tsdown",
 		"type-check": "vue-tsc --noEmit -p tsconfig.lib.json --composite false",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
@@ -54,13 +52,11 @@
 		"@deviltea/eslint-config": "workspace:^",
 		"@deviltea/tsconfig": "workspace:^",
 		"@types/node": "catalog:",
-		"@vitejs/plugin-vue": "catalog:",
 		"bumpp": "catalog:",
 		"eslint": "catalog:",
-		"npm-run-all2": "catalog:",
+		"tsdown": "catalog:",
 		"typescript": "catalog:",
-		"vite": "catalog:",
-		"vite-plugin-dts": "catalog:",
+		"unplugin-vue": "catalog:",
 		"vue": "catalog:",
 		"vue-tsc": "catalog:"
 	}
