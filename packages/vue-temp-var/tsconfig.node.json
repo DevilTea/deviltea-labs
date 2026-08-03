@@ -1,6 +1,6 @@
 {
 	"extends": [
-		"@deviltea/tsconfig/node"
+		"@deviltea/tsconfig/tooling"
 	],
 	"compilerOptions": {
 		"composite": true,

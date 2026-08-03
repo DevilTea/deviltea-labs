@@ -66,5 +66,5 @@ router.beforeEach(handleMiddlewares)
 [npm-downloads-href]: https://npmjs.com/package/@deviltea/vue-router-middleware
 [bundle-src]: https://img.shields.io/bundlephobia/minzip/@deviltea/vue-router-middleware?style=flat&colorA=080f12&colorB=1fa669&label=minzip
 [bundle-href]: https://bundlephobia.com/result?p=@deviltea/vue-router-middleware
-[license-src]: https://img.shields.io/github/license/DevilTea/vue-router-middleware.svg?style=flat&colorA=080f12&colorB=1fa669
-[license-href]: https://github.com/DevilTea/vue-router-middleware/blob/main/LICENSE
+[license-src]: https://img.shields.io/github/license/DevilTea/deviltea-labs.svg?style=flat&colorA=080f12&colorB=1fa669
+[license-href]: https://github.com/DevilTea/deviltea-labs/blob/main/LICENSE

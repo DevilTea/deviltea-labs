@@ -1,5 +1,5 @@
 {
-	"extends": "@deviltea/tsconfig/node",
+	"extends": "@deviltea/tsconfig/tooling",
 	"include": [
 		"./build.config.ts",
 		"./eslint.config.js"

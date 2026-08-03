@@ -1,7 +1,10 @@
 {
 	"extends": "@deviltea/tsconfig/node-bundler",
+	"compilerOptions": {
+		"composite": true
+	},
 	"include": [
 		"./src/**/*.ts",
-		"./test/**/*.ts"
+		"./tests/**/*.ts"
 	]
 }

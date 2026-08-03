@@ -1,6 +1,6 @@
 {
 	"extends": [
-		"@deviltea/tsconfig/dom"
+		"@deviltea/tsconfig/browser"
 	],
 	"compilerOptions": {
 		"composite": true

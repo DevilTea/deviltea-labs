@@ -1,14 +1,44 @@
 {
-  "name": "deviltea-labs",
-  "version": "0.0.0",
-  "private": true,
-  "packageManager": "pnpm@10.34.4",
-  "scripts": {
-    "build": "pnpm -r --if-present run build",
-    "check": "pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build",
-    "lint": "pnpm -r --if-present run lint",
-    "test": "pnpm -r --if-present run test",
-    "typecheck": "pnpm -r --if-present run typecheck"
-  },
-  "license": "MIT"
+	"name": "deviltea-labs",
+	"type": "module",
+	"version": "0.0.0",
+	"private": true,
+	"packageManager": "pnpm@10.34.4",
+	"description": "The DevilTea Labs package monorepo.",
+	"license": "MIT",
+	"scripts": {
+		"build": "pnpm -r --if-present run build",
+		"check": "pnpm run build && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run publint",
+		"docs:build": "pnpm --filter docs run build",
+		"docs:dev": "pnpm --filter docs run dev",
+		"docs:preview": "pnpm --filter docs run preview",
+		"lint": "eslint .",
+		"new-package": "tsx scripts/new-package.ts",
+		"publint": "pnpm --filter @deviltea/tiny-state-machine exec publint && pnpm --filter @deviltea/tiny-state-machine-vue exec publint",
+		"test": "pnpm --filter @deviltea/eslint-config run test && pnpm --filter @deviltea/eslint-config run test:package && pnpm --filter @deviltea/tsconfig run test:contracts && pnpm --filter @deviltea/vue-router-middleware exec vitest run && vitest run",
+		"typecheck": "pnpm -r --if-present run typecheck && pnpm --filter vue-temp-var run type-check"
+	},
+	"devDependencies": {
+		"@clack/prompts": "catalog:",
+		"@deviltea/eslint-config": "workspace:^",
+		"@deviltea/tsconfig": "workspace:^",
+		"@types/node": "catalog:",
+		"@vitest/coverage-v8": "catalog:",
+		"eslint": "catalog:",
+		"lint-staged": "catalog:",
+		"pathe": "catalog:",
+		"publint": "catalog:",
+		"rimraf": "catalog:",
+		"simple-git-hooks": "catalog:",
+		"tsx": "catalog:",
+		"typescript": "catalog:",
+		"unbuild": "catalog:",
+		"vite": "catalog:",
+		"vitepress": "catalog:",
+		"vitepress-plugin-group-icons": "catalog:",
+		"vitest": "catalog:",
+		"vue": "catalog:",
+		"vue-tsc": "catalog:",
+		"zx": "catalog:"
+	}
 }

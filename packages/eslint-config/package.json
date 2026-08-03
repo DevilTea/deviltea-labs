@@ -2,17 +2,17 @@
 	"name": "@deviltea/eslint-config",
 	"type": "module",
 	"version": "9.0.0",
-	"packageManager": "pnpm@10.34.4",
 	"description": "DevilTea's opinionated ESLint flat config for JavaScript, TypeScript, and Vue.",
 	"author": "DevilTea <ch19980814@gmail.com> (https://github.com/DevilTea/)",
 	"license": "MIT",
-	"homepage": "https://github.com/DevilTea/eslint-config#readme",
+	"homepage": "https://github.com/DevilTea/deviltea-labs/tree/main/packages/eslint-config#readme",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/DevilTea/eslint-config.git"
+		"url": "git+https://github.com/DevilTea/deviltea-labs.git",
+		"directory": "packages/eslint-config"
 	},
 	"bugs": {
-		"url": "https://github.com/DevilTea/eslint-config/issues"
+		"url": "https://github.com/DevilTea/deviltea-labs/issues"
 	},
 	"keywords": [
 		"eslint",
@@ -56,13 +56,13 @@
 		"eslint": "^10.4.0"
 	},
 	"dependencies": {
-		"@antfu/eslint-config": "9.1.0"
+		"@antfu/eslint-config": "catalog:"
 	},
 	"devDependencies": {
-		"bumpp": "^11.1.0",
-		"eslint": "^10.6.0",
-		"publint": "^0.3.21",
-		"tsdown": "^0.22.3",
-		"typescript": "~5.9.3"
+		"bumpp": "catalog:",
+		"eslint": "catalog:",
+		"publint": "catalog:",
+		"tsdown": "catalog:",
+		"typescript": "catalog:"
 	}
 }

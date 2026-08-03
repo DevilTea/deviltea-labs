@@ -2,17 +2,17 @@
 	"name": "@deviltea/tsconfig",
 	"type": "module",
 	"version": "1.0.0",
-	"packageManager": "pnpm@10.34.4",
 	"description": "Strict TypeScript 6 presets for platform-neutral, browser, Node.js, and repository tooling projects.",
 	"author": "DevilTea <ch19980814@gmail.com>",
 	"license": "MIT",
-	"homepage": "https://github.com/DevilTea/tsconfig#readme",
+	"homepage": "https://github.com/DevilTea/deviltea-labs/tree/main/packages/tsconfig#readme",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/DevilTea/tsconfig.git"
+		"url": "git+https://github.com/DevilTea/deviltea-labs.git",
+		"directory": "packages/tsconfig"
 	},
 	"bugs": {
-		"url": "https://github.com/DevilTea/tsconfig/issues"
+		"url": "https://github.com/DevilTea/deviltea-labs/issues"
 	},
 	"keywords": [
 		"tsconfig",
@@ -54,9 +54,9 @@
 		"access": "public"
 	},
 	"devDependencies": {
-		"@deviltea/eslint-config": "8.0.2",
-		"bumpp": "^11.1.0",
-		"eslint": "^10.6.0",
-		"typescript": "^6.0.3"
+		"@deviltea/eslint-config": "workspace:^",
+		"bumpp": "catalog:",
+		"eslint": "catalog:",
+		"typescript": "catalog:"
 	}
 }

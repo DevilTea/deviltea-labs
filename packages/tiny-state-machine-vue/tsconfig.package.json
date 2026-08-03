@@ -1,5 +1,8 @@
 {
 	"extends": "@deviltea/tsconfig/browser",
+	"compilerOptions": {
+		"composite": true
+	},
 	"include": [
 		"./src/**/*.ts"
 	]

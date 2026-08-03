@@ -1,0 +1,9 @@
+{
+	"extends": "@deviltea/tsconfig/neutral",
+	"compilerOptions": {
+		"composite": true
+	},
+	"include": [
+		"./src/**/*.ts"
+	]
+}
