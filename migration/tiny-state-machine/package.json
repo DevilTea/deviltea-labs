@@ -1,0 +1,66 @@
+{
+	"name": "monorepo",
+	"type": "module",
+	"version": "0.0.5",
+	"private": true,
+	"packageManager": "pnpm@10.34.4",
+	"description": "A simple state machine with a tiny size and type safety.",
+	"author": "DevilTea <ch870814@gmail.com>",
+	"license": "MIT",
+	"homepage": "https://github.com/DevilTea/tiny-state-machine#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/DevilTea/tiny-state-machine.git"
+	},
+	"bugs": "https://github.com/DevilTea/tiny-state-machine/issues",
+	"keywords": [],
+	"sideEffects": false,
+	"engines": {
+		"node": ">=24"
+	},
+	"scripts": {
+		"build": "pnpm -r --filter='./packages/*' build",
+		"stub": "pnpm -r --filter='./packages/*' stub",
+		"newpkg": "tsx ./scripts/newpkg.ts",
+		"publint": "pnpm -r --filter='./packages/*' exec publint",
+		"publish:packages": "pnpm -r --filter='./packages/*' publish",
+		"release": "pnpm build && pnpm docs:build && pnpm typecheck && pnpm publint && rimraf ./**/dist && bumpp -r && pnpm build && pnpm -r --filter='./packages/*' publish",
+		"docs:dev": "pnpm -r --filter=./docs run dev",
+		"docs:build": "pnpm -r --filter=./docs run build",
+		"docs:preview": "pnpm -r --filter=./docs run preview",
+		"test": "vitest",
+		"test:coverage": "vitest --coverage",
+		"lint": "eslint --fix .",
+		"typecheck": "pnpm -r typecheck",
+		"prepare": "simple-git-hooks"
+	},
+	"devDependencies": {
+		"@clack/prompts": "catalog:",
+		"@deviltea/eslint-config": "catalog:",
+		"@deviltea/tsconfig": "catalog:",
+		"@types/node": "catalog:",
+		"@vitest/coverage-v8": "catalog:",
+		"bumpp": "catalog:",
+		"eslint": "catalog:",
+		"lint-staged": "catalog:",
+		"pathe": "catalog:",
+		"pkg-size": "catalog:",
+		"publint": "catalog:",
+		"rimraf": "catalog:",
+		"simple-git-hooks": "catalog:",
+		"tsx": "catalog:",
+		"typescript": "catalog:",
+		"unbuild": "catalog:",
+		"vitest": "catalog:",
+		"zx": "catalog:"
+	},
+	"simple-git-hooks": {
+		"pre-commit": "pnpm lint-staged"
+	},
+	"lint-staged": {
+		"*": "eslint --fix"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}
