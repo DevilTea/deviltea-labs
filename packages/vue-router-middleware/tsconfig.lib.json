@@ -1,0 +1,6 @@
+{
+	"extends": "@deviltea/tsconfig/dom",
+	"include": [
+		"./src/**/*.ts"
+	]
+}
