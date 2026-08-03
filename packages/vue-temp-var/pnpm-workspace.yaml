@@ -1,0 +1,12 @@
+# Supply-chain security baseline (see DevilTea/hub templates/pnpm-security.md)
+minimumReleaseAge: 4320
+minimumReleaseAgeExclude:
+  - '@deviltea/eslint-config'
+  - '@deviltea/tsconfig'
+blockExoticSubdeps: true
+strictDepBuilds: true
+shellEmulator: true
+trustPolicy: no-downgrade
+ignoredBuiltDependencies:
+  - esbuild
+onlyBuiltDependencies: []

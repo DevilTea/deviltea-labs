@@ -1,0 +1,69 @@
+{
+	"name": "vue-temp-var",
+	"type": "module",
+	"version": "2.0.1",
+	"packageManager": "pnpm@10.34.4",
+	"description": "A Vue component for defining temporary variables in the template with type inference.",
+	"author": {
+		"name": "DevilTea",
+		"email": "ch19980814@gmail.com"
+	},
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/DevilTea/vue-temp-var.git"
+	},
+	"keywords": [
+		"vue",
+		"vue3"
+	],
+	"exports": {
+		".": {
+			"import": {
+				"types": "./dist/index.d.ts",
+				"default": "./dist/vue-temp-var.js"
+			},
+			"require": {
+				"types": "./dist/index.d.cts",
+				"default": "./dist/vue-temp-var.cjs"
+			}
+		}
+	},
+	"main": "./dist/vue-temp-var.cjs",
+	"module": "./dist/vue-temp-var.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist"
+	],
+	"engines": {
+		"node": ">=24"
+	},
+	"scripts": {
+		"dev": "vite build --watch",
+		"build": "run-p type-check build-only",
+		"preview": "vite preview",
+		"build-only": "vite build",
+		"type-check": "vue-tsc --noEmit -p tsconfig.lib.json --composite false",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"prepublishOnly": "pnpm build",
+		"release": "bumpp && pnpm publish"
+	},
+	"peerDependencies": {
+		"vue": ">=3.3.0"
+	},
+	"devDependencies": {
+		"@deviltea/eslint-config": "8.0.2",
+		"@deviltea/tsconfig": "0.0.10",
+		"@types/node": "^24.13.2",
+		"@vitejs/plugin-vue": "6.0.7",
+		"bumpp": "11.1.0",
+		"eslint": "10.6.0",
+		"npm-run-all2": "9.0.2",
+		"typescript": "5.9.3",
+		"vite": "7.3.6",
+		"vite-plugin-dts": "5.0.3",
+		"vue": "3.5.39",
+		"vue-tsc": "3.3.6"
+	}
+}
