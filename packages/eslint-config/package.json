@@ -1,0 +1,68 @@
+{
+	"name": "@deviltea/eslint-config",
+	"type": "module",
+	"version": "9.0.0",
+	"packageManager": "pnpm@10.34.4",
+	"description": "DevilTea's opinionated ESLint flat config for JavaScript, TypeScript, and Vue.",
+	"author": "DevilTea <ch19980814@gmail.com> (https://github.com/DevilTea/)",
+	"license": "MIT",
+	"homepage": "https://github.com/DevilTea/eslint-config#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/DevilTea/eslint-config.git"
+	},
+	"bugs": {
+		"url": "https://github.com/DevilTea/eslint-config/issues"
+	},
+	"keywords": [
+		"eslint",
+		"eslint-config",
+		"eslintconfig",
+		"flat-config",
+		"typescript",
+		"vue"
+	],
+	"sideEffects": false,
+	"exports": {
+		".": {
+			"import": {
+				"types": "./dist/index.d.mts",
+				"default": "./dist/index.mjs"
+			}
+		}
+	},
+	"module": "./dist/index.mjs",
+	"types": "./dist/index.d.mts",
+	"files": [
+		"dist"
+	],
+	"publishConfig": {
+		"access": "public"
+	},
+	"engines": {
+		"node": ">=24"
+	},
+	"scripts": {
+		"build": "tsdown",
+		"check": "pnpm test && pnpm test:package && pnpm lint",
+		"lint": "eslint .",
+		"lint:fix": "eslint . --fix",
+		"prepublishOnly": "pnpm build",
+		"release": "pnpm check && bumpp && pnpm publish",
+		"test": "pnpm build && node --test test/index.test.mjs",
+		"test:package": "pnpm build && node test/package-smoke.mjs"
+	},
+	"peerDependencies": {
+		"eslint": "^10.4.0"
+	},
+	"dependencies": {
+		"@antfu/eslint-config": "9.1.0"
+	},
+	"devDependencies": {
+		"bumpp": "^11.1.0",
+		"eslint": "^10.6.0",
+		"publint": "^0.3.21",
+		"tsdown": "^0.22.3",
+		"typescript": "~5.9.3"
+	}
+}
