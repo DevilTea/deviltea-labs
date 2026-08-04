@@ -41,8 +41,7 @@
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"test:contracts": "node ./scripts/test-contracts.mjs --typescript 6.0.3",
-		"validate": "pnpm lint && pnpm test:contracts",
-		"release": "bumpp && pnpm publish"
+		"validate": "pnpm lint && pnpm test:contracts"
 	},
 	"peerDependencies": {
 		"@types/node": "*",

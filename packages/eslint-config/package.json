@@ -48,7 +48,6 @@
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"prepublishOnly": "pnpm build",
-		"release": "pnpm check && bumpp && pnpm publish",
 		"test": "pnpm build && node --test test/index.test.mjs",
 		"test:package": "pnpm build && node test/package-smoke.mjs"
 	},

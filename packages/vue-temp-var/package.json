@@ -42,8 +42,7 @@
 		"type-check": "vue-tsc --noEmit -p tsconfig.lib.json --composite false",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
-		"prepublishOnly": "pnpm build",
-		"release": "bumpp && pnpm publish"
+		"prepublishOnly": "pnpm build"
 	},
 	"peerDependencies": {
 		"vue": ">=3.3.0"

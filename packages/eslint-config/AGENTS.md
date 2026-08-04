@@ -36,8 +36,6 @@ pnpm check
 pnpm lint
 pnpm lint:fix
 
-# Validate, bump, and publish locally (the CI workflow remains preferred)
-pnpm release
 ```
 
 ## Code Style
@@ -65,9 +63,9 @@ pnpm release
 
 ## Release
 
-- Trigger the `Release` workflow (`workflow_dispatch`) with a `bump_type` (`patch`, `minor`, or `major`).
-- The workflow serializes releases, installs the frozen lockfile, runs the complete `pnpm check` suite, bumps and tags with `bumpp`, publishes through npm trusted publishing (OIDC), and creates GitHub-generated release notes for the verified remote tag.
-- The local `pnpm release` script also runs `pnpm check` before bumping and publishing, but it does not create GitHub release notes; prefer the workflow for official releases.
+- Releases are centralized in the repository root: dispatch **Create release PR** (`.github/workflows/release-pr.yml`) with `eslint-config` and a Bumpp release type or exact version.
+- After its verified release PR merges into `main`, create and push the matching annotated tag (for example, `eslint-config@9.0.1`). **Publish package** (`.github/workflows/publish.yml`) validates, packs, and publishes through npm Trusted Publishing (OIDC).
+- This package intentionally has no local `release` script.
 
 ## Gotchas
 

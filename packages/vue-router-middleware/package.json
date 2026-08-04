@@ -37,7 +37,6 @@
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"prepublishOnly": "pnpm build",
-		"release": "bumpp && pnpm publish",
 		"start": "tsx src/index.ts",
 		"test": "vitest",
 		"test:cov": "vitest --coverage",

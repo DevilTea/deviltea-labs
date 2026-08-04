@@ -58,9 +58,9 @@ pnpm typecheck
 
 ## Release
 
-- Releases run in CI: trigger the `Release` workflow (workflow_dispatch) with a `bump_type` (patch/minor/major). It validates (`pnpm build && pnpm typecheck && pnpm test`), bumps the version with `bumpp` (pushes the release commit + `v*` tag), publishes to npm via trusted publishing (OIDC — no token secret), then generates GitHub release notes with `changelogithub`.
-- The local `pnpm release` script bypasses CI validation and produces no GitHub release notes — prefer the workflow.
-- `prepublishOnly` builds automatically before publish
+- Releases are centralized in the repository root: dispatch **Create release PR** (`.github/workflows/release-pr.yml`) with `vue-router-middleware` and a Bumpp release type or exact version.
+- After its verified release PR merges into `main`, create and push the matching annotated tag (for example, `vue-router-middleware@0.0.5`). **Publish package** (`.github/workflows/publish.yml`) validates, packs, and publishes through npm Trusted Publishing (OIDC).
+- This package intentionally has no local `release` script. `prepublishOnly` still builds the tarball during centralized publishing.
 
 ## Gotchas
 
