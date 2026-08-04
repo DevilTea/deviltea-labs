@@ -4,6 +4,6 @@
 		"composite": true
 	},
 	"include": [
-		"./src/**/*.ts"
+		"./src/index.ts"
 	]
 }

@@ -1,75 +1,38 @@
 # AGENTS.md
 
-## Project Overview
+## Package scope
 
-`@deviltea/eslint-config` is a published npm package that wraps [`@antfu/eslint-config`](https://github.com/antfu/eslint-config) (v9) with personal customizations: tab indentation, stricter chaining/newline stylistic rules, `no-lonely-if` for JS/TS, and a set of Vue SFC conventions (script-setup + composition API, type-based `defineProps`/`defineEmits`, PascalCase components). Exported as a single ESM factory function with the same signature as `antfu()`.
+`@deviltea/eslint-config` is the monorepo's published ESM ESLint flat-config factory. `src/index.ts` wraps `@antfu/eslint-config` and applies DevilTea defaults while preserving the upstream factory signature and forwarding user configs unchanged.
 
-**Repository structure:**
 ```
-src/index.ts        # Entire implementation: factory wrapping antfu() with option overrides
-test/               # Wrapper unit tests and packed-package consumer smoke tests
-dist/               # tsdown output (index.mjs + index.d.mts) — the published artifact
-eslint.config.js    # Self-lints using ./dist/index.mjs (dogfooding)
-pnpm-workspace.yaml # pnpm supply-chain security settings only (single-package repo)
-.github/workflows/  # ci.yml (unit/lint + ESLint compatibility matrix), release.yml, security-audit.yml
+src/index.ts                 # Product implementation
+src/index.unit.test.ts       # Colocated Vitest unit tests
+test/package-smoke.mjs       # Packed-consumer integration smoke test
+tsdown.config.ts             # ESM and declaration build
+eslint.config.js             # Dogfoods the built package
 ```
 
-## Setup Commands
+## Commands
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Build (tsdown -> dist/, ESM + dts, runs publint; options live in tsdown.config.ts)
-pnpm build
-
-# Unit tests for wrapper behavior (builds first)
-pnpm test
-
-# Pack and install the package into a temporary consumer, then verify runtime, types, and JS/TS/Vue lint
-pnpm test:package
-
-# Run the complete local validation suite
-pnpm check
-
-# Lint and fix (requires a prior build — see Gotchas)
-pnpm lint
-pnpm lint:fix
-
+pnpm --filter @deviltea/eslint-config run test
+pnpm --filter @deviltea/eslint-config run test:coverage
+pnpm --filter @deviltea/eslint-config run test:package
+pnpm --filter @deviltea/eslint-config run build
+pnpm --filter @deviltea/eslint-config run lint
 ```
 
-## Code Style
+The root `pnpm test:unit` also discovers `src/index.unit.test.ts`. `test:coverage` owns a package-local V8 report for `src/index.ts` and enforces complete statements, branches, functions, and lines. `test:package` intentionally remains a separate integration test: it packs the tarball, installs it into a consumer, and validates runtime, declaration, peer-dependency, and lint behavior.
 
-- TypeScript strict mode (`strict` + `noUncheckedIndexedAccess`), `moduleResolution: Bundler`, ESNext target
-- Tabs for indentation — this config's own signature preference
-- ESLint flat config; the repo lints itself with its own built output
-- The whole package lives in `src/index.ts` — keep it single-file; `@antfu/eslint-config` is the only runtime dependency
-- ESM-only package (`type: module`, `import` export condition only)
+## Implementation and test rules
 
-## Dependency Policy
-
-- Pin `@antfu/eslint-config` exactly. A shareable config must not change lint behavior when consumers reinstall the same `@deviltea/eslint-config` version.
-- Upgrade the upstream config through a dedicated PR with unit, packed-consumer, and effective-rule review.
-- Avoid adding release-only npm tools when the GitHub-hosted runner already provides an equivalent trusted platform command. The release workflow uses the preinstalled GitHub CLI for release notes.
-
-## Testing
-
-- Unit tests use the built-in Node.js test runner and run on Node 22 and 24.
-- Unit tests intercept the external `@antfu/eslint-config` import and assert the exact options passed by the wrapper.
-- Keep unit tests focused on this package's contract: default rules, nested option preservation, override precedence, booleans, and user config forwarding.
-- Do not snapshot the full resolved upstream ESLint config; that would make routine upstream upgrades unnecessarily brittle.
-- `test/package-smoke.mjs` packs the publishable tarball, installs it into a temporary consumer with strict peer dependency checks, and validates runtime import, generated declarations, and JS/TS/Vue lint behavior.
-- CI runs the package smoke test against ESLint 10.4.0, the minimum supported version imposed by the current dependency graph, and the latest compatible ESLint 10 release. Set `ESLINT_VERSION` to reproduce a specific matrix entry locally.
-
-## Release
-
-- Releases are centralized in the repository root: dispatch **Create release PR** (`.github/workflows/release-pr.yml`) with `eslint-config` and a Bumpp release type or exact version.
-- After its verified release PR merges into `main`, create and push the matching annotated tag (for example, `eslint-config@9.0.1`). **Publish package** (`.github/workflows/publish.yml`) validates, packs, and publishes through npm Trusted Publishing (OIDC).
-- This package intentionally has no local `release` script.
+- Keep the implementation ESM-only and retain `FactoryFn = typeof antfu`; callers must receive the same API shape as upstream.
+- Default custom rules apply only for object/omitted feature options. A literal `false` is a supported opt-out and must reach `antfu` unchanged.
+- Merge defaults before user `overrides`, so a user rule wins while unrelated nested options remain intact. Forward all trailing user configs in the original order and identity.
+- Vitest unit tests mock the upstream factory and assert the exact options and forwarded arguments passed to it. Test defaults, explicit `undefined`, each feature's `true` and `false` passthrough, user-override precedence (including disabling a default), nested/top-level value preservation, multi-config ordering and identity, factory-return identity, and every custom Vue rule whose spelling/value matters.
+- Do not replace these assertions with a resolved-config snapshot or coverage target. The smoke test is required for package-boundary failure paths; it is not a unit test and should not be migrated.
 
 ## Gotchas
 
-- `eslint.config.js` imports `./dist/index.mjs`, so `pnpm build` must run before `pnpm lint` (`pnpm test` builds first, and CI runs test before lint); a stale `dist/` means you lint with old rules
-- `pnpm-workspace.yaml` exists only to hold pnpm supply-chain security settings; the config itself enforces them via `pnpm/yaml-enforce-settings` (requires `shellEmulator: true` and `trustPolicy: no-downgrade`) — removing those keys makes lint fail
-- `strictDepBuilds` is on with `onlyBuiltDependencies: []` — new deps that need build scripts must be reviewed into the allowlist
-- Node 22.14+ and 24.x are supported (`engines`, enforced by `engine-strict=true` in `.npmrc`)
+- `eslint.config.js` imports `dist/index.mjs`; run `pnpm build` before linting this package.
+- Versions come from the monorepo catalog in `pnpm-workspace.yaml`. Do not add a standalone lockfile or describe this package as a separate workspace.

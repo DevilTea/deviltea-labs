@@ -39,6 +39,8 @@
 	"scripts": {
 		"dev": "tsdown --watch",
 		"build": "pnpm type-check && tsdown",
+		"test": "vitest",
+		"test:cov": "vitest --coverage",
 		"type-check": "vue-tsc --noEmit -p tsconfig.lib.json --composite false",
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
@@ -51,11 +53,14 @@
 		"@deviltea/eslint-config": "workspace:^",
 		"@deviltea/tsconfig": "workspace:^",
 		"@types/node": "catalog:",
+		"@vitest/coverage-v8": "catalog:",
 		"bumpp": "catalog:",
 		"eslint": "catalog:",
 		"tsdown": "catalog:",
 		"typescript": "catalog:",
 		"unplugin-vue": "catalog:",
+		"vite": "catalog:",
+		"vitest": "catalog:",
 		"vue": "catalog:",
 		"vue-tsc": "catalog:"
 	}

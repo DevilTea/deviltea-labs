@@ -48,7 +48,8 @@
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"prepublishOnly": "pnpm build",
-		"test": "pnpm build && node --test test/index.test.mjs",
+		"test": "pnpm --workspace-root exec vitest run --root packages/eslint-config --config vitest.config.ts",
+		"test:coverage": "pnpm --workspace-root exec vitest run --root packages/eslint-config --config vitest.config.ts --coverage",
 		"test:package": "pnpm build && node test/package-smoke.mjs"
 	},
 	"peerDependencies": {

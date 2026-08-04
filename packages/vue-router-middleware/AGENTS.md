@@ -1,71 +1,51 @@
-# AGENTS.md
+# @deviltea/vue-router-middleware
 
-## Project Overview
+## Scope and layout
 
-`@deviltea/vue-router-middleware` is a small route middleware system for Vue Router. Middlewares are declared per-route via `meta.middleware` (a function or array, typed through a `vue-router` module augmentation) and executed by registering `handleMiddlewares` as a global `beforeEach` guard; a middleware can abort, redirect, or continue navigation, sync or async. Published as an ESM-only package with peer deps `vue >=3` and `vue-router >=4`.
+This pnpm-workspace package provides an ESM Vue Router 4 middleware guard. Its runtime is deliberately small and dependency-free: `src/index.ts` exports `handleMiddlewares` and `defineMiddleware`; `src/types.ts` exports `Middleware` and augments `vue-router`'s `RouteMeta` with `middleware`.
 
-**Repository structure:**
 ```
-src/index.ts          # handleMiddlewares + defineMiddleware (whole runtime)
-src/types.ts          # Middleware type + vue-router RouteMeta augmentation
-test/index.test.ts    # Vitest suite (runtime + type tests)
-tsdown.config.ts      # tsdown config (ESM + declarations -> dist/)
-vitest.config.ts      # coverage + typecheck enabled on every test run
-tsconfig.*.json       # Split configs: lib / node / test
-pnpm-workspace.yaml   # pnpm supply-chain security settings only
-.github/workflows/    # ci.yml, release.yml, security-audit.yml
+src/index.ts             # guard runtime and defineMiddleware
+src/types.ts             # public middleware type and RouteMeta augmentation
+src/index.unit.test.ts   # colocated Vitest runtime/type-contract tests
+tsdown.config.ts         # ESM build and declaration generation
+vitest.config.ts         # package-local Vitest configuration
+tsconfig.*.json          # lib, test, and tooling project configs
 ```
 
-## Setup Commands
+`meta.middleware` accepts one middleware or an array. Register `handleMiddlewares` with `router.beforeEach`. A middleware receives `(to, from)` and may return `true`, `null`, or `undefined` to continue; `false` aborts; a Vue Router location redirects. Both sync and async middleware are supported.
+
+## Commands
+
+Run these from this directory, or prefix them from the monorepo root with `pnpm --filter @deviltea/vue-router-middleware`.
 
 ```bash
-# Install dependencies
-pnpm install
-
-# Build (tsdown -> dist/)
-pnpm build
-
-# Build in stub mode for local development
-pnpm dev
-
-# Run tests (watch mode) / with coverage report
-pnpm test
-pnpm test:cov
-
-# Lint and fix
+pnpm test                 # Vitest watch mode
+pnpm exec vitest run      # one non-watch test run
+pnpm test:cov             # coverage report
+pnpm typecheck            # tsc against tsconfig.test.json
+pnpm build                # tsdown -> dist/
 pnpm lint
 pnpm lint:fix
-
-# Type check (uses tsconfig.test.json)
-pnpm typecheck
 ```
 
-## Code Style
+## Implementation rules
 
-- TypeScript strict mode via `@deviltea/tsconfig`
-- ESLint flat config extending `@deviltea/eslint-config` (single quotes, no semicolons, tabs)
-- Runtime lives in `src/index.ts`, types in `src/types.ts` — keep it dependency-free (peer deps only) and ESM-only
-- `sideEffects: false`; keep exports tree-shakable
+- Use strict TypeScript, tabs, single quotes, and no semicolons; package ESLint configuration inherits `@deviltea/eslint-config`.
+- Keep public runtime exports tree-shakable (`sideEffects: false`) and retain the ESM-only output contract.
+- Keep `vue` and `vue-router` as peers; do not add runtime dependencies for this guard.
+- `defineMiddleware` is a type helper and must return the identical function reference.
 
-## Testing
+## Unit-test rules
 
-- Vitest; tests live in `test/index.test.ts`
-- `vitest.config.ts` enables coverage (`src/**/*.ts`) and typecheck for every run
-- Coverage is currently 100% statements/lines — keep it there when changing `src/`
-- Run a single test with `pnpm test -- -t '<name>'`
-- CI runs the suite on Node 22 and 24 across ubuntu/windows/macos
-- Pre-commit hook (simple-git-hooks) runs `lint-staged` (`eslint --fix`)
-
-## Release
-
-- Releases are centralized in the repository root: dispatch **Create release PR** (`.github/workflows/release-pr.yml`) with `vue-router-middleware` and a Bumpp release type or exact version.
-- After its verified release PR merges into `main`, create and push the matching annotated tag (for example, `vue-router-middleware@0.0.5`). **Publish package** (`.github/workflows/publish.yml`) validates, packs, and publishes through npm Trusted Publishing (OIDC).
-- This package intentionally has no local `release` script. `prepublishOnly` still builds the tarball during centralized publishing.
+- Use Vitest and colocate every unit test beside its source as `*.unit.test.ts`; do not add new tests under a separate `test/` directory.
+- Write discriminating tests: they must fail for plausible but wrong implementations, not merely execute lines. Assert exact return values, calls, argument identity, order, and stopping behavior where relevant.
+- Cover boundary values, inverse conditions, error/rejection paths, and exact outputs. For this guard, test each of the five same-route fields independently, shallow-key existence and strict/reference value equality, empty `matched`/middleware cases, and sync plus async outcomes.
+- Treat coverage as a diagnostic only; high coverage is not evidence that behavior is specified or protected.
 
 ## Gotchas
 
-- ESLint enforces `package.json` key order (`jsonc/sort-keys` via `@deviltea/eslint-config`) — run `pnpm lint:fix` after editing `package.json`
-- `pnpm-workspace.yaml` exists only to hold pnpm supply-chain security settings (this is a single-package repo); `strictDepBuilds` is on — new deps that need build scripts must be reviewed into `onlyBuiltDependencies`/`ignoredBuiltDependencies`
-- Node 22.14+ and 24.x are supported (`engines` and CI matrix)
-- `handleMiddlewares` skips all middlewares when navigating to an identical route (same path, name, query, params, hash) and when `to.matched` is empty — mind this when reasoning about guard behavior
-- A weekly `security-audit.yml` workflow runs `pnpm audit --audit-level=moderate` (Sundays 21:00 UTC)
+- Same-route detection is shallow and requires equality of `path`, `name`, `query`, `params`, and `hash`; a difference in any one must execute middleware. Equal-looking nested query/param values are different unless they are the same reference.
+- Middleware is collected in `to.matched` order. Array middleware is flattened in place; the first non-continuation result is returned and later middleware must not run. A thrown or rejected error propagates.
+- No matched route or no collected middleware returns exactly `true`.
+- `package.json` key ordering is linted. The workspace has strict dependency-build and release-age policies in `pnpm-workspace.yaml`; inspect any new dependency before adding it.

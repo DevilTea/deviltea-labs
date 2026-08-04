@@ -4,7 +4,7 @@
 		"composite": true
 	},
 	"include": [
-		"./src/**/*.ts",
-		"./tests/**/*.ts"
+		"./src/index.ts",
+		"./src/**/*.unit.test.ts"
 	]
 }

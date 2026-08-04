@@ -7,6 +7,7 @@
 	},
 	"include": [
 		"src/**/*.ts",
-		"src/**/*.vue"
+		"src/**/*.vue",
+		"src/**/*.unit.test.ts"
 	]
 }
