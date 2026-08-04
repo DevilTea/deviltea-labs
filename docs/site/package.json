@@ -14,10 +14,8 @@
 		"typecheck:configs": "tsc --project ./tsconfig.configs.json --noEmit"
 	},
 	"devDependencies": {
-		"@shikijs/vitepress-twoslash": "catalog:",
 		"vite": "catalog:",
 		"vitepress": "catalog:",
-		"vitepress-plugin-group-icons": "catalog:",
 		"vue": "catalog:",
 		"vue-tsc": "catalog:"
 	}

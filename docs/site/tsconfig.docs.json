@@ -4,8 +4,7 @@
 		"composite": true
 	},
 	"include": [
-		"./**/*",
-		"./.vitepress/theme"
+		"./**/*"
 	],
 	"exclude": [
 		"./.vitepress/cache",

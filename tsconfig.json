@@ -1,6 +1,6 @@
 {
 	"extends": [
-		"./docs/tiny-state-machine/tsconfig.json",
+		"./docs/site/tsconfig.json",
 		"./packages/tiny-state-machine/tsconfig.json",
 		"./packages/tiny-state-machine-vue/tsconfig.json"
 	],

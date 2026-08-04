@@ -4,6 +4,9 @@ DevilTea Labs is the monorepo for maintained DevilTea packages. Each package
 keeps its own npm identity and version while sharing workspace tooling,
 continuous integration, and release orchestration.
 
+Package documentation is available at
+[deviltea.github.io/deviltea-labs](https://deviltea.github.io/deviltea-labs/).
+
 | Package | Source |
 | --- | --- |
 | `@deviltea/eslint-config` | [`packages/eslint-config`](packages/eslint-config) |

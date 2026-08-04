@@ -46,4 +46,4 @@ function getRandomNumber() {
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/vue-temp-var/LICENSE)

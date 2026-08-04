@@ -1,0 +1,86 @@
+name: Publish package
+
+on:
+  push:
+    tags:
+      - 'eslint-config@*'
+      - 'tsconfig@*'
+      - 'vue-router-middleware@*'
+      - 'vue-temp-var@*'
+      - 'tiny-state-machine@*'
+      - 'tiny-state-machine-vue@*'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify tag and resolve package
+        id: target
+        run: |
+          git fetch origin main --depth=1
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+          package_id="$(pnpm exec tsx scripts/release-package.ts verify-tag "$GITHUB_REF_NAME")"
+          package_name="$(pnpm exec tsx scripts/release-package.ts package-name "$package_id")"
+          package_path="$(pnpm exec tsx scripts/release-package.ts package-path "$package_id")"
+          version="$(pnpm exec tsx scripts/release-package.ts version "$package_id")"
+
+          {
+            echo "id=$package_id"
+            echo "name=$package_name"
+            echo "path=$package_path"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify workspace
+        run: pnpm check
+
+      - name: Pack release tarball
+        id: tarball
+        env:
+          PACKAGE_PATH: ${{ steps.target.outputs.path }}
+        run: |
+          destination="$RUNNER_TEMP/package"
+          mkdir -p "$destination"
+          pnpm --dir "$PACKAGE_PATH" pack --pack-destination "$destination"
+
+          tarballs=("$destination"/*.tgz)
+          if [ "${#tarballs[@]}" -ne 1 ]; then
+            echo "Expected one tarball in $destination" >&2
+            exit 1
+          fi
+
+          echo "path=${tarballs[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish with npm trusted publishing
+        env:
+          TARBALL: ${{ steps.tarball.outputs.path }}
+        run: npm publish "$TARBALL" --access public --provenance

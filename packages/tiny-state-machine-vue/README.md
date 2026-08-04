@@ -63,7 +63,7 @@ machine.send('done') // The watch will log "finished"
 
 ## License
 
-[MIT](./LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
+[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tiny-state-machine-vue/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
 
 <!-- Badges -->
 

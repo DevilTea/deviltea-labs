@@ -95,8 +95,8 @@ Set those options in each repository according to its own source layout and buil
 
 ## Migrating from v0
 
-See the [v1 migration guide](./docs/migration-v1.md) for preset mappings, the breaking change to `node`, and TypeScript 6 migration checks.
+See the [v1 migration guide](https://deviltea.github.io/deviltea-labs/packages/tsconfig-migration) for preset mappings, the breaking change to `node`, and TypeScript 6 migration checks.
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tsconfig/LICENSE)
