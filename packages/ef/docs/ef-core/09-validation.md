@@ -421,11 +421,15 @@ Namespaces own findings as follows:
 | `EF-BODY-*` | Markdown and body-schema structure |
 | `EF-VAL-*` | Validation invocation, capability, completeness, and internal orchestration |
 
+The central [Diagnostic Registry](diagnostic-registry.md) indexes every Core
+code, owner, severity, scope, and exit treatment. Numeric gaps are reserved and
+MUST NOT be reused without updating that registry and the owning specification.
+
 When a more specific diagnostic reports a primary violation, whether in the
 same or another namespace, dependent phases MUST NOT emit a broader alias for
 the same violation. They MAY emit a distinct diagnostic only when it describes
 an independently actionable violation. Query operations wrap query-time
-failure in `EF-QRY-*` as defined by Phase 10 rather than re-emitting
+failure in `EF-QRY-*` as defined by [Query and Trace](10-query-and-trace.md) rather than re-emitting
 validation-only aliases.
 
 The following precedence rules are exhaustive where remaining Core conditions
@@ -686,7 +690,7 @@ Rules:
 - warnings remain counted as warnings under warnings-as-errors.
 - counts reflect emitted diagnostics after deterministic deduplication.
 
-Phase 13 defines the containing `ef/validation-result@1` JSON envelope and
+[CLI Contract](13-cli-contract.md) defines the containing `ef/validation-result@1` JSON envelope and
 streaming behavior.
 
 ## Deterministic Boundary
@@ -787,6 +791,7 @@ orchestration additionally defines:
 | `EF-VAL-009` | error | Bootstrap ref already contains an EF state | `1` |
 | `EF-VAL-010` | error | Proposed bootstrap contains a terminal knowledge Artifact or CHG | `1` |
 | `EF-VAL-011` | error | Proposed OID is missing or lexically invalid, does not resolve to a commit, cannot be materialized, or has inapplicable parentage | `2` |
+| `EF-VAL-012` | error | A crash-detectable incomplete initialization claim exists | `2` |
 
 Execution-class diagnostics can have error severity while mapping to exit `2`
 or `3`; exit class distinguishes incomplete or internal execution from completed
@@ -795,15 +800,13 @@ repository invalidity.
 ## Deferred
 
 - Stable lookup, filters, trace traversal, impact queries, and query JSON are
-  defined in Phase 10: Query and Trace.
+  defined in [Query and Trace](10-query-and-trace.md).
 - Project discovery, managed paths, configuration, baseline materialization,
-  cache locations, and schema migration are defined in Phase 11: Filesystem and
-  Configuration.
+  cache locations, and schema migration are defined in [Filesystem and Configuration](11-filesystem-and-config.md).
 - Temporary input normalization is excluded from authoritative validation;
-  retained-source validation is defined in Phase 12: Input Normalization and
-  Promotion.
+  retained-source validation is defined in [Input Normalization and Promotion](12-input-normalization.md).
 - CLI command syntax, output transport, JSON envelope, streaming, interruption,
-  and non-interactive options are defined in Phase 13: CLI Contract.
+  and non-interactive options are defined in [CLI Contract](13-cli-contract.md).
 - Full historical Git-DAG auditing, baseline-debt suppression, network
   availability checks, LLM semantic review, and automatic source repair are not
   part of deterministic EF Core v1 validation.

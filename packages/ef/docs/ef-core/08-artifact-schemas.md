@@ -757,14 +757,13 @@ proof that natural-language engineering meaning is correct or incorrect.
 ## Deferred
 
 - Full-project validation phases, previous-state discovery, warning policy,
-  strict mode, parser-version support, and exit behavior are defined in Phase 9:
-  Validation and Integrity.
+  strict mode, parser-version support, and exit behavior are defined in [Validation and Integrity](09-validation.md).
 - Stable body query output, section extraction, context composition, and
-  full-text search are defined in Phase 10: Query and Trace.
+  full-text search are defined in [Query and Trace](10-query-and-trace.md).
 - Templates, managed paths, encoding details, line endings, and generated
-  rendering are defined in Phase 11: Filesystem and Configuration.
+  rendering are defined in [Filesystem and Configuration](11-filesystem-and-config.md).
 - Temporary input normalization and promotion into canonical Artifact sections
-  are defined in Phase 12: Input Normalization and Promotion. EF Core does not
+  are defined in [Input Normalization and Promotion](12-input-normalization.md). EF Core does not
   define persistent raw-input staging bodies.
 - Plugin-defined body sections, custom Artifact types, stable acceptance-item
   identity, stable terminology-entry identity, machine enforcement of glossary

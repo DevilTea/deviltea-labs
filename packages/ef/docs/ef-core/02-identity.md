@@ -404,13 +404,11 @@ involved when integration context is available.
 ## Deferred
 
 - The configured authoritative integration history and repository root are
-  defined in Phase 11: Filesystem and Configuration.
+  defined in [Filesystem and Configuration](11-filesystem-and-config.md).
 - Lifecycle states, allowed content mutation, terminal-state immutability, and
-  retirement are defined in Phase 3: Lifecycle.
-- Supersession identity continuity and replacement graphs are defined in Phase
-  5: Supersession and Canonical State.
-- Atomic CHG mutation requirements are defined in Phase 7: CHG Transaction
-  Semantics.
+  retirement are defined in [Lifecycle](03-lifecycle.md).
+- Supersession identity continuity and replacement graphs are defined in [Supersession and Canonical State](05-supersession.md).
+- Atomic CHG mutation requirements are defined in [CHG Transaction Semantics](07-change-transactions.md).
 - Cross-project locators and external Artifact address formats are not part of
   EF Core v1.
 - Import, identity migration, and explicit legacy-ID assignment are not part of

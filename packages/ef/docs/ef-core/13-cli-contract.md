@@ -43,7 +43,7 @@ Commands that operate on a project accept:
 --project <project-root>
 ```
 
-When omitted, Phase 11 upward discovery applies except for `ef init`, whose
+When omitted, [Filesystem and Configuration](11-filesystem-and-config.md) upward discovery applies except for `ef init`, whose
 target-selection rule is defined below. There is no process-global or
 user-global current-project state.
 
@@ -111,17 +111,21 @@ Non-interactive initialization requires explicit values equivalent to:
 --project-scope <markdown>
 --non-goals <markdown>
 --context <markdown>
+--integration-ref <full-local-branch-ref>
 ```
 
 It additionally accepts:
 
 ```text
---integration-ref <full-local-branch-ref>
 --terminology <markdown-table>
 ```
 
-When `--integration-ref` is omitted, its emitted value is `refs/heads/main`.
-The resulting config still serializes every required field, including
+Interactive initialization MAY suggest the currently checked-out local branch
+as the integration ref, but MUST display the full `refs/heads/...` value and
+require confirmation. Detached HEAD, an unborn branch, or an unavailable
+current branch requires explicit input. Core v1 has no hard-coded `main`
+default because `integration_ref` becomes immutable after bootstrap. The
+resulting config still serializes every required field, including
 `linked_repositories: []`.
 
 Initialization validates the complete bootstrap content candidate before local
@@ -210,11 +214,11 @@ snapshot scope. It accepts only a full commit OID for the project repository's
 object format. The validator materializes exactly that commit; it does not use
 the working tree, index, or `HEAD` as an implicit substitute. In transition
 scope its first parent MUST equal `--baseline`. In bootstrap scope its
-parentage and integration-ref history MUST satisfy Phase 11. A missing,
+parentage and integration-ref history MUST satisfy [Filesystem and Configuration](11-filesystem-and-config.md). A missing,
 unresolvable, or inapplicable proposed commit makes validation incomplete and
 exits `2`.
 
-`--workspace` adds Phase 11 workspace checks to the requested core validation
+`--workspace` adds [Filesystem and Configuration](11-filesystem-and-config.md) workspace checks to the requested core validation
 scope. It does not redefine snapshot, transition, bootstrap, or strict mode.
 
 The command validates the complete requested state. It does not provide a
@@ -251,8 +255,7 @@ Machine-readable validation produces exactly:
 All keys are required. `scope` is `snapshot`, `transition`, or `bootstrap`.
 `baseline_oid` contains the supplied full OID when it passed lexical validation;
 it is null when no usable OID was supplied and for snapshot or bootstrap. A
-complete transition requires a non-null value. Diagnostic objects follow Phase
-9. `proposed_oid` contains the supplied full proposed OID when it passed lexical
+complete transition requires a non-null value. Diagnostic objects follow [Validation and Integrity](09-validation.md). `proposed_oid` contains the supplied full proposed OID when it passed lexical
 validation; it is null for snapshot or when no usable OID was supplied.
 Complete transition and bootstrap results require it to be non-null.
 `integration_ref` contains the applicable authoritative full local branch ref,
@@ -267,7 +270,7 @@ warnings-as-errors but both booleans remain explicit.
 
 ## Query Commands
 
-Query commands map one-to-one to the Phase 10 query kinds:
+Query commands map one-to-one to the [Query and Trace](10-query-and-trace.md) query kinds:
 
 ```text
 ef query lookup
@@ -313,8 +316,8 @@ Stable filter options are:
 --resource-normative true|false
 ```
 
-Options corresponding to multi-value Phase 10 filters may be repeated. Repeated
-values retain Phase 10 OR or AND semantics. `--offset` defaults to `0`;
+Options corresponding to multi-value [Query and Trace](10-query-and-trace.md) filters may be repeated. Repeated
+values retain [Query and Trace](10-query-and-trace.md) OR or AND semantics. `--offset` defaults to `0`;
 omitting `--limit` represents JSON `null` and returns all matches.
 
 ### Search
@@ -323,7 +326,7 @@ omitting `--limit` represents JSON `null` and returns all matches.
 ef query search <term>... [--case-sensitive] [--offset <n>] [--limit <n>]
 ```
 
-At least one term is required. Multiple terms use Phase 10 Artifact-scope AND
+At least one term is required. Multiple terms use [Query and Trace](10-query-and-trace.md) Artifact-scope AND
 semantics. Search remains normalized literal search without relevance scoring.
 
 ### Direct relations
@@ -359,7 +362,7 @@ ef query impact <root-id>...
   [--resolve-current]
 ```
 
-At least one root is required. Every option retains its Phase 10 meaning.
+At least one root is required. Every option retains its [Query and Trace](10-query-and-trace.md) meaning.
 
 ### History
 
@@ -368,8 +371,7 @@ ef query history <artifact-id>
 ```
 
 History is exact and requires complete configured authoritative first-parent
-integration history. Unavailable or shallow required history returns the Phase
-10 incomplete query result with `EF-QRY-010` and exits `2`; there is no CHG-only
+integration history. Unavailable or shallow required history returns the [Query and Trace](10-query-and-trace.md) incomplete query result with `EF-QRY-010` and exits `2`; there is no CHG-only
 fallback.
 
 ### Current resolution
@@ -383,7 +385,7 @@ not enable it implicitly except the explicit impact `--resolve-current` option.
 
 Lookup is the sole query with a successful not-found result. For relations,
 trace, impact, history, and resolve-current, every explicitly supplied Artifact
-ID must exist. If any required ID is absent, the command returns the Phase 10
+ID must exist. If any required ID is absent, the command returns the [Query and Trace](10-query-and-trace.md)
 incomplete query envelope with no partial data and exits `2`.
 
 ## Resource Reading
@@ -533,40 +535,81 @@ misreport the published state as unapplied.
 
 ## Filesystem Write Safety
 
-Core v1 mutation scope is intentionally limited to operations that can be
-published safely:
+Core v1 mutation scope is intentionally limited to two portable publication
+protocols:
 
-- `init` publishes one entirely new `.engineering` directory; and
-- `artifact create` publishes one entirely new draft file.
+- `init` atomically claims ownership of a previously absent `.engineering`
+  path, then completes initialization under a crash-detectable marker; and
+- `artifact create` publishes one complete draft file through an atomic
+  same-filesystem hard-link create-if-absent operation.
 
-A mutator MUST perform the following publication sequence; the lock steps are
-optional advisory coordination:
+### Initialization claim-and-complete protocol
 
-1. acquire an implementation-local EF writer lock, if used;
-2. compute the complete plan;
-3. write and validate content at a temporary path;
-4. verify again that every target is absent and identity allocation remains
-   valid;
-5. publish with an atomic same-filesystem create-if-absent operation;
-6. release any acquired lock; and
-7. remove disposable temporary state after failure when safe.
+`ef init` MUST use this protocol:
 
-Because `.engineering` does not yet exist during initialization, an
-implementation that uses a lock uses the sibling path
-`<project-root>/.engineering.init.lock`. Existing-project implementations may
-use `.engineering/.lock`. These locks are non-authoritative advisory
-coordination only; their representation and stale-lock recovery are
-implementation concerns, and correctness MUST NOT depend on every conforming
-implementation sharing a lock protocol.
+1. compute and validate the complete initialization plan in memory;
+2. atomically claim `.engineering` with one non-recursive directory creation;
+3. create `.engineering/.tmp/init-state.json` with create-exclusive semantics;
+4. write every planned control file, Artifact, and directory beneath the claimed
+   path;
+5. validate the complete on-disk bootstrap candidate;
+6. remove the initialization marker only after successful completion; and
+7. on failure, remove only paths whose ownership by that invocation is proven.
 
-`init` builds a complete sibling temporary directory and atomically publishes
-it only if `.engineering` remains absent. Artifact creation atomically
-publishes one complete temporary file only if its canonical target remains
-absent. A normal rename operation that can replace an existing file or
-directory is not sufficient. The chosen platform primitive MUST combine the
-absence check and publication so no competing creation can be overwritten.
+The marker contains exactly:
 
-If a race invalidates the plan, the command exits `1` without publishing.
+```json
+{
+  "schema": "ef/init-state@1",
+  "nonce": "0123456789abcdef0123456789abcdef"
+}
+```
+
+`nonce` is a freshly generated 128-bit lowercase hexadecimal value. It is
+runtime state, is never authoritative, and is removed before initialization is
+reported as applied. Cleanup MUST compare the marker nonce and MUST leave the
+claimed directory untouched when ownership cannot be proven.
+
+A crash can leave the claimed directory and marker visible. Project discovery,
+validation, and later mutation commands MUST report `EF-VAL-012` and MUST NOT
+silently repair, merge with, or delete that state. Recovery is an explicit
+operator action. This is the portable trade-off for avoiding platform-specific
+native directory publication primitives.
+
+A pre-existing `.engineering` path, including one with an initialization
+marker, is never overwritten. A failed atomic claim is a complete domain
+rejection and exits `1` without modifying that path.
+
+### Draft Artifact hard-link publication
+
+`ef artifact create` MUST:
+
+1. acquire an implementation-local advisory writer lock, if used;
+2. compute the complete plan and provisional identity;
+3. write, flush, close, and validate the complete file at a temporary path on
+   the same filesystem as the canonical target;
+4. verify again that allocation and the canonical target remain valid;
+5. create the canonical target as a hard link to the complete temporary file;
+6. treat target-exists as a race rejection without replacement;
+7. unlink the temporary name after successful publication; and
+8. release the advisory lock and clean disposable state when safe.
+
+The hard-link operation combines target absence with publication of already
+complete bytes. A normal replacing rename, exclusive open followed by visible
+incremental writes, or `copyFile` operation is not conforming. If the worktree
+filesystem cannot provide the required same-filesystem hard-link semantics, the
+mutation is incomplete and exits `2`; Core does not silently degrade to a
+partially visible write protocol.
+
+Locks remain implementation-local advisory coordination. Correctness MUST NOT
+depend on every conforming implementation sharing a lock representation or
+stale-lock protocol.
+
+A successful dry run applies neither publication protocol. `applied: true` for
+`init` requires removal of the matching initialization marker; `applied: true`
+for Artifact creation requires the canonical hard link to have succeeded. If a
+race invalidates a plan, the command exits `1` without overwriting existing
+content.
 
 ## Engineering Transaction Boundary
 
@@ -597,7 +640,7 @@ compare-and-swap boundary.
 
 The validation command does not publish or authorize publication by itself.
 A conforming integration operation uses the validated result, verifies the
-proposed commit's OID, first parent, and tree, and performs the Phase 11 atomic
+proposed commit's OID, first parent, and tree, and performs the [Filesystem and Configuration](11-filesystem-and-config.md) atomic
 compare-and-swap branch update. Core v1 defines those publication obligations
 without adding an `ef integrate` command.
 
@@ -669,7 +712,7 @@ ef validate --scope snapshot --format json --no-input
 ef query lookup REQ-031 --projection full --format json
 ```
 
-Phase 9 diagnostic paths, line and column positions, fields, sections, and
+[Validation and Integrity](09-validation.md) diagnostic paths, line and column positions, fields, sections, and
 related locations provide the editor mapping contract. Incremental validation,
 background processes, and editor adapters are outside Core v1.
 

@@ -85,13 +85,17 @@ the URL may be cited by multiple Artifacts; Core validation remains network-free
 inspect declared machine-readable Resources so I receive additional advisory
 feedback without changing Core integrity semantics.
 
-**Main flow:** Core always validates the owner, descriptor, and local file. For
-a built-in Resource type, it may also run an available optional specialized
-validator that is deterministic, local, read-only, and network-free.
+**Main flow:** Core always validates the owner, descriptor, and local file. A
+normative local `json-schema` or `openapi` Resource also runs its required
+minimum syntax check. After required checks pass, a built-in Resource type may
+run an available optional specialized validator that is deterministic, local,
+read-only, and network-free.
 
-**Success assertions:** A specialized hook may add informational advisory
-findings; its presence, absence, success, or failure does not change default or
-strict Core validity or completeness. Active owner changes remain
+**Success assertions:** A malformed normative structured Resource is a Core
+error, while an unavailable required syntax capability makes validation
+incomplete. An additional specialized hook may add informational advisory
+findings; its presence, absence, success, or failure does not otherwise change
+default or strict Core validity or completeness. Active owner changes remain
 CHG-attributed.
 
 **Guardrails:** An unavailable optional hook may produce an informational
