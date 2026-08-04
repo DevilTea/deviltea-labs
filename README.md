@@ -29,7 +29,6 @@ preserved source-history mapping.
 
 ## Compatibility
 
-- Node.js 22.14+ and 24.x are supported LTS lines. Node 26 is checked as a
-  non-blocking canary until it becomes an explicitly supported LTS line.
+- Node.js 22.14+ and 24.x are supported LTS lines.
 - `@deviltea/tsconfig@1` supports TypeScript 6 (`>=6.0.0 <7.0.0`). TypeScript
   `next` is checked as a non-blocking compatibility canary.
