@@ -56,7 +56,7 @@ pnpm release
 
 ## Testing
 
-- Unit tests use the built-in Node.js test runner and require Node >= 24.
+- Unit tests use the built-in Node.js test runner and run on Node 22 and 24.
 - Unit tests intercept the external `@antfu/eslint-config` import and assert the exact options passed by the wrapper.
 - Keep unit tests focused on this package's contract: default rules, nested option preservation, override precedence, booleans, and user config forwarding.
 - Do not snapshot the full resolved upstream ESLint config; that would make routine upstream upgrades unnecessarily brittle.
@@ -74,4 +74,4 @@ pnpm release
 - `eslint.config.js` imports `./dist/index.mjs`, so `pnpm build` must run before `pnpm lint` (`pnpm test` builds first, and CI runs test before lint); a stale `dist/` means you lint with old rules
 - `pnpm-workspace.yaml` exists only to hold pnpm supply-chain security settings; the config itself enforces them via `pnpm/yaml-enforce-settings` (requires `shellEmulator: true` and `trustPolicy: no-downgrade`) — removing those keys makes lint fail
 - `strictDepBuilds` is on with `onlyBuiltDependencies: []` — new deps that need build scripts must be reviewed into the allowlist
-- Node >= 24 required (`engines`, enforced by `engine-strict=true` in `.npmrc`)
+- Node 22.14+ and 24.x are supported (`engines`, enforced by `engine-strict=true` in `.npmrc`)

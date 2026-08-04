@@ -10,7 +10,7 @@ This package keeps Antfu's composable factory API while applying DevilTea's proj
 
 | Runtime | Supported version |
 | --- | --- |
-| Node.js | `>=24` |
+| Node.js | `^22.14.0 \|\| ^24.0.0` |
 | ESLint | `^10.4.0` |
 | Configuration format | ESLint flat config |
 

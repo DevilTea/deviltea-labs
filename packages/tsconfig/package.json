@@ -34,6 +34,9 @@
 		"docs",
 		"tsconfig.*.json"
 	],
+	"engines": {
+		"node": "^22.14.0 || ^24.0.0"
+	},
 	"scripts": {
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",

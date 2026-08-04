@@ -50,8 +50,8 @@ No test suite — validation is `pnpm build` (includes vue-tsc type-check) + `pn
 
 ## Gotchas
 
-- tsdown uses `unplugin-vue/rolldown` to compile the Vue SFC and `dts.vue` to emit the ESM declaration entry; keep package.json `exports` paths in sync with its `dist/index.mjs` and `dist/index.d.mts` output
+- tsdown uses `unplugin-vue/rolldown` to compile the Vue SFC and `dts.vue` to emit the ESM declaration entry; keep package.json `exports` paths in sync with its `dist/index.js` and `dist/index.d.ts` output
 - `pnpm-workspace.yaml` exists only to hold pnpm supply-chain security settings; `strictDepBuilds` is on (only `esbuild` is in `ignoredBuiltDependencies`) — new deps that need build scripts must be reviewed into the lists
 - `shellEmulator: true` — keep any glob in package.json scripts quoted
-- Node >= 24 required (`engines`)
+- Node 22.14+ and 24.x are supported (`engines` and CI matrix)
 - A weekly `security-audit.yml` workflow runs `pnpm audit --audit-level=moderate` (Sundays 21:00 UTC)

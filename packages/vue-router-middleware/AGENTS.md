@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`@deviltea/vue-router-middleware` is a small route middleware system for Vue Router. Middlewares are declared per-route via `meta.middleware` (a function or array, typed through a `vue-router` module augmentation) and executed by registering `handleMiddlewares` as a global `beforeEach` guard; a middleware can abort, redirect, or continue navigation, sync or async. Published as a dual ESM/CJS package with peer deps `vue >=3` and `vue-router >=4`.
+`@deviltea/vue-router-middleware` is a small route middleware system for Vue Router. Middlewares are declared per-route via `meta.middleware` (a function or array, typed through a `vue-router` module augmentation) and executed by registering `handleMiddlewares` as a global `beforeEach` guard; a middleware can abort, redirect, or continue navigation, sync or async. Published as an ESM-only package with peer deps `vue >=3` and `vue-router >=4`.
 
 **Repository structure:**
 ```
@@ -66,6 +66,6 @@ pnpm typecheck
 
 - ESLint enforces `package.json` key order (`jsonc/sort-keys` via `@deviltea/eslint-config`) — run `pnpm lint:fix` after editing `package.json`
 - `pnpm-workspace.yaml` exists only to hold pnpm supply-chain security settings (this is a single-package repo); `strictDepBuilds` is on — new deps that need build scripts must be reviewed into `onlyBuiltDependencies`/`ignoredBuiltDependencies`
-- Node >= 24 required (`engines`), though CI also tests on Node 22
+- Node 22.14+ and 24.x are supported (`engines` and CI matrix)
 - `handleMiddlewares` skips all middlewares when navigating to an identical route (same path, name, query, params, hash) and when `to.matched` is empty — mind this when reasoning about guard behavior
 - A weekly `security-audit.yml` workflow runs `pnpm audit --audit-level=moderate` (Sundays 21:00 UTC)

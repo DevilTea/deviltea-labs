@@ -29,6 +29,9 @@
 	"files": [
 		"dist"
 	],
+	"engines": {
+		"node": "^22.14.0 || ^24.0.0"
+	},
 	"scripts": {
 		"build": "tsdown",
 		"build:pack": "pnpm build && pnpm pack",
