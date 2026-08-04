@@ -307,10 +307,11 @@ linked_repositories: []
 ```
 
 A composite workspace declares independent named Git worktree slots such as
-frontend, backend, or management. Project discovery can ascend across their Git
-boundaries to the nearest `.engineering/ef.yaml`, then verifies that the current
-worktree matches a declared slot. Core does not attest remote repository
-identity.
+frontend, backend, or management. In EF Core v1 every slot is located beneath
+the project root; sibling and absolute external worktrees are unsupported.
+Project discovery can ascend across their Git boundaries to the nearest
+`.engineering/ef.yaml`, then verifies that the current worktree matches a
+declared slot. Core does not attest remote repository identity.
 
 Linked-repository IDs provide named workspace slots and provenance context;
 Core does not attest remote repository identity or manage branches,
@@ -468,6 +469,10 @@ engineering atomicity is enforced at Git transition integration.
     source processing, selective retention, provenance, and promotion.
 13. [CLI Contract](13-cli-contract.md) — command surface, JSON transport,
     authorization, exits, CI, editor integration, and write safety.
+
+Companion: [Diagnostic Registry](diagnostic-registry.md) — central index of
+stable diagnostic codes, ownership, severity, scope, exit treatment, and
+reserved numeric slots.
 
 ## Explicit Non-goals
 

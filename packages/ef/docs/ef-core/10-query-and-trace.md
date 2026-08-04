@@ -66,8 +66,8 @@ including draft-only changes that do not require CHG.
 All EF Core queries are:
 
 - read-only;
-- deterministic for the same snapshot, configuration, query, and declared
-  query implementation version;
+- deterministic for the same snapshot, configuration, query, and fixed EF
+  Core v1 search profile;
 - computed from authoritative files or a verified equivalent derived index;
 - ordered according to this specification;
 - network-free;
@@ -246,10 +246,17 @@ Searchable surfaces are:
 title
 summary
 each tag
-Markdown body text
+Markdown body source lines
 each Resource location
 each Resource description
 ```
+
+Body search uses the authoritative UTF-8 Markdown source after frontmatter,
+line by line. It searches each original source line exactly as stored before
+normalization, including heading markers, link destinations, inline and fenced
+code, raw HTML, HTML comments, table syntax, and Markdown punctuation. EF Core
+v1 deliberately chooses this raw-line model instead of an implementation-
+dependent rendered-text or Markdown-AST text projection.
 
 Search does not read binary Resource content, remote URL content, Git commit
 messages, rendered output, or extension values. An extension may define a
@@ -257,13 +264,16 @@ separate namespaced query operation, but it cannot change Core search results.
 
 ### Normalization
 
-Text and query terms use Unicode NFC normalization. Search is case-insensitive
-by default using the implementation's pinned Unicode simple case-fold data.
-A caller MAY request case-sensitive literal matching.
+Text and query terms use Unicode NFC normalization. Case-insensitive search
+uses the Unicode 15.1.0 simple case-fold mappings with status `C` and `S` from
+`CaseFolding.txt`. Implementations MUST ship or otherwise pin equivalent data
+and MUST NOT substitute the process locale or ambient ICU version. A caller MAY
+request case-sensitive literal matching after NFC normalization.
 
-The Unicode normalization and case-fold data version is part of the query
-implementation version and cache fingerprint. An implementation MUST NOT use
-locale-dependent process settings.
+The EF Core major fixes this search profile. A compatible implementation update
+MUST NOT change matches or ordering by changing Unicode data or Markdown text
+projection. The fixed Unicode version and raw-line profile remain part of every
+cache fingerprint.
 
 Multiple terms use AND at Artifact scope: every term must match at least one
 searchable surface of the same Artifact. Terms do not need to occur in the same
@@ -327,7 +337,7 @@ term-attribution fields.
 }
 ```
 
-Line and column are one-based original-source positions and use the Phase 9
+Line and column are one-based original-source positions and use the [Validation and Integrity](09-validation.md)
 Unicode-scalar column convention. Normalized matching is mapped back to the
 original source span before a position is reported. `line` and `column` are
 either both integers or both null. `section` is independently null when the
@@ -737,7 +747,7 @@ All five keys are required:
 | `kind` | string | Query kind |
 | `complete` | boolean | Whether the result is complete and trustworthy |
 | `data` | kind-specific object or null | Query result |
-| `diagnostics` | diagnostic array | Phase 9 diagnostic objects |
+| `diagnostics` | diagnostic array | [Validation and Integrity](09-validation.md) diagnostic objects |
 
 Query kinds are:
 
@@ -820,13 +830,11 @@ the CLI contract.
 
 - Project-root discovery, Artifact paths, authoritative integration history,
   index locations, cache locations, line-ending normalization, and Git
-  materialization are defined in Phase 11: Filesystem and Configuration.
+  materialization are defined in [Filesystem and Configuration](11-filesystem-and-config.md).
 - Temporary normalization input is non-authoritative and excluded from search
-  and trace. Selectively retained source Resources follow Phase 12: Input
-  Normalization and Promotion.
+  and trace. Selectively retained source Resources follow [Input Normalization and Promotion](12-input-normalization.md).
 - CLI command names, arguments, human rendering, JSON transport, exit behavior,
-  Resource reading, and context-bundle ergonomics are defined in Phase 13: CLI
-  Contract.
+  Resource reading, and context-bundle ergonomics are defined in [CLI Contract](13-cli-contract.md).
 - Relevance ranking, fuzzy or semantic search, arbitrary graph-query languages,
   unbounded implicit traversal, cross-project queries, partial results, Resource
   binary embedding, and LLM-selected query inference are not part of EF Core v1.

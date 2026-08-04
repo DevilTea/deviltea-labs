@@ -322,6 +322,6 @@ systems without an engineering need.
   require stricter rules through policy or validation hooks.
 - Content hashing, notarization, external archive integration, and source-system
   APIs are outside EF Core v1.
-- Phase 13: CLI Contract intentionally defines no persistent ingestion or
+- [CLI Contract](13-cli-contract.md) intentionally defines no persistent ingestion or
   Resource-capture command in EF Core v1; temporary processors may remain
   implementation-specific.

@@ -122,7 +122,9 @@ terminal.
 canonical truth.
 
 - Draft content MAY be edited without creating a CHG.
-- Its `id` and `type` remain immutable according to the identity contract.
+- Its `type` remains immutable.
+- Its `id` remains immutable except for the pre-integration provisional
+  collision-repair operation defined by Artifact Identity.
 - Current-truth queries MUST exclude it.
 - It MAY become `active`.
 - It MAY become `retired` when work stops without activation.
@@ -426,17 +428,15 @@ the previous authoritative graph or repository integration context.
 ## Deferred
 
 - Relation vocabulary and the representation of replacement relations are
-  defined in Phase 4: Relations Ontology.
+  defined in [Relations Ontology](04-relations.md).
 - Supersession topology, canonical replacement resolution, and cycle rules are
-  defined in Phase 5: Supersession and Canonical State.
+  defined in [Supersession and Canonical State](05-supersession.md).
 - CHG completion criteria, active editorial changes, provenance, and atomic
-  transaction behavior are defined in Phase 7: CHG Transaction Semantics.
-- Required lifecycle rationale sections are defined in Phase 8: Artifact Body
-  Schemas.
+  transaction behavior are defined in [CHG Transaction Semantics](07-change-transactions.md).
+- Required lifecycle rationale sections are defined in [Artifact Body Schemas](08-artifact-schemas.md).
 - Previous-state discovery, Git-aware validation, diagnostic aggregation, and
-  exit behavior are defined in Phase 9: Validation and Integrity.
+  exit behavior are defined in [Validation and Integrity](09-validation.md).
 - Repository archival and administrative maintenance state are outside the
-  Artifact lifecycle. Their configuration, if needed, belongs to Phase 11:
-  Filesystem and Configuration.
+  Artifact lifecycle. Their configuration, if needed, belongs to [Filesystem and Configuration](11-filesystem-and-config.md).
 - Review and approval requirements are project governance expressed through
   Git workflow or POL, not additional EF Core lifecycle states.

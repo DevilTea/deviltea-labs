@@ -7,8 +7,9 @@ worktree so that the project has a canonical, version-controlled engineering
 knowledge root.
 
 **Preconditions:** The selected project root is exactly a Git worktree root,
-does not already contain `.engineering/`, and the proposed integration ref has
-no existing EF state in its first-parent history.
+does not already contain `.engineering/`, the maintainer has explicitly selected
+and confirmed a full local integration ref, and that ref has no existing EF
+state in its first-parent history.
 
 **Main flow:**
 
@@ -21,18 +22,20 @@ no existing EF state in its first-parent history.
    root, and an active PROJECT with all nine envelope fields.
 3. EF creates the required PROJECT body sections and the canonical empty
    Terminology table, unless valid user-provided terminology is supplied.
-4. EF validates temporary content, confirms `.engineering/` is still absent,
-   and atomically publishes the new directory.
+4. EF validates the complete plan, atomically claims `.engineering/`, writes
+   a nonce-bearing initialization marker, creates and validates the complete
+   bootstrap content, and removes the marker only after success.
 5. The maintainer commits the candidate, validates it through UC-041, and
    conditionally publishes that exact commit through UC-043.
 
 **Success assertions:** Exactly the canonical layout exists; config contains
 all required fields; `.engineering/.gitignore` has the four exact Core entries;
 PROJECT is active, complete, and has no `Lifecycle` section; no terms are
-invented.
+invented; no initialization marker remains when the operation reports applied.
 
-**Guardrails:** Existing `.engineering/` is never overwritten; `PROJECT` is
-not created by `artifact create`; initialization does not create CHGs or
+**Guardrails:** Existing `.engineering/` is never overwritten; a marker left
+by interruption is reported and never silently repaired or removed; `PROJECT`
+is not created by `artifact create`; initialization does not create CHGs or
 terminal Artifacts; an unapproved non-interactive write does not occur.
 
 ## UC-002 — Discover the applicable project from a working directory

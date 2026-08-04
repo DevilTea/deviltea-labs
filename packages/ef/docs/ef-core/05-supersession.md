@@ -528,17 +528,14 @@ cycles, and terminal source invariants.
 
 ## Deferred
 
-- Resource ownership and replacement-resource handling are defined in Phase 6:
-  Resource Schema. Resources remain non-inherited unless that specification
+- Resource ownership and replacement-resource handling are defined in [Resource Schema](06-resources.md). Resources remain non-inherited unless that specification
   explicitly defines a narrower rule.
 - CHG completion criteria, before-and-after comparison, supersession rationale,
-  correction transactions, and filesystem atomicity are defined in Phase 7:
-  CHG Transaction Semantics.
-- Artifact-specific replacement rationale sections are defined in Phase 8:
-  Artifact Body Schemas.
+  correction transactions, and filesystem atomicity are defined in [CHG Transaction Semantics](07-change-transactions.md).
+- Artifact-specific replacement rationale sections are defined in [Artifact Body Schemas](08-artifact-schemas.md).
 - Repository-history validation, previous-state snapshots, diagnostic modes,
-  and integration checks are defined in Phase 9: Validation and Integrity.
+  and integration checks are defined in [Validation and Integrity](09-validation.md).
 - Stable current-resolution output, replacement paths, trace traversal, and
-  impact queries are defined in Phase 10: Query and Trace.
+  impact queries are defined in [Query and Trace](10-query-and-trace.md).
 - Physical atomic-write strategy and integration-ref configuration are
-  defined in Phase 11: Filesystem and Configuration.
+  defined in [Filesystem and Configuration](11-filesystem-and-config.md).

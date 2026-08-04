@@ -559,16 +559,14 @@ complete graph or previous authoritative state.
 
 - Transitive canonical replacement resolution, one-to-many and many-to-one
   canonical state, replacement chains, and atomic supersession mutation are
-  defined in Phase 5: Supersession and Canonical State.
+  defined in [Supersession and Canonical State](05-supersession.md).
 - CHG planned-effect representation, completion criteria, effect diffing,
-  resource mutation, and Git/PR/Issue provenance are defined in Phase 7: CHG
-  Transaction Semantics.
-- Relation requirements specific to each Artifact body are defined in Phase 8:
-  Artifact Body Schemas.
+  resource mutation, and Git/PR/Issue provenance are defined in [CHG Transaction Semantics](07-change-transactions.md).
+- Relation requirements specific to each Artifact body are defined in [Artifact Body Schemas](08-artifact-schemas.md).
 - Graph loading, previous-state comparison, strict mode, and diagnostic process
-  behavior are defined in Phase 9: Validation and Integrity.
+  behavior are defined in [Validation and Integrity](09-validation.md).
 - Incoming-edge queries, transitive trace, impact traversal, and stable JSON
-  output are defined in Phase 10: Query and Trace.
+  output are defined in [Query and Trace](10-query-and-trace.md).
 - Cross-project relation targets are not part of EF Core v1. External sources
   and references are represented as Resources; a future specification may
   define namespaced external Artifact addresses.

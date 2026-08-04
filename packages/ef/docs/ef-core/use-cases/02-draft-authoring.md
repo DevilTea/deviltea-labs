@@ -69,8 +69,9 @@ readers and validators can rely on an Artifact's type and lifecycle.
 
 **Success assertions:** Active bodies are meaningful; PROJECT Terminology
 starts with exactly one correctly headed, canonically sorted glossary table;
-REQ and PRD outcome sections contain list items; ADR includes a meaningful
-alternative; POL says how compliance is determined.
+PRD `Success Criteria` and REQ `Acceptance Criteria` contain non-empty list
+items; ADR includes a meaningful alternative; POL says how compliance is
+determined.
 
 **Guardrails:** Markdown prose does not create relations, Resources, statuses,
 or effects; `TODO`, `TBD`, and `Lorem ipsum` alone do not complete active

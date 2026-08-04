@@ -407,10 +407,29 @@ classified as orphan Resources merely because no Artifact declares them.
 Treatment of temporary files is defined by the filesystem and configuration
 specification.
 
+### Required normative syntax checks
+
+A normative local Resource with built-in type `json-schema` or `openapi` MUST
+pass a required deterministic Core syntax check. This check is part of Resource
+integrity rather than an optional advisory hook.
+
+- A normative `json-schema` Resource MUST parse according to its declared JSON
+  or YAML media type into a JSON-compatible value whose root is a mapping or
+  boolean.
+- A normative `openapi` Resource MUST parse according to its declared JSON or
+  YAML media type into a mapping with a non-empty scalar `openapi` field.
+
+These checks establish readable structured syntax and the minimum identifying
+shape. Complete JSON Schema metaschema validation and complete OpenAPI semantic
+validation remain optional advisory work. A required syntax failure emits
+`EF-RES-020`. If an implementation cannot provide a required normative syntax
+capability, the requested validation is incomplete and emits `EF-VAL-006`
+rather than accepting the Resource without the check.
+
 ### Validation hooks
 
-A built-in Resource type MAY select an optional Core specialized validator. For
-example:
+After every required normative syntax check, a built-in Resource type MAY select
+an additional optional Core specialized validator. For example:
 
 ```text
 openapi     -> OpenAPI syntax and structure validator
@@ -528,12 +547,12 @@ other references that Artifact.
 ## Validation
 
 Resource validation checks each descriptor, local filesystem state, complete
-project ownership, owner lifecycle, and available built-in optional specialized
-hooks.
+project ownership, owner lifecycle, required normative syntax checks, and
+available built-in optional specialized hooks.
 
 `EF-RES-012` is emitted only as informational advisory output when an optional
 specialized validator runs and reports malformed content. An unavailable
-optional specialized validator may produce the Phase 9 informational
+optional specialized validator may produce the [Validation and Integrity](09-validation.md) informational
 diagnostic. Neither condition makes default or strict Core validation invalid
 or incomplete. Separate extension validation uses its own result contract.
 
@@ -559,6 +578,7 @@ The Resource diagnostic codes are:
 | `EF-RES-017` | warning | External Resource uses insecure HTTP rather than HTTPS |
 | `EF-RES-018` | warning | A listed canonical file suffix and declared media type are inconsistent |
 | `EF-RES-019` | error | Unknown Resource field or invalid extension field |
+| `EF-RES-020` | error | Required normative Resource syntax validation failed |
 
 A standalone descriptor validator can check shape, vocabulary, ordering, URL
 syntax, and media types. Missing files, path containment, exclusive ownership,
@@ -568,17 +588,15 @@ previous-state context.
 ## Deferred
 
 - Resource addition, modification, removal, verification evidence, and CHG
-  effect recording are defined in Phase 7: CHG Transaction Semantics.
+  effect recording are defined in [CHG Transaction Semantics](07-change-transactions.md).
 - Resource requirements and allowed role conventions specific to each Artifact
-  type are defined in Phase 8: Artifact Body Schemas.
+  type are defined in [Artifact Body Schemas](08-artifact-schemas.md).
 - Managed-root scanning, validation-hook execution, network-check separation,
-  and strict diagnostic behavior are defined in Phase 9: Validation and
-  Integrity.
-- Resource lookup and context-selection output are defined in Phase 10: Query
-  and Trace.
+  and strict diagnostic behavior are defined in [Validation and Integrity](09-validation.md).
+- Resource lookup and context-selection output are defined in [Query and Trace](10-query-and-trace.md).
 - EF project root discovery, managed Resource directories, symlink policy,
   Git-tracking requirements, temporary files, and migration are defined in
-  Phase 11: Filesystem and Configuration.
+  [Filesystem and Configuration](11-filesystem-and-config.md).
 - Content-addressed storage, cross-project Resource addresses, Resource-level
   identity, Resource relations, custom roles, and remote normative Resources
   are not part of EF Core v1.

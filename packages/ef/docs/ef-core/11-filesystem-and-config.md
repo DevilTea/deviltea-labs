@@ -47,6 +47,12 @@ A composite workspace has one project repository and one or more linked
 repositories. Linked repositories are ordinary independent repositories, not
 Git submodules, and are ignored by the project repository.
 
+EF Core v1 linked-repository paths MUST be descendants of the project root.
+Sibling repositories, absolute external worktrees, and paths reached through
+`..` are unsupported. In v1, "composite workspace" therefore means embedded
+local workspace slots beneath the project repository rather than an arbitrary
+set of filesystem peers.
+
 ## Canonical Layout
 
 The authoritative EF layout is fixed:
@@ -543,7 +549,7 @@ interpret the file.
 ## Deferred
 
 - Stable CLI flags for explicit roots, core validation, and workspace
-  validation are defined in Phase 13: CLI Contract.
+  validation are defined in [CLI Contract](13-cli-contract.md).
 - A structured implementation-provenance schema is deferred.
 - Cross-repository merge, release, deployment, and transaction orchestration
   are outside EF Core.
