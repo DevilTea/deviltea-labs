@@ -575,11 +575,12 @@ process has neither proof and MUST leave the claimed directory untouched.
 
 A crash before marker creation can leave an `.engineering` directory without
 `ef.yaml`; a later crash can leave the marker visible. Project discovery treats
-either state as an incomplete initialization and reports `EF-VAL-012` without
-searching past it. Validation and later mutation commands MUST NOT silently
-repair, merge with, or delete that state. Recovery is an explicit operator
-action. This is the portable trade-off for avoiding platform-specific native
-directory publication primitives.
+either state as an incomplete initialization without searching past it.
+Validation and mutation commands report `EF-VAL-012`; query commands preserve
+their namespace and report the completeness failure as `EF-QRY-013`. Commands
+MUST NOT silently repair, merge with, or delete that state. Recovery is an
+explicit operator action. This is the portable trade-off for avoiding
+platform-specific native directory publication primitives.
 
 A pre-existing `.engineering` path, including one with an initialization
 marker, is never overwritten. A failed atomic claim is a complete domain
