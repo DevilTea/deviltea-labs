@@ -6,6 +6,7 @@ export default deviltea({
 		'**/dist/**',
 		'**/.vitepress/cache/**',
 		'**/.vitepress/dist/**',
+		'packages/ef/docs/**/*.md/**',
 	],
 }, {
 	files: ['packages/*/package.json'],
