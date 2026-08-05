@@ -6,19 +6,22 @@
 
 **Main flow:** For `ef init` or `ef artifact create`, EF computes the complete
 plan first. The user chooses `--dry-run`, confirms interactively, or supplies
-`--yes` with `--no-input`. EF validates temporary content, rechecks target
-absence and identity, and publishes by same-filesystem create-if-absent
-semantics.
+`--yes` with `--no-input`. Initialization atomically claims `.engineering`,
+creates a nonce-bearing completion marker, and removes it last. An interruption
+before marker creation remains detectable from the claimed directory without a
+configuration. Draft creation publishes already complete temporary bytes
+through a same-filesystem hard-link create-if-absent operation.
 
-**Success assertions:** Dry run returns a complete unapplied plan; init creates
-only a new `.engineering/` directory and artifact creation creates only one new
-draft file; a race rejects without publication; optional writer locks are
-advisory only.
+**Success assertions:** Dry run returns a complete unapplied plan; successful
+init leaves one complete `.engineering/` directory with no marker; Artifact
+creation exposes only one complete new draft file; a race rejects without
+replacement; optional writer locks are advisory only.
 
 **Guardrails:** JSON implies no input, so JSON mutation needs `--dry-run` or
-`--yes`; declined or missing authorization is incomplete (exit 2); a normal
-replacing rename is insufficient; Core has no general arbitrary multi-file
-mutation CLI.
+`--yes`; declined or missing authorization is incomplete (exit 2); an
+interrupted initialization is reported rather than repaired; replacing rename,
+visible incremental writes, and copy-based publication are insufficient; Core
+has no general arbitrary multi-file mutation CLI.
 
 ## UC-061 — Consume stable JSON command results programmatically
 

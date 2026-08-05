@@ -7,33 +7,38 @@ worktree so that the project has a canonical, version-controlled engineering
 knowledge root.
 
 **Preconditions:** The selected project root is exactly a Git worktree root,
-does not already contain `.engineering/`, and the proposed integration ref has
-no existing EF state in its first-parent history.
+does not already contain `.engineering/`, the maintainer has explicitly selected
+and confirmed a full local integration ref, and that ref has no existing EF
+state in its first-parent history.
 
 **Main flow:**
 
 1. The maintainer runs `ef init`. In non-interactive mode they supply
    `--title`, `--summary`, `--vision`, `--project-scope`, `--non-goals`, and
-   `--context`; `--integration-ref` is optional and defaults to
-   `refs/heads/main`.
+   `--context`, plus an explicit full local `--integration-ref`.
 2. EF plans a single new `.engineering/` directory, including canonical
    `ef.yaml`, `.gitignore`, `PROJECT.md`, Artifact directories, Resources
    root, and an active PROJECT with all nine envelope fields.
 3. EF creates the required PROJECT body sections and the canonical empty
    Terminology table, unless valid user-provided terminology is supplied.
-4. EF validates temporary content, confirms `.engineering/` is still absent,
-   and atomically publishes the new directory.
+4. EF validates the complete plan, atomically claims `.engineering/`, creates
+   its runtime directory and nonce-bearing initialization marker, creates and
+   verifies the planned filesystem content, and removes the marker only after
+   successful materialization. It does not run working-tree project validation
+   while the marker exists.
 5. The maintainer commits the candidate, validates it through UC-041, and
    conditionally publishes that exact commit through UC-043.
 
 **Success assertions:** Exactly the canonical layout exists; config contains
 all required fields; `.engineering/.gitignore` has the four exact Core entries;
 PROJECT is active, complete, and has no `Lifecycle` section; no terms are
-invented.
+invented; no initialization marker remains when the operation reports applied.
 
-**Guardrails:** Existing `.engineering/` is never overwritten; `PROJECT` is
-not created by `artifact create`; initialization does not create CHGs or
-terminal Artifacts; an unapproved non-interactive write does not occur.
+**Guardrails:** Existing `.engineering/` is never overwritten; an incomplete
+claim left by interruption, with or without a marker, is reported and never
+silently repaired or removed; `PROJECT` is not created by `artifact create`;
+initialization does not create CHGs or terminal Artifacts; an unapproved
+non-interactive write does not occur.
 
 ## UC-002 — Discover the applicable project from a working directory
 
@@ -44,21 +49,27 @@ the intended authoritative state.
 **Main flow:**
 
 1. EF uses an explicit project root when supplied; otherwise it searches the
-   working directory and parents for the nearest `.engineering/ef.yaml`.
+   working directory and parents for the nearest `.engineering` path, without
+   skipping one merely because `ef.yaml` is absent.
 2. The search may cross an intervening Git-worktree boundary.
-3. EF validates that the discovered directory is the containing Git worktree
+3. A nearest `.engineering` directory without `ef.yaml`, or with
+   `.tmp/init-state.json`, is reported as an incomplete initialization; the
+   search does not continue past it.
+4. EF validates that the discovered directory is the containing Git worktree
    root and that the current directory is either in that repository or in an
    exactly declared linked-repository slot.
-4. From a nested linked-repository EF project, the nearer configuration wins.
+5. From a nested linked-repository EF project, the nearer claim wins, whether
+   it is complete or incomplete.
 
 **Success assertions:** Discovery is deterministic; a command in a declared
 `repos/frontend/src` can associate with its parent EF project; an explicit
 commit-bound command can use `--project` even when the checked-out tree lacks
 candidate EF files.
 
-**Guardrails:** An undeclared nested Git worktree is rejected; a config outside
-the containing worktree root is invalid; discovery never treats a linked
-repository as sharing the project repository's Git history.
+**Guardrails:** An incomplete nearer claim is never skipped, repaired, or
+deleted implicitly; an undeclared nested Git worktree is rejected; a config
+outside the containing worktree root is invalid; discovery never treats a
+linked repository as sharing the project repository's Git history.
 
 ## UC-003 — Configure a single repository or composite workspace
 

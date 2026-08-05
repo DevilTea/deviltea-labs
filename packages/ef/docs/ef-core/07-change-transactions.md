@@ -193,7 +193,7 @@ useful. If it does, every declared effect MUST still match the actual
 transaction. Draft work that is validly omitted from CHG coverage does not
 violate exactly-once coverage.
 
-The bootstrap exception applies only to the first EF state admitted by Phase 9
+The bootstrap exception applies only to the first EF state admitted by [Validation and Integrity](09-validation.md)
 bootstrap validation. That initial state MAY establish draft or active PRD,
 REQ, ADR, and POL Artifacts and their Resources without CHG effects. It MUST
 NOT contain terminal knowledge Artifacts or any CHG Artifact. After bootstrap
@@ -719,18 +719,17 @@ attestations unless supported by deterministic hooks or captured evidence.
 ## Deferred
 
 - Complete CHG body ordering, optional sections, source-item conventions, and
-  Artifact-specific Markdown validation are defined in Phase 8: Artifact Body
-  Schemas.
+  Artifact-specific Markdown validation are defined in [Artifact Body Schemas](08-artifact-schemas.md).
 - Repository baseline selection, diff normalization, Git-aware deletion and
   ownership comparison, validation modes, and exit behavior are defined in
-  Phase 9: Validation and Integrity.
+  [Validation and Integrity](09-validation.md).
 - Stable CHG lookup, effect queries, source trace, and machine-output schemas
-  are defined in Phase 10: Query and Trace.
+  are defined in [Query and Trace](10-query-and-trace.md).
 - Project-root discovery, authoritative integration configuration, atomic file
   replacement, locking, temporary files, and Git integration are defined in
-  Phase 11: Filesystem and Configuration.
+  [Filesystem and Configuration](11-filesystem-and-config.md).
 - Temporary input normalization, selective source retention, and promotion into
-  CHG provenance are defined in Phase 12: Input Normalization and Promotion.
+  CHG provenance are defined in [Input Normalization and Promotion](12-input-normalization.md).
 - Cryptographic attestations, CI-provider APIs, command execution, deployment
   orchestration, and automatic external truth verification are outside EF Core
   v1.

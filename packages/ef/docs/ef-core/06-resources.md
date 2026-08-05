@@ -533,7 +533,7 @@ hooks.
 
 `EF-RES-012` is emitted only as informational advisory output when an optional
 specialized validator runs and reports malformed content. An unavailable
-optional specialized validator may produce the Phase 9 informational
+optional specialized validator may produce the [Validation and Integrity](09-validation.md) informational
 diagnostic. Neither condition makes default or strict Core validation invalid
 or incomplete. Separate extension validation uses its own result contract.
 
@@ -568,17 +568,15 @@ previous-state context.
 ## Deferred
 
 - Resource addition, modification, removal, verification evidence, and CHG
-  effect recording are defined in Phase 7: CHG Transaction Semantics.
+  effect recording are defined in [CHG Transaction Semantics](07-change-transactions.md).
 - Resource requirements and allowed role conventions specific to each Artifact
-  type are defined in Phase 8: Artifact Body Schemas.
+  type are defined in [Artifact Body Schemas](08-artifact-schemas.md).
 - Managed-root scanning, validation-hook execution, network-check separation,
-  and strict diagnostic behavior are defined in Phase 9: Validation and
-  Integrity.
-- Resource lookup and context-selection output are defined in Phase 10: Query
-  and Trace.
+  and strict diagnostic behavior are defined in [Validation and Integrity](09-validation.md).
+- Resource lookup and context-selection output are defined in [Query and Trace](10-query-and-trace.md).
 - EF project root discovery, managed Resource directories, symlink policy,
   Git-tracking requirements, temporary files, and migration are defined in
-  Phase 11: Filesystem and Configuration.
+  [Filesystem and Configuration](11-filesystem-and-config.md).
 - Content-addressed storage, cross-project Resource addresses, Resource-level
   identity, Resource relations, custom roles, and remote normative Resources
   are not part of EF Core v1.

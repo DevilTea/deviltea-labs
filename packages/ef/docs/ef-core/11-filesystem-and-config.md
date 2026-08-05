@@ -47,6 +47,12 @@ A composite workspace has one project repository and one or more linked
 repositories. Linked repositories are ordinary independent repositories, not
 Git submodules, and are ignored by the project repository.
 
+EF Core v1 linked-repository paths MUST be descendants of the project root.
+Sibling repositories, absolute external worktrees, and paths reached through
+`..` are unsupported. In v1, "composite workspace" therefore means embedded
+local workspace slots beneath the project repository rather than an arbitrary
+set of filesystem peers.
+
 ## Canonical Layout
 
 The authoritative EF layout is fixed:
@@ -294,15 +300,28 @@ automatic migration of existing files.
 Project discovery uses this order:
 
 1. An explicitly supplied project root, if present.
-2. Otherwise, search the current directory and each parent for
-   `.engineering/ef.yaml`.
+2. Otherwise, search the current directory and each parent for an
+   `.engineering` path.
 3. Do not stop the upward search at an intervening Git worktree boundary.
-4. Select the nearest matching configuration.
-5. Load the configuration and validate its project-repository and workspace
-   association.
+4. Select the nearest `.engineering` path. Do not skip it merely because its
+   `ef.yaml` is absent.
+5. If the selected path is a directory without `ef.yaml`, or contains
+   `.tmp/init-state.json`, classify it as an incomplete working-tree
+   initialization. Validation and mutation operations report `EF-VAL-012`;
+   query operations wrap the failure as `EF-QRY-013` under their diagnostic
+   ownership contract.
+6. Otherwise, load the configuration and validate its project-repository and
+   workspace association.
 
 The discovered project root MUST be the Git worktree root that directly
 contains `.engineering`. A configuration found elsewhere is invalid.
+
+For commands whose semantic input is the working tree, the absent-config rule
+makes the crash window between claiming `.engineering` and writing the
+initialization marker detectable. It also reserves an `.engineering` directory
+for EF: commands do not search past an incomplete nearer claim and do not
+silently reinterpret it as an unrelated directory. An `.engineering` path that
+is not a directory is invalid and cannot be used as an initialization claim.
 
 For commit-bound transition or bootstrap validation, an explicit `--project`
 identifies the project Git worktree root even when its checked-out tree does not
@@ -311,6 +330,9 @@ configuration from the supplied commit or commits. Current working-tree
 configuration may assist implicit root discovery but is not a semantic
 substitute for either materialized commit. This exception allows bootstrap
 validation from a pre-EF checkout when the repository root is explicit.
+Consequently, the working-tree incomplete-initialization check above does not
+replace or block explicit commit-bound materialization; transition and bootstrap
+validation derive initialization state from their selected commit trees.
 
 After discovery, a command is associated with the project when its working
 directory is:
@@ -543,7 +565,7 @@ interpret the file.
 ## Deferred
 
 - Stable CLI flags for explicit roots, core validation, and workspace
-  validation are defined in Phase 13: CLI Contract.
+  validation are defined in [CLI Contract](13-cli-contract.md).
 - A structured implementation-provenance schema is deferred.
 - Cross-repository merge, release, deployment, and transaction orchestration
   are outside EF Core.

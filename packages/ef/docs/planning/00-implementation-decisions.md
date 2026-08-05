@@ -25,8 +25,13 @@ the specification before the affected runtime behavior is implemented.
   targeting ES2022.
 - The package exposes the executable through
   `bin: { "ef": "./dist/cli.mjs" }` and retains a Node.js shebang.
-- Supported Node.js versions match the workspace baseline:
+- Published CLI runtime support matches the workspace baseline:
   `^22.14.0 || ^24.0.0`.
+- Development and package builds use Node.js
+  `>=22.18.0 <23 || >=24.0.0 <25` so the selected `tsdown` toolchain is within
+  its supported engine range. CI builds once on Node.js 24, packs the package,
+  and runs packed-consumer CLI tests on the minimum and current supported
+  Node.js 22 and 24 runtimes.
 - macOS, Linux, and Windows are supported through the Node.js npm executable.
   EF v1 does not publish standalone native executables.
 - The experimental `tsdown` single-executable mode is not used.
@@ -144,9 +149,19 @@ Git invocation policy includes:
 - prevent replace objects from changing commit materialization;
 - prefer `-z` output and parse bytes instead of quoted or localized paths;
 - separate option arguments from path arguments with `--` where applicable;
-- support both SHA-1 and SHA-256 repository object formats; and
+- support both SHA-1 and SHA-256 repository object formats;
 - detect required Git capabilities at runtime instead of trusting a version
-  string alone.
+  string alone; and
+- construct a sanitized child environment rather than inheriting repository-
+  selecting Git variables from the parent process.
+
+The executor removes at least `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+`GIT_NAMESPACE`, and dynamic `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_*` /
+`GIT_CONFIG_VALUE_*` entries. It invokes repository commands through an
+explicit verified root, normally `git -C <root>`, and fixes
+`GIT_TERMINAL_PROMPT=0`, `GIT_NO_REPLACE_OBJECTS=1`, `GIT_OPTIONAL_LOCKS=0`,
+`GIT_PAGER=cat`, `PAGER=cat`, and `LC_ALL=C`.
 
 Core v1 validation does not update the authoritative branch. If publication is
 implemented later, compare-and-swap behavior must use an explicit Git primitive
@@ -154,33 +169,30 @@ such as `update-ref` with both expected old and proposed new OIDs.
 
 ## Filesystem Publication Decision
 
-The accepted CLI contract currently requires atomic, create-if-absent
-publication of a complete `.engineering` directory. Portable Node.js does not
-expose one directory primitive with identical no-replace semantics on macOS,
-Linux, and Windows.
+The accepted Core contract uses two distinct portable publication protocols.
 
-Before `ef init` is implemented, amend or clarify the Core contract to use this
-portable ownership protocol:
+`ef init` uses atomic path ownership rather than pretending that portable
+Node.js can atomically publish a populated directory. It claims `.engineering`
+with non-recursive `mkdir`, creates the runtime directory and Core-defined nonce
+marker, creates and validates the planned contents, and removes the marker last.
+A crash before marker creation is detected from the claimed directory without a
+configuration; a later crash is also identified by the marker. Commands report
+either state through their owned completeness diagnostic: validation and
+mutation use `EF-VAL-012`, while query uses `EF-QRY-013`. No command silently
+repairs or deletes it. The live invocation may clean up after its exclusive
+`mkdir`; after marker creation it must also prove ownership by matching the
+nonce. A restarted process never cleans the claim automatically.
 
-1. atomically claim `.engineering` with non-recursive `mkdir`;
-2. create a runtime initialization marker under the claimed directory;
-3. write and validate the complete bootstrap content;
-4. remove the marker only after successful completion; and
-5. on failure, remove only paths proven to belong to that invocation.
+`ef artifact create` writes and validates a complete temporary file on the same
+filesystem, then uses `node:fs` hard-link creation to publish the canonical path
+with no-replace semantics. The implementation must capability-test this behavior
+on supported platforms and filesystems. If hard-link publication is unavailable,
+the command exits incomplete rather than falling back to copy or visible
+incremental writes. After linking, it removes the temporary name.
 
-The command never overwrites or merges with a pre-existing `.engineering`
-path. A crash may leave a recognizable incomplete initialization, so concurrent
-observers are not guaranteed to see only the absent or complete state. A later
-command must report that state and must not silently repair or delete it.
-
-This is an intentional portability trade-off. If strict all-or-nothing
-directory visibility remains normative, implementation must instead plan and
-ship platform-specific native no-replace rename support before mutation work
-begins.
-
-For single-file Artifact creation, the implementation plan must select and
-verify a cross-platform create-if-absent publication mechanism separately. A
-normal replacing rename is not acceptable.
+Tests cover concurrent claims, target-exists races, interrupted initialization,
+nonce-mismatched cleanup, unsupported hard links, and observation that a
+successfully published Artifact is complete on first visibility.
 
 ## CLI Behavior
 
@@ -288,8 +300,8 @@ written and reviewed:
 
 1. architecture and module dependency plan;
 2. parser, source-location, and diagnostic pipeline plan;
-3. filesystem discovery and safe-publication plan, including resolution of the
-   `init` contract conflict;
+3. filesystem discovery and safe-publication plan, including initialization
+   recovery behavior and cross-platform hard-link capability verification;
 4. Git materialization and transition-validation plan;
 5. CLI transport, interaction, cancellation, and error-mapping plan;
 6. query and Resource-read plan;

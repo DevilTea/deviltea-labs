@@ -175,8 +175,18 @@ The first component after `x-` is an extension namespace. For example,
 `x-acme-owner-team` is valid, while `x-owner` is not sufficiently namespaced.
 
 Extension values MUST be JSON-compatible: string, number, boolean, null, array,
-or mapping. Mapping keys MUST be strings. Extension fields MUST NOT redefine or
-change core identity, lifecycle, relation, resource, or validation semantics.
+or mapping. Mapping keys MUST be strings. Numbers use the RFC 8785 JSON number
+model. A numeric scalar is parsed to an IEEE 754 binary64 value; the ordinary
+decimal-to-binary rounding performed by that conversion is allowed, and the
+resulting binary64 value is the extension value. The result MUST be finite, so
+`NaN`, positive or negative infinity, and an input that overflows to infinity
+are invalid. Writers serialize that binary64 value using RFC 8785 number
+serialization, including serializing negative zero as `0`. Once parsed, the
+binary64 value MUST NOT be changed by a later read-write cycle. Higher-precision
+or exact-decimal extension data uses a string rather than a number.
+
+Extension fields MUST NOT redefine or change core identity, lifecycle, relation,
+resource, or validation semantics.
 
 Core tooling MUST preserve extension fields it does not understand. A declared
 extension or plugin MAY apply additional validation to fields in its namespace,
@@ -380,7 +390,7 @@ for machine consumption contain at least:
 - field path when the problem belongs to a field.
 
 The complete diagnostic object, including source locations and required
-`related` collection, follows the Phase 9 diagnostic contract. A stable
+`related` collection, follows the [Validation and Integrity](09-validation.md) diagnostic contract. A stable
 `location` SHOULD be included when available.
 
 Example diagnostic:
@@ -425,19 +435,16 @@ semantic relationship automatically.
 ## Deferred
 
 - ID syntax, prefixes, allocation, uniqueness, immutability, and filenames are
-  defined in Phase 2: Artifact Identity.
+  defined in [Artifact Identity](02-identity.md).
 - Lifecycle states, transitions, terminal-state immutability, and current-state
-  semantics are defined in Phase 3: Lifecycle.
+  semantics are defined in [Lifecycle](03-lifecycle.md).
 - Relation entry fields, vocabulary, direction, compatibility, inverses,
-  ordering, uniqueness, and graph validation are defined in Phase 4: Relations
-  Ontology.
-- Supersession and canonical-state rules are defined in Phase 5: Supersession
-  and Canonical State.
+  ordering, uniqueness, and graph validation are defined in [Relations Ontology](04-relations.md).
+- Supersession and canonical-state rules are defined in [Supersession and Canonical State](05-supersession.md).
 - Resource entry fields, ownership, paths, URLs, ordering, and validation hooks
-  are defined in Phase 6: Resource Schema.
-- Required Markdown sections and body validation are defined in Phase 8:
-  Artifact Body Schemas.
+  are defined in [Resource Schema](06-resources.md).
+- Required Markdown sections and body validation are defined in [Artifact Body Schemas](08-artifact-schemas.md).
 - Complete diagnostic output, strict mode, warnings-as-errors, and process exit
-  codes are defined in Phase 9: Validation and Integrity.
+  codes are defined in [Validation and Integrity](09-validation.md).
 - Schema compatibility, migration, project layout, and configuration are
-  defined in Phase 11: Filesystem and Configuration.
+  defined in [Filesystem and Configuration](11-filesystem-and-config.md).
