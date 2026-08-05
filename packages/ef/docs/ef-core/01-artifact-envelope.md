@@ -176,10 +176,14 @@ The first component after `x-` is an extension namespace. For example,
 
 Extension values MUST be JSON-compatible: string, number, boolean, null, array,
 or mapping. Mapping keys MUST be strings. Numbers use the RFC 8785 JSON number
-model: they MUST be finite IEEE 754 binary64 values, MUST NOT use `NaN` or
-infinity, and negative zero is canonically serialized as `0`. An implementation
-that cannot preserve a parsed numeric value exactly under that model MUST reject
-the value rather than round it silently.
+model. A numeric scalar is parsed to an IEEE 754 binary64 value; the ordinary
+decimal-to-binary rounding performed by that conversion is allowed, and the
+resulting binary64 value is the extension value. The result MUST be finite, so
+`NaN`, positive or negative infinity, and an input that overflows to infinity
+are invalid. Writers serialize that binary64 value using RFC 8785 number
+serialization, including serializing negative zero as `0`. Once parsed, the
+binary64 value MUST NOT be changed by a later read-write cycle. Higher-precision
+or exact-decimal extension data uses a string rather than a number.
 
 Extension fields MUST NOT redefine or change core identity, lifecycle, relation,
 resource, or validation semantics.

@@ -539,7 +539,7 @@ Core v1 mutation scope is intentionally limited to two portable publication
 protocols:
 
 - `init` atomically claims ownership of a previously absent `.engineering`
-  path, then completes initialization under a crash-detectable marker; and
+  path, then completes initialization under an explicit ownership marker; and
 - `artifact create` publishes one complete draft file through an atomic
   same-filesystem hard-link create-if-absent operation.
 
@@ -549,12 +549,13 @@ protocols:
 
 1. compute and validate the complete initialization plan in memory;
 2. atomically claim `.engineering` with one non-recursive directory creation;
-3. create `.engineering/.tmp/init-state.json` with create-exclusive semantics;
-4. write every planned control file, Artifact, and directory beneath the claimed
-   path;
-5. validate the complete on-disk bootstrap candidate;
-6. remove the initialization marker only after successful completion; and
-7. on failure, remove only paths whose ownership by that invocation is proven.
+3. create `.engineering/.tmp` beneath the claimed directory;
+4. create `.engineering/.tmp/init-state.json` with create-exclusive semantics;
+5. write every remaining planned control file, Artifact, and directory beneath
+   the claimed path;
+6. validate the complete on-disk bootstrap candidate;
+7. remove the initialization marker only after successful completion; and
+8. on failure, remove only paths whose ownership by that invocation is proven.
 
 The marker contains exactly:
 
@@ -567,14 +568,18 @@ The marker contains exactly:
 
 `nonce` is a freshly generated 128-bit lowercase hexadecimal value. It is
 runtime state, is never authoritative, and is removed before initialization is
-reported as applied. Cleanup MUST compare the marker nonce and MUST leave the
-claimed directory untouched when ownership cannot be proven.
+reported as applied. During the live invocation, the successful return from the
+exclusive directory creation proves ownership until the marker is created.
+After marker creation, cleanup MUST additionally compare its nonce. A restarted
+process has neither proof and MUST leave the claimed directory untouched.
 
-A crash can leave the claimed directory and marker visible. Project discovery,
-validation, and later mutation commands MUST report `EF-VAL-012` and MUST NOT
-silently repair, merge with, or delete that state. Recovery is an explicit
-operator action. This is the portable trade-off for avoiding platform-specific
-native directory publication primitives.
+A crash before marker creation can leave an `.engineering` directory without
+`ef.yaml`; a later crash can leave the marker visible. Project discovery treats
+either state as an incomplete initialization and reports `EF-VAL-012` without
+searching past it. Validation and later mutation commands MUST NOT silently
+repair, merge with, or delete that state. Recovery is an explicit operator
+action. This is the portable trade-off for avoiding platform-specific native
+directory publication primitives.
 
 A pre-existing `.engineering` path, including one with an initialization
 marker, is never overwritten. A failed atomic claim is a complete domain

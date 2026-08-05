@@ -791,7 +791,7 @@ orchestration additionally defines:
 | `EF-VAL-009` | error | Bootstrap ref already contains an EF state | `1` |
 | `EF-VAL-010` | error | Proposed bootstrap contains a terminal knowledge Artifact or CHG | `1` |
 | `EF-VAL-011` | error | Proposed OID is missing or lexically invalid, does not resolve to a commit, cannot be materialized, or has inapplicable parentage | `2` |
-| `EF-VAL-012` | error | A crash-detectable incomplete initialization claim exists | `2` |
+| `EF-VAL-012` | error | An incomplete working-tree initialization claim exists | `2` |
 
 Execution-class diagnostics can have error severity while mapping to exit `2`
 or `3`; exit class distinguishes incomplete or internal execution from completed
