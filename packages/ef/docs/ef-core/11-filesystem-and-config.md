@@ -306,7 +306,10 @@ Project discovery uses this order:
 4. Select the nearest `.engineering` path. Do not skip it merely because its
    `ef.yaml` is absent.
 5. If the selected path is a directory without `ef.yaml`, or contains
-   `.tmp/init-state.json`, report incomplete initialization with `EF-VAL-012`.
+   `.tmp/init-state.json`, classify it as an incomplete working-tree
+   initialization. Validation and mutation operations report `EF-VAL-012`;
+   query operations wrap the failure as `EF-QRY-013` under their diagnostic
+   ownership contract.
 6. Otherwise, load the configuration and validate its project-repository and
    workspace association.
 

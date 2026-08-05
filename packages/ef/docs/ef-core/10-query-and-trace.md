@@ -713,6 +713,11 @@ producing a complete trustworthy result, the query returns:
 It MUST NOT return a partial graph or Artifact collection that an Agent could
 mistake for complete context.
 
+An incomplete working-tree initialization discovered before authoritative files
+can be loaded is also a query completeness failure. Query operations report it
+as `EF-QRY-013`, with `complete: false` and `data: null`, rather than emitting
+the validation-owned `EF-VAL-012`.
+
 An unrelated warning does not block a query. Exact lookup not-found is a normal
 complete result with `found: false`.
 
