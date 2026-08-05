@@ -173,11 +173,14 @@ The accepted Core contract uses two distinct portable publication protocols.
 
 `ef init` uses atomic path ownership rather than pretending that portable
 Node.js can atomically publish a populated directory. It claims `.engineering`
-with non-recursive `mkdir`, writes the Core-defined nonce marker, creates and
-validates the planned contents, and removes the marker last. A crash may leave a
-recognizable incomplete claim. Commands report it with `EF-VAL-012`; no command
-silently repairs or deletes it. Cleanup is allowed only when the invocation
-proves ownership by matching the marker nonce.
+with non-recursive `mkdir`, creates the runtime directory and Core-defined nonce
+marker, creates and validates the planned contents, and removes the marker last.
+A crash before marker creation is detected from the claimed directory without a
+configuration; a later crash is also identified by the marker. Commands report
+either state with `EF-VAL-012`; no command silently repairs or deletes it. The
+live invocation may clean up after its exclusive `mkdir`; after marker creation
+it must also prove ownership by matching the nonce. A restarted process never
+cleans the claim automatically.
 
 `ef artifact create` writes and validates a complete temporary file on the same
 filesystem, then uses `node:fs` hard-link creation to publish the canonical path

@@ -15,16 +15,16 @@ state in its first-parent history.
 
 1. The maintainer runs `ef init`. In non-interactive mode they supply
    `--title`, `--summary`, `--vision`, `--project-scope`, `--non-goals`, and
-   `--context`; `--integration-ref` is optional and defaults to
-   `refs/heads/main`.
+   `--context`, plus an explicit full local `--integration-ref`.
 2. EF plans a single new `.engineering/` directory, including canonical
    `ef.yaml`, `.gitignore`, `PROJECT.md`, Artifact directories, Resources
    root, and an active PROJECT with all nine envelope fields.
 3. EF creates the required PROJECT body sections and the canonical empty
    Terminology table, unless valid user-provided terminology is supplied.
-4. EF validates the complete plan, atomically claims `.engineering/`, writes
-   a nonce-bearing initialization marker, creates and validates the complete
-   bootstrap content, and removes the marker only after success.
+4. EF validates the complete plan, atomically claims `.engineering/`, creates
+   its runtime directory and nonce-bearing initialization marker, creates and
+   validates the complete bootstrap content, and removes the marker only after
+   success.
 5. The maintainer commits the candidate, validates it through UC-041, and
    conditionally publishes that exact commit through UC-043.
 
@@ -33,10 +33,11 @@ all required fields; `.engineering/.gitignore` has the four exact Core entries;
 PROJECT is active, complete, and has no `Lifecycle` section; no terms are
 invented; no initialization marker remains when the operation reports applied.
 
-**Guardrails:** Existing `.engineering/` is never overwritten; a marker left
-by interruption is reported and never silently repaired or removed; `PROJECT`
-is not created by `artifact create`; initialization does not create CHGs or
-terminal Artifacts; an unapproved non-interactive write does not occur.
+**Guardrails:** Existing `.engineering/` is never overwritten; an incomplete
+claim left by interruption, with or without a marker, is reported and never
+silently repaired or removed; `PROJECT` is not created by `artifact create`;
+initialization does not create CHGs or terminal Artifacts; an unapproved
+non-interactive write does not occur.
 
 ## UC-002 — Discover the applicable project from a working directory
 

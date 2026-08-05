@@ -137,7 +137,7 @@ change. Deprecated codes remain listed permanently rather than being reused.
 | `EF-VAL-009` | error | Validation orchestration and execution | 1 | [09-validation.md](09-validation.md) | Bootstrap ref already contains an EF state |
 | `EF-VAL-010` | error | Validation orchestration and execution | 1 | [09-validation.md](09-validation.md) | Proposed bootstrap contains a terminal knowledge Artifact or CHG |
 | `EF-VAL-011` | error | Validation orchestration and execution | 2 | [09-validation.md](09-validation.md) | Proposed OID is missing or lexically invalid, does not resolve to a commit, cannot be materialized, or has inapplicable parentage |
-| `EF-VAL-012` | error | Validation orchestration and execution | 2 | [09-validation.md](09-validation.md) | A crash-detectable incomplete initialization claim exists |
+| `EF-VAL-012` | error | Validation orchestration and execution | 2 | [09-validation.md](09-validation.md) | An incomplete working-tree initialization claim exists |
 
 ## Reserved numeric slots
 

@@ -7,9 +7,10 @@
 **Main flow:** For `ef init` or `ef artifact create`, EF computes the complete
 plan first. The user chooses `--dry-run`, confirms interactively, or supplies
 `--yes` with `--no-input`. Initialization atomically claims `.engineering`,
-uses a nonce-bearing completion marker, and removes it last. Draft creation
-publishes already complete temporary bytes through a same-filesystem hard-link
-create-if-absent operation.
+creates a nonce-bearing completion marker, and removes it last. An interruption
+before marker creation remains detectable from the claimed directory without a
+configuration. Draft creation publishes already complete temporary bytes
+through a same-filesystem hard-link create-if-absent operation.
 
 **Success assertions:** Dry run returns a complete unapplied plan; successful
 init leaves one complete `.engineering/` directory with no marker; Artifact
