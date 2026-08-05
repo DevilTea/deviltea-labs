@@ -407,29 +407,10 @@ classified as orphan Resources merely because no Artifact declares them.
 Treatment of temporary files is defined by the filesystem and configuration
 specification.
 
-### Required normative syntax checks
-
-A normative local Resource with built-in type `json-schema` or `openapi` MUST
-pass a required deterministic Core syntax check. This check is part of Resource
-integrity rather than an optional advisory hook.
-
-- A normative `json-schema` Resource MUST parse according to its declared JSON
-  or YAML media type into a JSON-compatible value whose root is a mapping or
-  boolean.
-- A normative `openapi` Resource MUST parse according to its declared JSON or
-  YAML media type into a mapping with a non-empty scalar `openapi` field.
-
-These checks establish readable structured syntax and the minimum identifying
-shape. Complete JSON Schema metaschema validation and complete OpenAPI semantic
-validation remain optional advisory work. A required syntax failure emits
-`EF-RES-020`. If an implementation cannot provide a required normative syntax
-capability, the requested validation is incomplete and emits `EF-VAL-006`
-rather than accepting the Resource without the check.
-
 ### Validation hooks
 
-After every required normative syntax check, a built-in Resource type MAY select
-an additional optional Core specialized validator. For example:
+A built-in Resource type MAY select an optional Core specialized validator. For
+example:
 
 ```text
 openapi     -> OpenAPI syntax and structure validator
@@ -547,8 +528,8 @@ other references that Artifact.
 ## Validation
 
 Resource validation checks each descriptor, local filesystem state, complete
-project ownership, owner lifecycle, required normative syntax checks, and
-available built-in optional specialized hooks.
+project ownership, owner lifecycle, and available built-in optional specialized
+hooks.
 
 `EF-RES-012` is emitted only as informational advisory output when an optional
 specialized validator runs and reports malformed content. An unavailable
@@ -578,7 +559,6 @@ The Resource diagnostic codes are:
 | `EF-RES-017` | warning | External Resource uses insecure HTTP rather than HTTPS |
 | `EF-RES-018` | warning | A listed canonical file suffix and declared media type are inconsistent |
 | `EF-RES-019` | error | Unknown Resource field or invalid extension field |
-| `EF-RES-020` | error | Required normative Resource syntax validation failed |
 
 A standalone descriptor validator can check shape, vocabulary, ordering, URL
 syntax, and media types. Missing files, path containment, exclusive ownership,

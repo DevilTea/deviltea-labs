@@ -496,9 +496,8 @@ A CHG can transition to `completed` only when all of these are true:
 5. Every resulting Artifact schema and lifecycle state is valid.
 6. Relation targets, compatibility, ordering, and cycles are valid.
 7. Supersession replacement sets and canonical resolution are valid.
-8. Local Resources exist, match their encoded owners, satisfy every generic
-   Core Resource integrity check, and pass every required normative syntax
-   check.
+8. Local Resources exist, match their encoded owners, and pass every required
+   validator.
 9. No frozen Artifact or Resource was modified or removed.
 10. No issued Artifact was physically deleted.
 11. Rationale and source provenance are structurally present.

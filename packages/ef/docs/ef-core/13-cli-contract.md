@@ -553,7 +553,8 @@ protocols:
 4. create `.engineering/.tmp/init-state.json` with create-exclusive semantics;
 5. write every remaining planned control file, Artifact, and directory beneath
    the claimed path;
-6. validate the complete on-disk bootstrap candidate;
+6. verify that every planned path and byte sequence was materialized and that
+   the initialization marker still contains the invocation's nonce;
 7. remove the initialization marker only after successful completion; and
 8. on failure, remove only paths whose ownership by that invocation is proven.
 
@@ -572,6 +573,12 @@ reported as applied. During the live invocation, the successful return from the
 exclusive directory creation proves ownership until the marker is created.
 After marker creation, cleanup MUST additionally compare its nonce. A restarted
 process has neither proof and MUST leave the claimed directory untouched.
+
+The semantic bootstrap candidate is validated before the claim in step 1.
+Step 6 verifies only faithful filesystem materialization of that already-valid
+plan. It MUST NOT invoke working-tree project discovery or project validation
+while the marker exists: under the project-discovery contract, the marker
+intentionally identifies an incomplete initialization until it is removed.
 
 A crash before marker creation can leave an `.engineering` directory without
 `ef.yaml`; a later crash can leave the marker visible. Project discovery treats

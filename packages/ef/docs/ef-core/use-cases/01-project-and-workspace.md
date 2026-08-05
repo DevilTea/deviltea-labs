@@ -23,8 +23,9 @@ state in its first-parent history.
    Terminology table, unless valid user-provided terminology is supplied.
 4. EF validates the complete plan, atomically claims `.engineering/`, creates
    its runtime directory and nonce-bearing initialization marker, creates and
-   validates the complete bootstrap content, and removes the marker only after
-   success.
+   verifies the planned filesystem content, and removes the marker only after
+   successful materialization. It does not run working-tree project validation
+   while the marker exists.
 5. The maintainer commits the candidate, validates it through UC-041, and
    conditionally publishes that exact commit through UC-043.
 
@@ -48,21 +49,27 @@ the intended authoritative state.
 **Main flow:**
 
 1. EF uses an explicit project root when supplied; otherwise it searches the
-   working directory and parents for the nearest `.engineering/ef.yaml`.
+   working directory and parents for the nearest `.engineering` path, without
+   skipping one merely because `ef.yaml` is absent.
 2. The search may cross an intervening Git-worktree boundary.
-3. EF validates that the discovered directory is the containing Git worktree
+3. A nearest `.engineering` directory without `ef.yaml`, or with
+   `.tmp/init-state.json`, is reported as an incomplete initialization; the
+   search does not continue past it.
+4. EF validates that the discovered directory is the containing Git worktree
    root and that the current directory is either in that repository or in an
    exactly declared linked-repository slot.
-4. From a nested linked-repository EF project, the nearer configuration wins.
+5. From a nested linked-repository EF project, the nearer claim wins, whether
+   it is complete or incomplete.
 
 **Success assertions:** Discovery is deterministic; a command in a declared
 `repos/frontend/src` can associate with its parent EF project; an explicit
 commit-bound command can use `--project` even when the checked-out tree lacks
 candidate EF files.
 
-**Guardrails:** An undeclared nested Git worktree is rejected; a config outside
-the containing worktree root is invalid; discovery never treats a linked
-repository as sharing the project repository's Git history.
+**Guardrails:** An incomplete nearer claim is never skipped, repaired, or
+deleted implicitly; an undeclared nested Git worktree is rejected; a config
+outside the containing worktree root is invalid; discovery never treats a
+linked repository as sharing the project repository's Git history.
 
 ## UC-003 — Configure a single repository or composite workspace
 
