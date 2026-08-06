@@ -14,6 +14,7 @@ on:
           - vue-temp-var
           - tiny-state-machine
           - tiny-state-machine-vue
+          - ef
       release:
         description: Bumpp release type (patch, minor, major, prerelease) or exact version
         required: true

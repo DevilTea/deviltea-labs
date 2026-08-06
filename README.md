@@ -15,6 +15,7 @@ Package documentation is available at
 | `vue-temp-var` | [`packages/vue-temp-var`](packages/vue-temp-var) |
 | `@deviltea/tiny-state-machine` | [`packages/tiny-state-machine`](packages/tiny-state-machine) |
 | `@deviltea/tiny-state-machine-vue` | [`packages/tiny-state-machine-vue`](packages/tiny-state-machine-vue) |
+| `@deviltea/ef` | [`packages/ef`](packages/ef) |
 
 ## Development
 

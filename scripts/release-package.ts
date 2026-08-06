@@ -3,6 +3,10 @@ import { resolve } from 'node:path'
 import process from 'node:process'
 
 const packages = {
+	'ef': {
+		directory: 'packages/ef',
+		name: '@deviltea/ef',
+	},
 	'eslint-config': {
 		directory: 'packages/eslint-config',
 		name: '@deviltea/eslint-config',
