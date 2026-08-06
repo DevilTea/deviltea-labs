@@ -66,6 +66,7 @@ function runSetup(command, args, options = {}) {
 		encoding: 'utf8',
 		env: { ...process.env, ...options.env },
 		maxBuffer: 10 * 1024 * 1024,
+		shell: options.shell,
 	})
 	if (result.status !== 0) {
 		throw new Error([
@@ -77,6 +78,40 @@ function runSetup(command, args, options = {}) {
 			.join('\n'))
 	}
 	return result
+}
+
+/**
+ * Quotes a single argument for inclusion in the `cmd.exe` command line that
+ * `spawnSync` builds when `shell: true` (see `runSetupCliTool` below): Node
+ * assembles that command line as `[file, ...args].join(' ')` with no
+ * per-argument quoting of its own (`windowsVerbatimArguments` is set so Node
+ * does not add any), so an argument containing whitespace must be
+ * pre-quoted here or it silently splits into multiple `cmd.exe` tokens. None
+ * of the arguments this script passes to `npm`/`pnpm` currently contain a
+ * space or a double quote (they are literal flags or `mkdtempSync`-derived
+ * paths), so this is a defensive no-op in practice today.
+ */
+function quoteForWindowsShell(arg) {
+	return /[\s"]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg
+}
+
+/**
+ * Runs `npm` or `pnpm` as a setup step. On Windows these resolve to `.cmd`
+ * shims (a batch file cannot be the target of `CreateProcess` directly); as
+ * of the CVE-2024-27980 fix (Node.js 18.20.2 / 20.12.2 / 21.7.2 and every
+ * later release, which covers every Node.js version supported by this
+ * package's `engines` field), `child_process.spawnSync` on Windows refuses
+ * to execute a `.cmd`/`.bat` file unless `shell: true` is set, failing
+ * instead with `EINVAL`
+ * (https://nodejs.org/api/child_process.html#spawning-bat-and-cmd-files-on-windows).
+ * `git` and `node` are native `.exe` binaries and are unaffected by this, so
+ * only `npm`/`pnpm` invocations are routed through this wrapper; they still
+ * run without a shell on POSIX, matching prior behavior exactly.
+ */
+function runSetupCliTool(command, args, options = {}) {
+	if (process.platform === 'win32')
+		return runSetup(command, args.map(quoteForWindowsShell), { ...options, shell: true })
+	return runSetup(command, args, options)
 }
 
 /** Runs an `ef` invocation under test; never throws -- exit code and output are the assertions' subject, not a script-level failure. */
@@ -119,7 +154,7 @@ function main() {
 			tarballPath = suppliedTarballPath
 		}
 		else {
-			runSetup(pnpm, ['pack', '--pack-destination', temporaryDirectory])
+			runSetupCliTool(pnpm, ['pack', '--pack-destination', temporaryDirectory])
 
 			const tarballName = readdirSync(temporaryDirectory)
 				.find(fileName => fileName.endsWith('.tgz'))
@@ -132,8 +167,8 @@ function main() {
 
 		const consumerDirectory = join(temporaryDirectory, 'consumer')
 		mkdirSync(consumerDirectory)
-		runSetup(npm, ['init', '--yes'], { cwd: consumerDirectory })
-		runSetup(npm, ['install', tarballPath], { cwd: consumerDirectory })
+		runSetupCliTool(npm, ['init', '--yes'], { cwd: consumerDirectory })
+		runSetupCliTool(npm, ['install', tarballPath], { cwd: consumerDirectory })
 
 		// The installed binary is a POSIX shell script plus a `.cmd` shim on
 		// Windows (`node_modules/.bin/ef.cmd`); `spawnSync` with `shell: false`

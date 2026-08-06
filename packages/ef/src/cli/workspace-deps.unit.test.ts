@@ -6,6 +6,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
 import { createWorkspaceDeps } from './workspace-deps'
 
+const GIT_TEST_ENV = {
+	GIT_AUTHOR_NAME: 'EF Test',
+	GIT_AUTHOR_EMAIL: 'ef-test@example.com',
+	GIT_COMMITTER_NAME: 'EF Test',
+	GIT_COMMITTER_EMAIL: 'ef-test@example.com',
+}
+
 describe('createWorkspaceDeps', () => {
 	let root: string
 
@@ -49,7 +56,7 @@ describe('createWorkspaceDeps', () => {
 	})
 
 	it('matches a real independent Git worktree checked out exactly at the configured path', async () => {
-		execFileSync('git', ['-C', root, 'commit', '--allow-empty', '-q', '-m', 'root'])
+		execFileSync('git', ['-C', root, 'commit', '--allow-empty', '-q', '-m', 'root'], { env: { ...process.env, ...GIT_TEST_ENV } })
 		const linkedPath = path.join(root, 'repos', 'linked')
 		execFileSync('git', ['-C', root, 'worktree', 'add', '-q', '-b', 'linked-branch', linkedPath])
 
@@ -60,7 +67,7 @@ describe('createWorkspaceDeps', () => {
 	})
 
 	it('reports mismatched-root when the configured path is nested inside a worktree rather than being its root', async () => {
-		execFileSync('git', ['-C', root, 'commit', '--allow-empty', '-q', '-m', 'root'])
+		execFileSync('git', ['-C', root, 'commit', '--allow-empty', '-q', '-m', 'root'], { env: { ...process.env, ...GIT_TEST_ENV } })
 		const linkedPath = path.join(root, 'repos', 'linked')
 		execFileSync('git', ['-C', root, 'worktree', 'add', '-q', '-b', 'linked-branch', linkedPath])
 		await fs.mkdir(path.join(linkedPath, 'nested'))
