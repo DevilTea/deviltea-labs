@@ -121,6 +121,17 @@ function main() {
 			'utf8',
 		))
 
+		// ---- Skills ship in the npm tarball (00-implementation-decisions.md
+		// "Agent Skills": "Skills ship in the npm tarball ... under the same
+		// release tag as the CLI.") ------------------------------------------
+
+		const installedSkillsDirectory = join(consumerDirectory, 'node_modules', '@deviltea', 'ef', 'skills')
+		assert('installed package ships skills/', existsSync(installedSkillsDirectory), `expected ${installedSkillsDirectory}`)
+		for (const skillName of ['author-engineering-files', 'review-engineering-change']) {
+			const skillFile = join(installedSkillsDirectory, skillName, 'SKILL.md')
+			assert(`installed package ships skills/${skillName}/SKILL.md`, existsSync(skillFile), `expected ${skillFile}`)
+		}
+
 		// ---- (a) ef version --format json --------------------------------------
 
 		{

@@ -103,12 +103,20 @@ const GENERAL_HELP = [
 	'  ef help',
 ].join('\n')
 
-export async function runCli(argv: readonly string[], io: CliIO, context: RunCliContext): Promise<CommandOutcome> {
-	const executor = context.executor ?? createDefaultGitExecutor()
-	const prompts = context.prompts ?? createRealPrompts(chunk => process.stderr.write(chunk))
-
-	let outcome: CommandOutcome | undefined
-
+/**
+ * Build the full `ef` Commander program without parsing or executing
+ * anything. This is the single source of truth for the command surface
+ * (subcommand names and their `Option`s): `runCli` below parses `argv`
+ * against the program this returns, and `skill-references.unit.test.ts`
+ * introspects `program.commands` / `command.options` from this same
+ * builder to check every `ef ...` invocation documented in `skills/` against
+ * the real, live command definitions -- never a hand-maintained string list.
+ *
+ * `executor`, `prompts`, and `context.version` are only reached once an
+ * action actually runs, so a caller that only wants to introspect
+ * commands/options (never calling `parseAsync`) may pass placeholder values.
+ */
+export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExecutor, prompts: Prompts, setOutcome: (outcome: CommandOutcome) => void): Command {
 	const program = new Command('ef')
 	program.exitOverride()
 	program.configureOutput({ writeOut: () => {}, writeErr: () => {}, outputError: () => {} })
@@ -143,7 +151,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		.action(async (opts) => {
 			const format = opts.format as 'human' | 'json'
 			const noInput = !opts.input || format === 'json'
-			outcome = await runInitCommand({
+			setOutcome(await runInitCommand({
 				project: opts.project,
 				format,
 				noColor: !opts.color,
@@ -160,7 +168,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 					integrationRef: opts.integrationRef,
 					terminology: opts.terminology,
 				},
-			}, { cwd: io.cwd, executor, prompts })
+			}, { cwd: io.cwd, executor, prompts }))
 		})
 
 	// ---- ef artifact create <type> -----------------------------------------------
@@ -182,7 +190,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		.action(async (type: string, opts) => {
 			const format = opts.format as 'human' | 'json'
 			const noInput = !opts.input || format === 'json'
-			outcome = await runArtifactCreateCommand({
+			setOutcome(await runArtifactCreateCommand({
 				type,
 				title: opts.title,
 				summary: opts.summary,
@@ -192,7 +200,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 				noInput,
 				dryRun: boolOpt(opts.dryRun),
 				yes: boolOpt(opts.yes),
-			}, { cwd: io.cwd, executor, prompts })
+			}, { cwd: io.cwd, executor, prompts }))
 		})
 
 	// ---- ef validate --------------------------------------------------------------
@@ -211,7 +219,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		.option('--warnings-as-errors')
 		.option('--workspace')
 		.action(async (opts) => {
-			outcome = await runValidateCommand({
+			setOutcome(await runValidateCommand({
 				scope: opts.scope,
 				baseline: opts.baseline,
 				proposed: opts.proposed,
@@ -221,7 +229,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 				format: opts.format,
 				noColor: !opts.color,
 				project: opts.project,
-			}, { cwd: io.cwd, executor })
+			}, { cwd: io.cwd, executor }))
 		})
 
 	// ---- ef query <kind> ----------------------------------------------------------
@@ -251,7 +259,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 	queryLeaf('lookup', '[artifact-id]')
 		.option('--projection <projection>')
 		.action(async (artifactId: string | undefined, opts) => {
-			outcome = await runQuery(buildLookupRequest({ id: artifactId, projection: opts.projection }), opts)
+			setOutcome(await runQuery(buildLookupRequest({ id: artifactId, projection: opts.projection }), opts))
 		})
 
 	queryLeaf('list', '')
@@ -285,12 +293,12 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 			if (!built.ok) {
 				const format = opts.format as 'human' | 'json'
 				const json = { ...built.result, diagnostics: built.result.diagnostics }
-				outcome = format === 'json'
+				setOutcome(format === 'json'
 					? { exitCode: 2, stdout: `${JSON.stringify(json)}\n`, stderr: '' }
-					: { exitCode: 2, stdout: `${JSON.stringify(json, null, 2)}\n`, stderr: '' }
+					: { exitCode: 2, stdout: `${JSON.stringify(json, null, 2)}\n`, stderr: '' })
 				return
 			}
-			outcome = await runQuery(built.request, opts)
+			setOutcome(await runQuery(built.request, opts))
 		})
 
 	queryLeaf('search', '[term...]')
@@ -298,14 +306,14 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		.option('--offset <n>')
 		.option('--limit <n>')
 		.action(async (terms: string[], opts) => {
-			outcome = await runQuery(buildSearchRequest({ terms, caseSensitive: boolOpt(opts.caseSensitive), offset: opts.offset, limit: opts.limit }), opts)
+			setOutcome(await runQuery(buildSearchRequest({ terms, caseSensitive: boolOpt(opts.caseSensitive), offset: opts.offset, limit: opts.limit }), opts))
 		})
 
 	queryLeaf('relations', '[artifact-id]')
 		.option('--direction <direction>')
 		.option('--type <relation-type>', '', collect, [])
 		.action(async (artifactId: string | undefined, opts) => {
-			outcome = await runQuery(buildRelationsRequest({ id: artifactId, direction: opts.direction, types: opts.type }), opts)
+			setOutcome(await runQuery(buildRelationsRequest({ id: artifactId, direction: opts.direction, types: opts.type }), opts))
 		})
 
 	queryLeaf('trace', '[root-id...]')
@@ -313,7 +321,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		.option('--direction <direction>')
 		.option('--max-depth <n>')
 		.action(async (roots: string[], opts) => {
-			outcome = await runQuery(buildTraceRequest({ roots, types: opts.type, direction: opts.direction, maxDepth: opts.maxDepth }), opts)
+			setOutcome(await runQuery(buildTraceRequest({ roots, types: opts.type, direction: opts.direction, maxDepth: opts.maxDepth }), opts))
 		})
 
 	queryLeaf('impact', '[root-id...]')
@@ -322,23 +330,23 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		.option('--include-non-current')
 		.option('--resolve-current')
 		.action(async (roots: string[], opts) => {
-			outcome = await runQuery(buildImpactRequest({
+			setOutcome(await runQuery(buildImpactRequest({
 				roots,
 				maxDepth: opts.maxDepth,
 				includeReferences: boolOpt(opts.includeReferences),
 				includeNonCurrent: boolOpt(opts.includeNonCurrent),
 				resolveCurrent: boolOpt(opts.resolveCurrent),
-			}), opts)
+			}), opts))
 		})
 
 	queryLeaf('history', '[artifact-id]')
 		.action(async (artifactId: string | undefined, opts) => {
-			outcome = await runQuery(buildHistoryRequest({ id: artifactId }), opts)
+			setOutcome(await runQuery(buildHistoryRequest({ id: artifactId }), opts))
 		})
 
 	queryLeaf('resolve-current', '[artifact-id]')
 		.action(async (artifactId: string | undefined, opts) => {
-			outcome = await runQuery(buildResolveCurrentRequest({ id: artifactId }), opts)
+			setOutcome(await runQuery(buildResolveCurrentRequest({ id: artifactId }), opts))
 		})
 
 	// ---- ef resource read <owner-id> <location> ------------------------------------
@@ -353,7 +361,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		.option('--no-color')
 		.option('--no-input')
 		.action(async (ownerId: string, location: string, opts) => {
-			outcome = await runResourceReadCommand(ownerId, location, { project: opts.project }, { cwd: io.cwd, executor })
+			setOutcome(await runResourceReadCommand(ownerId, location, { project: opts.project }, { cwd: io.cwd, executor }))
 		})
 
 	// ---- ef version ---------------------------------------------------------------
@@ -361,7 +369,7 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 	sub('version')
 		.addOption(FORMAT_OPTION())
 		.action(async (opts) => {
-			outcome = runVersionCommand({ format: opts.format, version: context.version })
+			setOutcome(runVersionCommand({ format: opts.format, version: context.version }))
 		})
 
 	// ---- ef help [command] ---------------------------------------------------------
@@ -369,15 +377,27 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 	sub('help', '[command...]')
 		.action(async (commandWords: string[]) => {
 			if (commandWords.length === 0) {
-				outcome = { exitCode: 0, stdout: `${GENERAL_HELP}\n`, stderr: '' }
+				setOutcome({ exitCode: 0, stdout: `${GENERAL_HELP}\n`, stderr: '' })
 				return
 			}
 			const topic = commandWords.join(' ')
 			const text = HELP_TOPICS[topic]
-			outcome = text
+			setOutcome(text
 				? { exitCode: 0, stdout: `${text}\n`, stderr: '' }
-				: preEnvelopeFailure(`Unknown help topic: '${topic}'.`)
+				: preEnvelopeFailure(`Unknown help topic: '${topic}'.`))
 		})
+
+	return program
+}
+
+export async function runCli(argv: readonly string[], io: CliIO, context: RunCliContext): Promise<CommandOutcome> {
+	const executor = context.executor ?? createDefaultGitExecutor()
+	const prompts = context.prompts ?? createRealPrompts(chunk => process.stderr.write(chunk))
+
+	let outcome: CommandOutcome | undefined
+	const program = buildProgram(io, context, executor, prompts, (result) => {
+		outcome = result
+	})
 
 	try {
 		await program.parseAsync(argv as string[], { from: 'user' })

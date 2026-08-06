@@ -21,7 +21,8 @@
 		"ef": "./dist/cli.mjs"
 	},
 	"files": [
-		"dist"
+		"dist",
+		"skills"
 	],
 	"engines": {
 		"node": "^22.14.0 || ^24.0.0"
