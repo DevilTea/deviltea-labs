@@ -111,7 +111,7 @@ describe('runResourceReadCommand', () => {
 	}
 
 	it('reports exit 2 when no EF project can be discovered', async () => {
-		const outcome = await runResourceReadCommand('REQ-001', '.engineering/resources/req/REQ-001/example.json', {}, deps())
+		const outcome = await runResourceReadCommand('REQ-001', '.engineering/resources/REQ-001/example.json', {}, deps())
 		expect(outcome.exitCode)
 			.toBe(2)
 		expect(outcome.stdout)
@@ -120,7 +120,7 @@ describe('runResourceReadCommand', () => {
 
 	it('writes the exact raw bytes with no trailing newline and exits 0 on success', async () => {
 		await setupProject()
-		const location = '.engineering/resources/req/REQ-001/example.json'
+		const location = '.engineering/resources/REQ-001/example.json'
 		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
 		const rawBytes = Buffer.from('{"no-trailing-newline":true}', 'utf8')
 		await writeFile(root, location, rawBytes)
@@ -136,7 +136,7 @@ describe('runResourceReadCommand', () => {
 
 	it('preserves exact binary bytes (not decoded as text)', async () => {
 		await setupProject()
-		const location = '.engineering/resources/req/REQ-001/example.json'
+		const location = '.engineering/resources/REQ-001/example.json'
 		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
 		const binaryBytes = Buffer.from([0x00, 0xFF, 0x10, 0xAB, 0x7F, 0x80])
 		await writeFile(root, location, binaryBytes)
@@ -150,7 +150,7 @@ describe('runResourceReadCommand', () => {
 
 	it('exits 2 when the owner Artifact does not exist', async () => {
 		await setupProject()
-		const outcome = await runResourceReadCommand('REQ-999', '.engineering/resources/req/REQ-999/example.json', {}, deps())
+		const outcome = await runResourceReadCommand('REQ-999', '.engineering/resources/REQ-999/example.json', {}, deps())
 		expect(outcome.exitCode)
 			.toBe(2)
 		expect(outcome.stdout)
@@ -161,23 +161,23 @@ describe('runResourceReadCommand', () => {
 
 	it('exits 2 when the owner exists but declares no descriptor with the exact location', async () => {
 		await setupProject()
-		const location = '.engineering/resources/req/REQ-001/example.json'
+		const location = '.engineering/resources/REQ-001/example.json'
 		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
 		await writeFile(root, location, 'content')
 
-		const outcome = await runResourceReadCommand('REQ-001', '.engineering/resources/req/REQ-001/other.json', {}, deps())
+		const outcome = await runResourceReadCommand('REQ-001', '.engineering/resources/REQ-001/other.json', {}, deps())
 		expect(outcome.exitCode)
 			.toBe(2)
 	})
 
 	it('exits 2 when the location is declared by a different Artifact than the supplied owner', async () => {
 		await setupProject()
-		const location = '.engineering/resources/req/REQ-001/example.json'
+		const location = '.engineering/resources/REQ-001/example.json'
 		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
-		await writeFile(root, '.engineering/req/REQ-002.md', requirementMdWithResource('REQ-002', '.engineering/resources/req/REQ-002/example.json')
+		await writeFile(root, '.engineering/req/REQ-002.md', requirementMdWithResource('REQ-002', '.engineering/resources/REQ-002/example.json')
 			.replace('REQ-002', 'REQ-002'))
 		await writeFile(root, location, 'content')
-		await writeFile(root, '.engineering/resources/req/REQ-002/example.json', 'other content')
+		await writeFile(root, '.engineering/resources/REQ-002/example.json', 'other content')
 
 		const outcome = await runResourceReadCommand('REQ-002', location, {}, deps())
 		expect(outcome.exitCode)
@@ -186,7 +186,7 @@ describe('runResourceReadCommand', () => {
 
 	it('exits 1 when the descriptor exists but the managed local file is missing', async () => {
 		await setupProject()
-		const location = '.engineering/resources/req/REQ-001/example.json'
+		const location = '.engineering/resources/REQ-001/example.json'
 		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
 		// Intentionally never write the file at `location`.
 
@@ -199,9 +199,9 @@ describe('runResourceReadCommand', () => {
 
 	it('exits 1 when the managed path is a forbidden symlink', async () => {
 		await setupProject()
-		const location = '.engineering/resources/req/REQ-001/example.json'
+		const location = '.engineering/resources/REQ-001/example.json'
 		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
-		const realFile = path.join(root, '.engineering/resources/req/REQ-001/real.json')
+		const realFile = path.join(root, '.engineering/resources/REQ-001/real.json')
 		await fs.mkdir(path.dirname(realFile), { recursive: true })
 		await fs.writeFile(realFile, 'content')
 		await fs.symlink(realFile, path.join(root, location))
@@ -209,6 +209,72 @@ describe('runResourceReadCommand', () => {
 		const outcome = await runResourceReadCommand('REQ-001', location, {}, deps())
 		expect(outcome.exitCode)
 			.toBe(1)
+	})
+
+	it('exits 1 when an ancestor directory of the managed path is a symlink, even though the final component is an ordinary file', async () => {
+		await setupProject()
+		const location = '.engineering/resources/REQ-001/passwd'
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
+
+		const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-ancestor-')))
+		try {
+			await fs.writeFile(path.join(outsideDir, 'passwd'), 'root:x:0:0::/root:/bin/sh\n')
+			// Replace the owner's managed Resource directory itself with a symlink
+			// to an external directory. The final `passwd` entry, reached through
+			// that symlinked ancestor, is a perfectly ordinary regular file --
+			// `lstat` on the final component alone would never catch this; only
+			// `lstat`-ing every ancestor component does.
+			await fs.mkdir(path.join(root, '.engineering/resources'), { recursive: true })
+			await fs.symlink(outsideDir, path.join(root, '.engineering/resources/REQ-001'))
+
+			const outcome = await runResourceReadCommand('REQ-001', location, {}, deps())
+			expect(outcome.exitCode)
+				.toBe(1)
+			expect(outcome.stdout)
+				.toEqual(new Uint8Array(0))
+		}
+		finally {
+			await fs.rm(outsideDir, { recursive: true, force: true })
+		}
+	})
+
+	it('exits 1 and never reads outside the project root when a descriptor location contains a \'..\' segment (EF-RES-007)', async () => {
+		await setupProject()
+		const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-outside-')))
+		try {
+			const secretPath = path.join(outsideDir, 'secret.json')
+			await fs.writeFile(secretPath, '{"secret":true}')
+			// `root` and `outsideDir` are independent `mkdtemp` siblings under the
+			// OS temp directory, so the relative path between them is guaranteed to
+			// climb out of `root` via one or more '..' segments without depending
+			// on any particular fixed depth.
+			const location = path.relative(root, secretPath)
+				.split(path.sep)
+				.join('/')
+			await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
+
+			const outcome = await runResourceReadCommand('REQ-001', location, {}, deps())
+			expect(outcome.exitCode)
+				.toBe(1)
+			expect(outcome.stdout)
+				.toEqual(new Uint8Array(0))
+		}
+		finally {
+			await fs.rm(outsideDir, { recursive: true, force: true })
+		}
+	})
+
+	it('exits 1 when the descriptor location is not beneath the owner\'s managed Resource directory (EF-RES-014)', async () => {
+		await setupProject()
+		const location = '.engineering/resources/REQ-999/example.json'
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
+		await writeFile(root, location, 'content')
+
+		const outcome = await runResourceReadCommand('REQ-001', location, {}, deps())
+		expect(outcome.exitCode)
+			.toBe(1)
+		expect(outcome.stdout)
+			.toEqual(new Uint8Array(0))
 	})
 
 	it('exits 2 when the project snapshot cannot be loaded (read-error, not engineering-missing)', async () => {
@@ -221,7 +287,7 @@ describe('runResourceReadCommand', () => {
 		await fs.rm(path.join(root, '.engineering', '.gitignore'))
 		await fs.mkdir(path.join(root, '.engineering', '.gitignore'))
 
-		const outcome = await runResourceReadCommand('REQ-001', '.engineering/resources/req/REQ-001/example.json', {}, deps())
+		const outcome = await runResourceReadCommand('REQ-001', '.engineering/resources/REQ-001/example.json', {}, deps())
 		expect(outcome.exitCode)
 			.toBe(2)
 		expect(outcome.stdout)

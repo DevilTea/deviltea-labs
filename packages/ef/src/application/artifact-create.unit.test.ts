@@ -213,6 +213,46 @@ describe('computeCreatePlan', () => {
 			.toBe('target-exists')
 	})
 
+	it('rejects (managed-directory-symlinked) when the canonical type directory is a symlink, rather than allocating over it', () => {
+		const snapshot = emptySnapshot()
+		snapshot.entryKinds = new Map([
+			['.engineering', 'directory'],
+			['.engineering/req', 'symlink'],
+		])
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('managed-directory-symlinked')
+		expect(result.ok === false && result.diagnostics?.map(d => d.code))
+			.toEqual(['EF-FS-004'])
+		expect(result.ok === false && result.diagnostics?.[0]?.path)
+			.toBe('.engineering/req')
+	})
+
+	it('rejects (managed-directory-symlinked) when `.engineering` itself is a symlink', () => {
+		const snapshot = emptySnapshot()
+		snapshot.entryKinds = new Map([['.engineering', 'symlink']])
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('managed-directory-symlinked')
+		expect(result.ok === false && result.diagnostics?.map(d => d.path))
+			.toEqual(['.engineering'])
+	})
+
+	it('does not reject a canonical type directory that simply does not exist yet (no entryKinds entry)', () => {
+		// The common, legitimate case: no artifact of this type has been created
+		// yet, so `.engineering/req` has no `entryKinds` entry at all. This must
+		// allocate normally, not be confused with a forbidden symlink.
+		const snapshot = emptySnapshot()
+		snapshot.entryKinds = new Map([['.engineering', 'directory']])
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		expect(result.ok)
+			.toBe(true)
+	})
+
 	it.each([
 		['prd', 'prd', ['Problem', 'User Need', 'Desired Outcome', 'Success Criteria', 'Non-goals'], 'PRD-001', '.engineering/prd/PRD-001.md'],
 		['req', 'requirement', ['Requirement', 'Rationale', 'Acceptance Criteria'], 'REQ-001', '.engineering/req/REQ-001.md'],
@@ -478,6 +518,86 @@ describe('applyCreatePlan', () => {
 			.toBe('incomplete')
 		expect(result.applied === false && result.message)
 			.toBe(`Temporary file for '${plan.path}' was not written with the planned bytes.`)
+	})
+
+	// ---- Symlinked managed-directory chain (EF-FS-004 domain rejection) -------
+
+	it('rejects (rather than escaping) when the canonical type directory is a symlink to an external directory', async () => {
+		const plan = computePlanOrThrow()
+		const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-outside-')))
+		try {
+			await fs.mkdir(path.join(tempDir, '.engineering'), { recursive: true })
+			await fs.symlink(outsideDir, path.join(tempDir, '.engineering/req'))
+
+			const result = await applyCreatePlan(plan, tempDir)
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// Nothing was written into the symlink's external target, and no
+			// hard link was published at the symlink-traversing canonical path.
+			expect(await fs.readdir(outsideDir))
+				.toEqual([])
+			await expect(fs.stat(path.join(tempDir, '.engineering/req/REQ-001.md'))).rejects.toThrow()
+
+			const leftoverTempFiles = (await fs.readdir(outsideDir))
+			expect(leftoverTempFiles)
+				.toEqual([])
+		}
+		finally {
+			await fs.rm(outsideDir, { recursive: true, force: true })
+		}
+	})
+
+	it('rejects (rather than escaping) when `.engineering` itself is a symlink to an external directory', async () => {
+		const plan = computePlanOrThrow()
+		const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-outside-')))
+		try {
+			await fs.symlink(outsideDir, path.join(tempDir, '.engineering'))
+
+			const result = await applyCreatePlan(plan, tempDir)
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// `ensureDirectory` (recursive `mkdir`) must never have run through the
+			// symlink: no `req` directory (or anything else) was created inside
+			// the external target.
+			expect(await fs.readdir(outsideDir))
+				.toEqual([])
+		}
+		finally {
+			await fs.rm(outsideDir, { recursive: true, force: true })
+		}
+	})
+
+	it('rejects (TOCTOU) when the type directory is replaced with a symlink after the plan was computed but before apply runs', async () => {
+		// The plan itself was computed against a snapshot with no symlinked
+		// managed directory (chain "valid" at plan time) -- this test proves
+		// `applyCreatePlan` re-checks live, rather than trusting that snapshot.
+		const plan = computePlanOrThrow()
+		const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-toctou-')))
+		try {
+			await fs.writeFile(path.join(outsideDir, 'pre-existing-secret.txt'), 'must not be disturbed')
+			await fs.mkdir(path.join(tempDir, '.engineering'), { recursive: true })
+			await fs.symlink(outsideDir, path.join(tempDir, '.engineering/req'))
+
+			const result = await applyCreatePlan(plan, tempDir)
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The external directory's pre-existing content is untouched, and
+			// nothing new (temp file or published artifact) was added to it.
+			expect(await fs.readdir(outsideDir))
+				.toEqual(['pre-existing-secret.txt'])
+		}
+		finally {
+			await fs.rm(outsideDir, { recursive: true, force: true })
+		}
 	})
 
 	it('produces a draft file that validates as a draft under full snapshot validation', async () => {

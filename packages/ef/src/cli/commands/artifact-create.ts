@@ -124,6 +124,7 @@ export async function runArtifactCreateCommand(options: ArtifactCreateCommandOpt
 			case 'target-exists':
 				return earlyFailure(options, 1, 'EF-ID-004', planResult.message)
 			case 'invalid-plan':
+			case 'managed-directory-symlinked':
 				return mutationOutcome(options, 1, { complete: true, applied: false, dryRun: options.dryRun, changes: [], artifact: null, diagnostics: planResult.diagnostics ?? [] })
 		}
 	}
@@ -163,6 +164,17 @@ export async function runArtifactCreateCommand(options: ArtifactCreateCommandOpt
 				changes: plan.changes,
 				artifact,
 				diagnostics: [{ code: 'EF-ID-004', severity: 'error', message: applyResult.message, related: [] }],
+			})
+		}
+
+		if (applyResult.outcome === 'rejected') {
+			return mutationOutcome(options, 1, {
+				complete: true,
+				applied: false,
+				dryRun: false,
+				changes: plan.changes,
+				artifact,
+				diagnostics: [{ code: 'EF-FS-004', severity: 'error', message: applyResult.message, related: [] }],
 			})
 		}
 

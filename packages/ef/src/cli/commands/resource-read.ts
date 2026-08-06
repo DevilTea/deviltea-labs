@@ -24,8 +24,22 @@ import type { CommandOutcome } from '../command-outcome'
 import path from 'pathe'
 import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
 import { validateSnapshot } from '../../application/snapshot-validation'
+import { validateResourceDescriptors } from '../../domain/resources'
 import { isRegularFile, isSymlink, readFileBytes } from '../../platform/fs-facts'
+import { pathComponents } from '../../repository/symlinks'
 import { resolveProject } from '../project-context'
+
+/**
+ * `EF-RES-004`/`EF-RES-007`/`EF-RES-014` are exactly the lexical/ownership
+ * findings a standalone descriptor validator can report without project or
+ * filesystem context (06-resources.md "A standalone descriptor validator can
+ * check ... URL syntax"). Re-running `validateResourceDescriptors` against
+ * only the selected descriptor's `location` reuses that same domain logic
+ * (rather than reimplementing root-escape/owner-directory checks here) to
+ * decide whether the exact descriptor this command is about to read is one
+ * repository integrity already rejects.
+ */
+const REJECTED_DESCRIPTOR_CODES: ReadonlySet<string> = new Set(['EF-RES-004', 'EF-RES-007', 'EF-RES-014'])
 
 export interface ResourceReadOptions {
 	project?: string
@@ -79,10 +93,27 @@ export async function runResourceReadCommand(ownerId: string, location: string, 
 	if (isExternalLocation(location))
 		return failure(1, `Location '${location}' is an external URL, not a managed local file.`)
 
+	// Reject a descriptor whose `location` repository integrity already
+	// invalidates (root escape, backslash/segment violation, wrong-scheme, or
+	// declared outside the owner's managed Resource directory) before ever
+	// resolving it against the filesystem -- `path.join(root, location)` below
+	// would otherwise happily walk a `../`-laden location outside the project.
+	const descriptorDiagnostics = validateResourceDescriptors({ id: ownerId, resources: [{ location }] }, owner.path)
+		.filter(d => REJECTED_DESCRIPTOR_CODES.has(d.code))
+	if (descriptorDiagnostics.length > 0)
+		return failure(1, `Descriptor location '${location}' violates repository integrity: ${descriptorDiagnostics[0]!.message}`)
+
 	const absolutePath = path.join(root, location)
 
-	if (await isSymlink(absolutePath))
-		return failure(1, `Managed path '${location}' is a forbidden symlink.`)
+	// lstat every existing path component from `.engineering` down to the file
+	// itself: a symlinked ancestor directory (e.g. `.engineering/resources/
+	// REQ-001` replaced with a symlink to an external directory) is just as
+	// much a forbidden symlink as the final component being one, even though
+	// the final component's own `lstat` would report a plain file.
+	for (const component of pathComponents(location)) {
+		if (await isSymlink(path.join(root, component)))
+			return failure(1, `Managed path '${component}' is a forbidden symlink.`)
+	}
 
 	if (!(await isRegularFile(absolutePath)))
 		return failure(1, `Managed local file '${location}' is missing or is not a regular file.`)
