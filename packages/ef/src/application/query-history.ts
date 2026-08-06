@@ -30,10 +30,12 @@ import type { GitRepository, GitTreeEntry } from '../git/repository'
 import type { HistoryCommitData, HistoryEffectData } from './query-types'
 import type { SnapshotArtifactRecord } from './snapshot-validation'
 import { decodeEnvelope } from '../domain/envelope'
+import { validateFilename } from '../domain/identity'
 import { validateStatus } from '../domain/lifecycle'
 import { compareBytewise } from '../domain/model'
 import { validateRelationEntries } from '../domain/relations'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
+import { decodeConfig } from '../repository/config'
 import { buildArtifactSummary, canonicalArtifactPath } from './query-projection'
 import { rawArrayField } from './snapshot-raw-fields'
 
@@ -45,8 +47,30 @@ function hasErrorDiagnostic(diagnostics: readonly Diagnostic[]): boolean {
 	return diagnostics.some(d => d.severity === 'error')
 }
 
-function isLocalResourceLocation(location: string): boolean {
-	return !location.startsWith('http://') && !location.startsWith('https://')
+function isExternalResourceLocation(location: string): boolean {
+	return location.startsWith('http://') || location.startsWith('https://')
+}
+
+/**
+ * Whether `location` is a syntactically valid LOCAL Resource location
+ * (06-resources.md "Location classification"/"Local path resolution"), used
+ * only to decide the paths this walk treats as part of the target's owned
+ * aggregate (`ownedPathsOf` below). Narrowly mirrors
+ * `snapshot-validation.ts`'s own `isValidLocalLocation` predicate (not
+ * imported: that module's concern is cross-Artifact resource ownership,
+ * this one is aggregate path attribution) -- not an external HTTP(S) URL, no
+ * other URI scheme, no backslash, does not escape the project root, and has
+ * no empty/`.`/`..` path segment.
+ */
+function isValidLocalResourceLocation(location: string): boolean {
+	if (location.length === 0 || isExternalResourceLocation(location))
+		return false
+	if (location.includes(':') || location.includes('\\'))
+		return false
+	if (location.startsWith('/') || location.startsWith('~'))
+		return false
+	return !location.split('/')
+		.some(segment => segment === '' || segment === '.' || segment === '..')
 }
 
 export interface HistoryOutcome {
@@ -65,16 +89,23 @@ export interface HistoryOutcome {
  *
  * - `history-unavailable`: the required first-parent history itself could
  *   not be completely materialized (shallow, unresolved, or otherwise
- *   inaccessible Git history), or a historical commit's tree could not be
- *   read mid-walk. This maps to `EF-QRY-010` ("Requested history context is
- *   unavailable", diagnostic-registry.md).
+ *   inaccessible Git history), a historical commit's tree could not be read
+ *   mid-walk, or the walked history never contains a commit establishing a
+ *   valid bootstrap state (see the bootstrap-boundary scan below) -- no
+ *   authoritative EF history exists on this ref at all. This maps to
+ *   `EF-QRY-010` ("Requested history context is unavailable",
+ *   diagnostic-registry.md).
  * - `untrusted-data`: the target's current record sits at a path that
  *   violates its canonical placement (`EF-ID-005`/`EF-ID-014`; see the
- *   authoritative-path check below), or a historical blob this walk needed
+ *   authoritative-path check below), a historical blob this walk needed
  *   exists but cannot be completely read and decoded (unreadable blob,
- *   malformed frontmatter, or an envelope that fails to decode). This maps
- *   to `EF-QRY-013` ("Query cannot produce a complete trustworthy result",
- *   diagnostic-registry.md).
+ *   malformed frontmatter, or an envelope that fails to decode), or an
+ *   error-severity finding on one of the other historical facts this walk
+ *   consumes -- a CHG's relation entries (including a duplicate effect,
+ *   `EF-REL-006`), a CHG's filename-vs-declared-id consistency, or a
+ *   declared Resource's location syntax when used for aggregate path
+ *   attribution. This maps to `EF-QRY-013` ("Query cannot produce a complete
+ *   trustworthy result", diagnostic-registry.md).
  */
 export type ComputeHistoryResult
 	= | ({ kind: 'complete' } & HistoryOutcome)
@@ -185,7 +216,7 @@ export async function computeHistory(
 			return owned
 		owned.add(canonicalPath)
 		for (const resource of envelope.resources) {
-			if (isLocalResourceLocation(resource.location))
+			if (isValidLocalResourceLocation(resource.location))
 				owned.add(resource.location)
 		}
 		if (isProject) {
@@ -208,18 +239,40 @@ export async function computeHistory(
 	// (11-filesystem-and-config.md: "Its first-parent ancestors MAY be
 	// ordinary repository history without EF state. From bootstrap onward, the
 	// branch's first-parent EF-bearing commit sequence is the sequence of
-	// authoritative EF states."). Until the walk reaches the first commit
-	// whose tree contains `.engineering/ef.yaml`, every earlier commit is
-	// skipped entirely -- never decoded at `canonicalPath` or scanned for
-	// `.engineering/chg/*.md` -- so ordinary pre-EF repository content that
-	// happens to sit at an EF-shaped path (a stale Artifact/CHG-looking file
-	// predating adoption) can neither fabricate a commit/effect entry nor
-	// fail an otherwise-valid query by looking like malformed EF data.
+	// authoritative EF states."). Until the walk reaches the first commit whose
+	// tree contains a `.engineering/ef.yaml` blob that ITSELF reads and decodes
+	// as a valid `ef/config@1` configuration (`hasValidBootstrapConfig` below),
+	// every earlier commit is skipped entirely -- never decoded at
+	// `canonicalPath` or scanned for `.engineering/chg/*.md` -- so ordinary
+	// pre-EF repository content that happens to sit at an EF-shaped path (a
+	// stale Artifact/CHG-looking file predating adoption, OR a stale/invalid
+	// `ef.yaml`-shaped file that never actually became an authoritative EF
+	// state) can neither fabricate a commit/effect entry nor fail an
+	// otherwise-valid query by looking like malformed EF data. A candidate
+	// `ef.yaml` blob that exists but fails to read or decode is deliberately
+	// treated the same as one that is simply absent -- ignored as ordinary
+	// pre-EF content -- rather than failing the query, UNLESS no later commit
+	// ever establishes a valid bootstrap, in which case the loop below falls
+	// through with `reachedBootstrap` still `false` and the query fails with
+	// `history-unavailable` (`EF-QRY-010`): the required authoritative EF
+	// history genuinely does not exist on this ref, which is a stronger and
+	// more specific claim than `complete: true` with empty `effects`/`commits`.
 	// `previousTreeMap`/`previousEnvelope`/`previousChgStatus` are left at
 	// their initial (empty) values through every skipped commit, so the first
 	// commit actually processed -- the bootstrap commit itself -- is diffed
 	// exactly as if it were `oidsOldestFirst[0]`.
 	let reachedBootstrap = false
+
+	async function hasValidBootstrapConfig(treeMap: Map<string, GitTreeEntry>): Promise<boolean> {
+		const efYamlEntry = treeMap.get(EF_YAML_PATH)
+		if (!efYamlEntry || efYamlEntry.type !== 'blob')
+			return false
+		const blobResult = await git.readBlob(efYamlEntry.oid)
+		if (blobResult.kind !== 'resolved')
+			return false
+		const text = utf8Decoder.decode(blobResult.bytes)
+		return decodeConfig(text, EF_YAML_PATH).config !== null
+	}
 
 	for (const oid of oidsOldestFirst) {
 		const treeMap = await treeMapAt(oid)
@@ -227,8 +280,7 @@ export async function computeHistory(
 			return { kind: 'history-unavailable' }
 
 		if (!reachedBootstrap) {
-			const efYamlEntry = treeMap.get(EF_YAML_PATH)
-			if (!efYamlEntry || efYamlEntry.type !== 'blob')
+			if (!(await hasValidBootstrapConfig(treeMap)))
 				continue
 			reachedBootstrap = true
 		}
@@ -245,6 +297,21 @@ export async function computeHistory(
 		// assumes belongs to `targetId` -- and continuing would silently
 		// attribute an unrelated envelope's history to this target.
 		if (currentEnvelope && (currentEnvelope.id !== targetId || currentEnvelope.type !== targetType))
+			return { kind: 'untrusted-data' }
+
+		// `ownedPathsOf` is about to treat every non-external declared Resource
+		// `location` as a literal path into this commit's tree (owned-set
+		// membership and OID comparison). A location that is neither a valid
+		// external HTTP(S) URL nor a syntactically valid local path
+		// (06-resources.md "Location classification": empty, an unsupported
+		// scheme, a forbidden backslash, an absolute/`~`-rooted path, or an
+		// empty/`.`/`..` segment -- `EF-RES-004`/`EF-RES-007`, both
+		// error-severity) can never correspond to a genuine tracked path, so
+		// silently treating it as an owned path (where it simply never matches
+		// and is dropped from `changed`) would misrepresent this exact
+		// historical commit's declared aggregate as smaller/emptier than it
+		// actually claims to be, while still reporting `complete: true`.
+		if (currentEnvelope?.resources.some(resource => !isExternalResourceLocation(resource.location) && !isValidLocalResourceLocation(resource.location)))
 			return { kind: 'untrusted-data' }
 
 		// ---- Aggregate diffing: did this commit change the target's owned paths? ----
@@ -274,6 +341,26 @@ export async function computeHistory(
 			const chgEnvelope = chgLookup.envelope
 			if (chgEnvelope.type !== 'change')
 				continue
+
+			// This walk discovers every CHG purely by scanning blob paths under
+			// `.engineering/chg/` and indexes each one's completion status
+			// (`currentChgStatus`/`previousChgStatus`, keyed by the CHG's own
+			// declared `id`) across commits to detect the exact commit where it
+			// transitions to `completed`. Unlike `snapshot-validation.ts`'s
+			// `graphTrustworthy` -- whose `byId` indexing already keys correctly
+			// on the declared `id` regardless of filename, so `EF-ID-005`/`014`
+			// do not gate it -- this walk's cross-commit transition tracking
+			// depends on every discovered CHG blob being reliably, uniquely
+			// identifiable by that scan: a filename that does not match the
+			// CHG's own declared `id` (`EF-ID-005`), or a CHG file that does not
+			// sit directly inside `.engineering/chg/` (`EF-ID-014`, e.g. a
+			// nested subdirectory this prefix scan would still match), means the
+			// identity this walk is relying on for that tracking is not
+			// trustworthy at this historical commit.
+			const chgFilenameDiagnostics = validateFilename({ type: chgEnvelope.type, id: chgEnvelope.id }, path)
+			if (hasErrorDiagnostic(chgFilenameDiagnostics))
+				return { kind: 'untrusted-data' }
+
 			currentChgStatus.set(chgEnvelope.id, chgEnvelope.status)
 
 			const wasCompleted = previousChgStatus.get(chgEnvelope.id) === 'completed'
@@ -292,6 +379,25 @@ export async function computeHistory(
 			// genuine `introduces`/`modifies`/`retires` effect.
 			const rawRelations = chgLookup.mapping ? rawArrayField(chgLookup.mapping, 'relations') : []
 			const relationValidation = validateRelationEntries({ id: chgEnvelope.id, relations: rawRelations }, path)
+
+			// Any error-severity finding on THIS completing CHG's relation
+			// entries makes `relationValidation.entries` untrustworthy for the
+			// effect this loop is about to emit -- most critically `EF-REL-006`
+			// (duplicate `(type, target)` pair): `validateRelationEntries` does
+			// NOT exclude a duplicate entry from `entries` (04-relations.md
+			// "duplicate ... detection ... independent of vocabulary validity"),
+			// so without this gate a single completed CHG declaring the same
+			// effect relation twice would silently emit the same historical
+			// effect twice while this query still reported `complete: true`.
+			// `EF-REL-015` (an invalid/non-JSON-compatible extension field on an
+			// otherwise valid `(type, target)` pair) is deliberately excluded,
+			// consistent with `snapshot-validation.ts`'s `edgeLossArtifactIds`
+			// vs `relationExtensionLossArtifactIds` split: the effect fact this
+			// loop reads and emits is exactly the pair `(relation.type,
+			// relation.target)`, and `EF-REL-015` never alters either -- only
+			// extension metadata this loop never reads.
+			if (relationValidation.diagnostics.some(d => d.severity === 'error' && d.code !== 'EF-REL-015'))
+				return { kind: 'untrusted-data' }
 
 			for (const relation of relationValidation.entries) {
 				if (relation.target !== targetId)
@@ -322,6 +428,17 @@ export async function computeHistory(
 		previousEnvelope = currentEnvelope
 		previousChgStatus = currentChgStatus
 	}
+
+	// The walk never found a commit establishing a valid bootstrap: the
+	// configured integration ref's ENTIRE first-parent history is pre-EF (or
+	// only ever contained a stale/invalid `ef.yaml`-shaped blob that never
+	// became authoritative). No authoritative EF state exists on this ref at
+	// all, so the required history this query needs does not exist --
+	// `history-unavailable` (`EF-QRY-010`) -- rather than the misleadingly
+	// ordinary-looking `{ kind: 'complete', effects: [], commits: [] }` a
+	// caller could mistake for "this Artifact simply has no history yet".
+	if (!reachedBootstrap)
+		return { kind: 'history-unavailable' }
 
 	return { kind: 'complete', effects, commits }
 }

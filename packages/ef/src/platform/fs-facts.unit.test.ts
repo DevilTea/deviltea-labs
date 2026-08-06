@@ -1,8 +1,9 @@
+import { Buffer } from 'node:buffer'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { isDirectory, isRegularFile, isSymlink, readFileBytes, walkDirectory } from './fs-facts'
+import { isDirectory, isRegularFile, isSymlink, readFileBytes, readRegularFileNoFollow, walkDirectory } from './fs-facts'
 
 let tempRoot: string
 
@@ -68,15 +69,25 @@ describe('walkDirectory', () => {
 		const byPath = new Map(entries.map(entry => [entry.relativePath, entry]))
 
 		expect(byPath.get('ef.yaml'))
-			.toEqual({ relativePath: 'ef.yaml', isRegularFile: true, isDirectory: false, isSymlink: false })
+			.toMatchObject({ relativePath: 'ef.yaml', isRegularFile: true, isDirectory: false, isSymlink: false })
 		expect(byPath.get('req'))
-			.toEqual({ relativePath: 'req', isRegularFile: false, isDirectory: true, isSymlink: false })
+			.toMatchObject({ relativePath: 'req', isRegularFile: false, isDirectory: true, isSymlink: false })
 		expect(byPath.get('req/REQ-001.md'))
-			.toEqual({ relativePath: 'req/REQ-001.md', isRegularFile: true, isDirectory: false, isSymlink: false })
+			.toMatchObject({ relativePath: 'req/REQ-001.md', isRegularFile: true, isDirectory: false, isSymlink: false })
 		expect(byPath.get('resources/REQ-001/schema.json'))
-			.toEqual({ relativePath: 'resources/REQ-001/schema.json', isRegularFile: true, isDirectory: false, isSymlink: false })
+			.toMatchObject({ relativePath: 'resources/REQ-001/schema.json', isRegularFile: true, isDirectory: false, isSymlink: false })
 		expect(entries)
 			.toHaveLength(6)
+
+		// Every real filesystem entry carries an `lstat`-derived `dev`/`ino`
+		// identity a caller can later bind a read to (`readRegularFileNoFollow`'s
+		// `expectedIdentity`).
+		for (const entry of entries) {
+			expect(typeof entry.identity?.dev)
+				.toBe('number')
+			expect(typeof entry.identity?.ino)
+				.toBe('number')
+		}
 	})
 
 	it('reports a symlinked directory as a symlink and does not descend into it', async () => {
@@ -93,7 +104,7 @@ describe('walkDirectory', () => {
 			.toEqual(['linked-dir', 'real-dir', 'real-dir/inside.md'])
 		const linkedEntry = entries.find(entry => entry.relativePath === 'linked-dir')
 		expect(linkedEntry)
-			.toEqual({ relativePath: 'linked-dir', isRegularFile: false, isDirectory: false, isSymlink: true })
+			.toMatchObject({ relativePath: 'linked-dir', isRegularFile: false, isDirectory: false, isSymlink: true })
 	})
 
 	it('returns an empty array for an empty directory', async () => {
@@ -113,5 +124,71 @@ describe('readFileBytes', () => {
 			.toBeInstanceOf(Uint8Array)
 		expect(Array.from(result))
 			.toEqual(Array.from(bytes))
+	})
+})
+
+// FINDING 1/2 (discovery.ts / snapshot.ts): a pathname-based `readFile`
+// follows a symlink at the final path component, so a managed path (e.g.
+// `.engineering/ef.yaml`) replaced by a symlink -- to an external file, or
+// simply to another in-tree file -- is read through silently. This helper's
+// own contract (typed refusal for anything that is not a genuinely observed,
+// still-identical regular file) is what callers rely on to avoid that.
+describe('readRegularFileNoFollow', () => {
+	it('returns ok with the exact bytes of a genuine regular file', async () => {
+		const target = path.join(tempRoot, 'ef.yaml')
+		fs.writeFileSync(target, 'schema: ef/config@1\n')
+
+		const result = await readRegularFileNoFollow(target)
+		expect(result.kind)
+			.toBe('ok')
+		expect(result.kind === 'ok' && Buffer.from(result.bytes)
+			.toString('utf8'))
+			.toBe('schema: ef/config@1\n')
+	})
+
+	it('returns not-found for a missing path', async () => {
+		const result = await readRegularFileNoFollow(path.join(tempRoot, 'does-not-exist.yaml'))
+		expect(result)
+			.toEqual({ kind: 'not-found' })
+	})
+
+	it('returns not-a-regular-file for a directory', async () => {
+		const target = path.join(tempRoot, 'a-directory')
+		fs.mkdirSync(target)
+
+		const result = await readRegularFileNoFollow(target)
+		expect(result)
+			.toEqual({ kind: 'not-a-regular-file' })
+	})
+
+	it('refuses to read through a symlink even when its target is a real regular file, never returning the target bytes', async () => {
+		const outsideFile = path.join(tempRoot, 'outside.yaml')
+		fs.writeFileSync(outsideFile, 'schema: ef/config@1 # OUTSIDE CONTENT\n')
+		const link = path.join(tempRoot, 'ef.yaml')
+		fs.symlinkSync(outsideFile, link)
+
+		const result = await readRegularFileNoFollow(link)
+		expect(result)
+			.toEqual({ kind: 'not-a-regular-file' })
+	})
+
+	it('succeeds when expectedIdentity matches the file\'s real lstat identity', async () => {
+		const target = path.join(tempRoot, 'req.md')
+		fs.writeFileSync(target, 'content')
+		const stats = fs.lstatSync(target)
+
+		const result = await readRegularFileNoFollow(target, { dev: stats.dev, ino: stats.ino })
+		expect(result.kind)
+			.toBe('ok')
+	})
+
+	it('returns identity-mismatch when expectedIdentity does not match the observed file (bound-read discrepancy)', async () => {
+		const target = path.join(tempRoot, 'req.md')
+		fs.writeFileSync(target, 'content')
+		const stats = fs.lstatSync(target)
+
+		const result = await readRegularFileNoFollow(target, { dev: stats.dev, ino: stats.ino + 1 })
+		expect(result)
+			.toEqual({ kind: 'identity-mismatch' })
 	})
 })

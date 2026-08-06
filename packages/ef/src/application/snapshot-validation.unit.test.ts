@@ -105,6 +105,13 @@ async function writeFile(root: string, relativePath: string, content: string): P
 	await fs.writeFile(fullPath, content)
 }
 
+/** Writes raw bytes verbatim, for fixtures that need genuinely invalid UTF-8 (Finding 7) rather than a well-formed string. */
+async function writeFileBytes(root: string, relativePath: string, bytes: Uint8Array): Promise<void> {
+	const fullPath = path.join(root, relativePath)
+	await fs.mkdir(path.dirname(fullPath), { recursive: true })
+	await fs.writeFile(fullPath, bytes)
+}
+
 async function writeMinimalProject(root: string): Promise<void> {
 	await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
 	await writeFile(root, '.engineering/.gitignore', GITIGNORE)
@@ -613,8 +620,10 @@ describe('validateSnapshot', () => {
 		it('finding A: tracks envelope-wide loss (and projection loss) for a duplicate core key (EF-ENV-005), where the parser silently keeps only one of the conflicting values', async () => {
 			await writeMinimalProject(tempDir)
 			// A second 'title:' key duplicates the frontmatter's core field;
-			// `collectFields` (envelope.ts) keeps only the last value, discarding
-			// the first without any other trace of it in the decoded envelope.
+			// `collectFields` (envelope.ts) keeps only the FIRST value (matching
+			// `rawArrayField`'s own first-match selection -- fifth-round Finding
+			// 5), discarding the second without any other trace of it in the
+			// decoded envelope.
 			const duplicateTitleMd = requirementMd({ id: 'REQ-001' })
 				.replace('title: Example Requirement\n', 'title: Example Requirement\ntitle: Duplicated Title\n')
 			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateTitleMd)
@@ -627,6 +636,133 @@ describe('validateSnapshot', () => {
 				.toEqual(['REQ-001'])
 			expect([...result.projectionLossArtifactIds])
 				.toEqual(['REQ-001'])
+			// 'title' is not a graph-relevant field (Finding 5): the graph facts
+			// this Artifact contributes stay trustworthy even though its
+			// projection does not.
+			expect(result.envelopeStructuralLossArtifactIds.size)
+				.toBe(0)
+			expect(result.graphTrustworthy)
+				.toBe(true)
+		})
+
+		describe('finding 5 (duplicate-key trust-scope adjudication): EF-ENV-005 field classification', () => {
+			it('a duplicate top-level \'id\' key excludes graph trust: the file\'s own declared identity is uncertain, same bucket as EF-ID-001/002/003', async () => {
+				await writeMinimalProject(tempDir)
+				const duplicateIdMd = requirementMd({ id: 'REQ-001' })
+					.replace('id: REQ-001\n', 'id: REQ-001\nid: REQ-002\n')
+				await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateIdMd)
+				const result = await load()
+
+				expect(codesOf(result.diagnostics))
+					.toContain('EF-ENV-005')
+				// `collectFields` keeps the FIRST 'id' value (REQ-001).
+				expect([...result.envelopeStructuralLossArtifactIds])
+					.toEqual(['REQ-001'])
+				// Graph-fact-invalid, not merely projection loss: EVERY query kind
+				// is blocked, mirroring EF-ID-001/002/003's precedent.
+				expect(result.graphTrustworthy)
+					.toBe(false)
+			})
+
+			it('a duplicate top-level \'type\' key excludes graph trust the same way as \'id\'', async () => {
+				await writeMinimalProject(tempDir)
+				const duplicateTypeMd = requirementMd({ id: 'REQ-001' })
+					.replace('type: requirement\n', 'type: requirement\ntype: decision\n')
+				await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateTypeMd)
+				const result = await load()
+
+				expect(codesOf(result.diagnostics))
+					.toContain('EF-ENV-005')
+				expect([...result.envelopeStructuralLossArtifactIds])
+					.toEqual(['REQ-001'])
+				expect(result.graphTrustworthy)
+					.toBe(false)
+			})
+
+			it('a duplicate top-level \'relations\' key does NOT flip graphTrustworthy: it is scoped to edgeLossArtifactIds (this Artifact\'s own outgoing edge set only), not this file\'s identity', async () => {
+				await writeMinimalProject(tempDir)
+				// Two distinct 'relations:' arrays under the same key. `decodeEnvelope`
+				// and `rawArrayField` both deterministically pick the FIRST occurrence
+				// (fifth-round Finding 5's own fix), but the file itself remains
+				// invalid regardless of which array wins -- its outgoing edge set is
+				// genuinely unknown, not its own id/type identity, so this is folded
+				// into `edgeLossArtifactIds` (gated direction-aware by the query
+				// layer) instead of blocking every query project-wide.
+				const duplicateRelationsMd = requirementMd({ id: 'REQ-001' })
+					.replace(
+						'relations: []\n',
+						'relations:\n  - type: references\n    target: PROJECT\nrelations:\n  - type: references\n    target: PROJECT\n',
+					)
+				await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateRelationsMd)
+				const result = await load()
+
+				expect(codesOf(result.diagnostics))
+					.toContain('EF-ENV-005')
+				expect(result.envelopeStructuralLossArtifactIds.size)
+					.toBe(0)
+				expect([...result.edgeLossArtifactIds])
+					.toEqual(['REQ-001'])
+				// The file's own projection is still untrustworthy (envelope-wide
+				// loss fires unconditionally for any EF-ENV-005), just not its
+				// graph-membership identity.
+				expect([...result.projectionLossArtifactIds])
+					.toEqual(['REQ-001'])
+				expect(result.graphTrustworthy)
+					.toBe(true)
+			})
+
+			it('a duplicate top-level \'status\' key does NOT flip graphTrustworthy: it is scoped to statusInvalidArtifactIds (consumed only by impact/resolve-current), not this file\'s identity', async () => {
+				await writeMinimalProject(tempDir)
+				const duplicateStatusMd = requirementMd({ id: 'REQ-001' })
+					.replace('status: active\n', 'status: active\nstatus: draft\n')
+				await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateStatusMd)
+				const result = await load()
+
+				expect(codesOf(result.diagnostics))
+					.toContain('EF-ENV-005')
+				expect(result.envelopeStructuralLossArtifactIds.size)
+					.toBe(0)
+				expect([...result.statusInvalidArtifactIds])
+					.toEqual(['REQ-001'])
+				expect([...result.projectionLossArtifactIds])
+					.toEqual(['REQ-001'])
+				expect(result.graphTrustworthy)
+					.toBe(true)
+			})
+
+			it('parser-recovery: the YAML library recovers a full, usable mapping from a duplicate-key document (EF-ENV-005 is an error, not a structural parse failure), but a duplicate on a non-identity field (\'summary\') must not invalidate graph facts at all', async () => {
+				await writeMinimalProject(tempDir)
+				// `uniqueKeys: true` makes the underlying YAML library record a
+				// DUPLICATE_KEY error internally, yet it still recovers a usable
+				// document (both pairs remain in the parsed mapping -- this
+				// recovery is the entire reason the first/last inconsistency this
+				// round's Finding 5 fixes was possible at all). Duplicating
+				// 'summary' (read only by lookup/list/search projections, never by
+				// graph construction) proves the recovered document does not
+				// blanket-invalidate every graph-relevant fact.
+				const duplicateSummaryMd = requirementMd({ id: 'REQ-001' })
+					.replace(
+						'summary: A minimal example requirement used for validation pipeline tests.\n',
+						'summary: A minimal example requirement used for validation pipeline tests.\nsummary: Duplicated summary.\n',
+					)
+				await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateSummaryMd)
+				const result = await load()
+
+				expect(codesOf(result.diagnostics))
+					.toContain('EF-ENV-005')
+				expect(result.envelopeStructuralLossArtifactIds.size)
+					.toBe(0)
+				expect(result.edgeLossArtifactIds.size)
+					.toBe(0)
+				expect(result.statusInvalidArtifactIds.size)
+					.toBe(0)
+				expect([...result.envelopeWideLossArtifactIds])
+					.toEqual(['REQ-001'])
+				expect(result.graphTrustworthy)
+					.toBe(true)
+				expect(result.byId.has('REQ-001'))
+					.toBe(true)
+			})
 		})
 
 		it('tracks tag loss for a non-string tag entry, silently dropped from the decoded envelope (distinct from an invalid-pattern or duplicate tag, both of which are kept)', async () => {
@@ -656,6 +792,273 @@ describe('validateSnapshot', () => {
 				.toBe(0)
 			expect(result.projectionLossArtifactIds.size)
 				.toBe(0)
+		})
+	})
+
+	describe('finding 6: per-fact graph trust (semantic edge / status / cross-type supersession)', () => {
+		function decisionMd(options: { id: string, status?: string, relations?: string }): string {
+			const status = options.status ?? 'active'
+			const relations = options.relations ?? '[]'
+			return `---
+schema: ef/decision@1
+type: decision
+id: ${options.id}
+title: Title of ${options.id}
+status: ${status}
+summary: Summary of ${options.id}.
+tags: []
+relations: ${relations}
+resources: []
+---
+
+## Context
+
+Context text.
+
+## Decision
+
+Decision text.
+
+## Consequences
+
+Consequence text.
+`
+		}
+
+		function policyMd(options: { id: string, status?: string, relations?: string }): string {
+			const status = options.status ?? 'active'
+			const relations = options.relations ?? '[]'
+			return `---
+schema: ef/policy@1
+type: policy
+id: ${options.id}
+title: Title of ${options.id}
+status: ${status}
+summary: Summary of ${options.id}.
+tags: []
+relations: ${relations}
+resources: []
+---
+
+## Policy Statement
+
+Statement text.
+
+## Rationale
+
+Rationale text.
+`
+		}
+
+		it('incompatible-edge: EF-REL-004 (a decision cannot be a derived-from source) tracks the SOURCE Artifact in semanticEdgeLossArtifactIds, not edgeLossArtifactIds', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001' }))
+			await writeFile(tempDir, '.engineering/adr/ADR-001.md', decisionMd({
+				id: 'ADR-001',
+				// 'derived-from' sources are restricted to prd/requirement/policy;
+				// a decision source is incompatible.
+				relations: '\n  - type: derived-from\n    target: REQ-001\n',
+			}))
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-004')
+			expect([...result.semanticEdgeLossArtifactIds])
+				.toEqual(['ADR-001'])
+			expect(result.edgeLossArtifactIds.size)
+				.toBe(0)
+			// The edge is fully present and faithfully reflects the declared
+			// (type, target) pair -- nothing is dropped or coerced -- so this is
+			// a graph-TRUST fact, not a projection-loss fact.
+			expect(result.projectionLossArtifactIds.size)
+				.toBe(0)
+			expect(result.graphTrustworthy)
+				.toBe(true)
+		})
+
+		it('derived-cycle: EF-REL-008 tracks every cycle participant in semanticEdgeLossArtifactIds', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/prd/PRD-100.md', `---
+schema: ef/prd@1
+type: prd
+id: PRD-100
+title: PRD One
+status: active
+summary: First half of a derived-from cycle.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-200
+resources: []
+---
+
+## Vision
+
+Vision text.
+
+## Objectives
+
+Objective text.
+`)
+			await writeFile(tempDir, '.engineering/prd/PRD-200.md', `---
+schema: ef/prd@1
+type: prd
+id: PRD-200
+title: PRD Two
+status: active
+summary: Second half of a derived-from cycle.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-100
+resources: []
+---
+
+## Vision
+
+Vision text.
+
+## Objectives
+
+Objective text.
+`)
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-008')
+			expect([...result.semanticEdgeLossArtifactIds].sort())
+				.toEqual(['PRD-100', 'PRD-200'])
+			expect(result.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect(result.graphTrustworthy)
+				.toBe(true)
+		})
+
+		it('invalid-status: EF-LIFE-001 (unrecognized status) and EF-LIFE-002 (status not allowed for type) both track the Artifact in statusInvalidArtifactIds, without corrupting its raw projection', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', status: 'bogus-status' }))
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-LIFE-001')
+			expect([...result.statusInvalidArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.byId.get('REQ-001')?.envelope.status)
+				.toBe('bogus-status')
+			expect(result.projectionLossArtifactIds.size)
+				.toBe(0)
+		})
+
+		it('cross-type-supersession: EF-SUP-003 (a requirement superseded by a policy) tracks the SOURCE Artifact in supersessionCrossTypeArtifactIds', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				status: 'superseded',
+				relations: '\n  - type: superseded-by\n    target: POL-001\n',
+			}))
+			await writeFile(tempDir, '.engineering/pol/POL-001.md', policyMd({ id: 'POL-001' }))
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-SUP-003')
+			expect([...result.supersessionCrossTypeArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.projectionLossArtifactIds.size)
+				.toBe(0)
+		})
+	})
+
+	describe('finding 7: byte-decoding loss (invalid UTF-8)', () => {
+		function corruptByteAtMarker(text: string, marker: string): Uint8Array {
+			const bytes = new TextEncoder()
+				.encode(text)
+			const markerBytes = new TextEncoder()
+				.encode(marker)
+			const markerIndex = text.indexOf(marker)
+			if (markerIndex === -1)
+				throw new Error(`marker '${marker}' not found in fixture text`)
+			// `text` is pure ASCII up to and including the marker in every fixture
+			// below, so the Unicode-scalar index equals the byte offset.
+			const corrupted = new Uint8Array(bytes)
+			corrupted[markerIndex] = 0xFF // 0xFF is never a valid UTF-8 leading byte.
+			void markerBytes
+			return corrupted
+		}
+
+		it('invalid UTF-8 inside the frontmatter title tracks byteDecodingLossArtifactIds AND envelopeStructuralLossArtifactIds (identity/relations could be corrupted)', async () => {
+			await writeMinimalProject(tempDir)
+			const md = requirementMd({ id: 'REQ-001' })
+				.replace('Example Requirement', 'MARKERTITLEXX')
+			const corrupted = corruptByteAtMarker(md, 'MARKERTITLEXX')
+			await writeFileBytes(tempDir, '.engineering/req/REQ-001.md', corrupted)
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-FS-005')
+			expect([...result.byteDecodingLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.envelopeStructuralLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('invalid UTF-8 confined to the Markdown body tracks byteDecodingLossArtifactIds (and projection loss) only -- graph facts stay trustworthy', async () => {
+			await writeMinimalProject(tempDir)
+			const md = requirementMd({ id: 'REQ-001', acceptanceCriteria: '- MARKERBODYXX behaves as specified.' })
+			const corrupted = corruptByteAtMarker(md, 'MARKERBODYXX')
+			await writeFileBytes(tempDir, '.engineering/req/REQ-001.md', corrupted)
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-FS-005')
+			expect([...result.byteDecodingLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.envelopeStructuralLossArtifactIds.size)
+				.toBe(0)
+			expect(result.graphTrustworthy)
+				.toBe(true)
+			expect(result.byId.has('REQ-001'))
+				.toBe(true)
+		})
+	})
+
+	describe('finding 9: per-named-field Resource loss (resourceFieldLossById)', () => {
+		it('an EF-RES-001 confined to \'normative\' only records \'normative\' (not \'location\'/\'description\') for that Artifact', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				// 'normative' is present but the wrong type (string, not boolean);
+				// every other core Resource field is well-formed.
+				resources: '\n  - type: reference\n    location: .engineering/resources/REQ-001/notes.md\n    role: reference\n    media_type: text/markdown\n    normative: "yes"\n    description: Notes.\n',
+			}))
+			await writeFile(tempDir, '.engineering/resources/REQ-001/notes.md', '# Notes\n')
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-RES-001')
+			expect([...(result.resourceFieldLossById.get('REQ-001') ?? [])])
+				.toEqual(['normative'])
+			expect([...result.resourceLossArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+
+		it('an entirely non-mapping Resource entry records EVERY named field as lost', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				resources: '\n  - not-a-mapping\n',
+			}))
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-RES-001')
+			expect([...(result.resourceFieldLossById.get('REQ-001') ?? [])].sort())
+				.toEqual(['description', 'location', 'media_type', 'normative', 'role', 'type'])
 		})
 	})
 

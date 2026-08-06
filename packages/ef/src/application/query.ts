@@ -42,7 +42,7 @@ import type {
 	TraceQueryRequest,
 } from './query-types'
 import type { ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
-import type { SnapshotArtifactRecord, SnapshotValidationResult } from './snapshot-validation'
+import type { ResourceFieldName, SnapshotArtifactRecord, SnapshotValidationResult } from './snapshot-validation'
 import { severityOf } from '../domain/diagnostic-codes'
 import { ARTIFACT_TYPES, compareBytewise, RELATION_TYPES, STATUSES } from '../domain/model'
 import { prepareSearchTerms } from './case-folding'
@@ -167,63 +167,116 @@ function graphTrustworthyFailure(context: QueryContext, kind: QueryKind): QueryR
 
 /**
  * `EF-QRY-013` gate for the four graph-traversal query kinds (`relations`,
- * `trace`, `impact`, `resolve-current`), applied only on `edgeLossArtifactIds`
- * (Finding C) -- never on `relationExtensionLossArtifactIds`
- * (`EF-REL-015`-only loss): a graph query's edges are always exactly
- * `(source, type, target)`, and `EF-REL-015` never removes that pair, so an
- * extension-only discard cannot hide a missing edge from any of these four
- * kinds (`snapshot-validation.ts`'s `edgeLossArtifactIds` field docs).
+ * `trace`, `impact`, `resolve-current`), applied on every artifact-scoped
+ * edge-fact this module tracks: `edgeLossArtifactIds` (shape/vocabulary loss
+ * that can hide an edge) AND `semanticEdgeLossArtifactIds` (an edge that is
+ * present but semantically invalid -- `EF-REL-004` incompatible source/target,
+ * `EF-REL-008` `derived-from` cycle membership; sixth-round Finding 6) --
+ * never `relationExtensionLossArtifactIds` (`EF-REL-015`-only loss): a graph
+ * query's edges are always exactly `(source, type, target)`, and `EF-REL-015`
+ * never removes or alters that pair, so an extension-only discard cannot hide
+ * or corrupt an edge for any of these four kinds
+ * (`snapshot-validation.ts`'s `edgeLossArtifactIds` field docs).
  *
- * Whether an edge-lossy Artifact can affect THIS traversal depends on the
+ * Whether an edge-invalid Artifact can affect THIS traversal depends on the
  * traversal's direction (10-query-and-trace.md "incoming" reads are derived
- * from every Artifact's outgoing `relations` array, so a discarded entry
- * ANYWHERE could hide an edge pointing into the result; an "outgoing"-only
- * traversal only ever walks a visited Artifact's own outgoing array, so a
- * discarded entry on an Artifact the traversal never reaches cannot affect
- * it):
+ * from every Artifact's outgoing `relations` array, so a discarded/invalid
+ * entry ANYWHERE could hide or corrupt an edge pointing into the result; an
+ * "outgoing"-only traversal only ever walks the outgoing array of an
+ * Artifact whose array it actually expanded, so an Artifact whose array the
+ * traversal never read cannot affect it -- Finding 8):
  *
  * - `incoming`-dependent reads (`relations`/`trace` with direction
  *   `incoming`/`both`, and `impact`, whose traversal direction is always
  *   incoming; `EF-QRY-009`/`008` guard `resolve-current`'s own algorithm,
  *   which is outgoing-only) stay gated project-wide, mirroring
- *   `graphTrustworthyFailure`'s reach: `edgeLossGlobalFailure` below.
+ *   `graphTrustworthyFailure`'s reach: `edgeTrustGlobalFailure` below.
  * - Purely outgoing traversals (`relations`/`trace` with direction
- *   `outgoing`, and `resolve-current`) are scoped to the traversal's own
- *   result: `edgeLossLocalFailure` below, called AFTER the traversal
- *   succeeds so the visited-node set is known.
+ *   `outgoing`, and `resolve-current`) are scoped to exactly the Artifact IDs
+ *   whose own outgoing array the traversal actually consulted:
+ *   `edgeTrustLocalFailure` below.
  *
  * `lookup`/`list`/`search` are gated instead by the narrower, per-Artifact
  * `projectionLossArtifactIds` check at their own call sites, since those
  * kinds project an Artifact's raw (unsanitized) envelope rather than
  * traversing the sanitized graph.
  */
-function edgeLossGlobalFailure(context: QueryContext, kind: QueryKind): QueryResult | undefined {
-	if (context.validation.edgeLossArtifactIds.size === 0)
+function edgeTrustGlobalFailure(context: QueryContext, kind: QueryKind): QueryResult | undefined {
+	const { edgeLossArtifactIds, semanticEdgeLossArtifactIds } = context.validation
+	if (edgeLossArtifactIds.size === 0 && semanticEdgeLossArtifactIds.size === 0)
 		return undefined
-	return failure(kind, 'EF-QRY-013', 'An Artifact\'s declared relations could not be completely sanitized elsewhere in the graph, so the requested relation graph would not be trustworthy.')
+	return failure(kind, 'EF-QRY-013', 'An Artifact\'s declared relations could not be completely sanitized, or were semantically invalid, elsewhere in the graph, so the requested relation graph would not be trustworthy.')
 }
 
 /**
- * Scoped counterpart of `edgeLossGlobalFailure` for a purely outgoing
- * traversal, applied to its already-computed `visited` node set (Finding C:
- * "at minimum, a clean Artifact's direct outgoing relations must not be
- * blocked by an unrelated invalid entry"). Blocks only when an edge-lossy
- * Artifact is itself part of this traversal's result, or sits immediately
- * adjacent to it via a known-valid (already-sanitized) relation in either
- * direction -- the conservative closure under which a hidden edge on that
- * Artifact could plausibly have altered this specific traversal, without
- * gating every unrelated traversal elsewhere in the project.
+ * Scoped counterpart of `edgeTrustGlobalFailure` for a purely outgoing
+ * traversal (Finding 8), applied to exactly the Artifact IDs whose own
+ * outgoing `relations` array the traversal actually read while building its
+ * result -- NOT every Artifact merely adjacent to (or pointing into) the
+ * result. `max_depth: 0` is contractually roots-only with no edges
+ * (10-query-and-trace.md), so passing an empty `consumedSourceIds` for that
+ * case (as every caller below does) correctly never gates: no Artifact's
+ * outgoing array was read at all.
  */
-function edgeLossLocalFailure(context: QueryContext, kind: QueryKind, visited: ReadonlySet<string>): QueryResult | undefined {
-	const { edgeLossArtifactIds, byId, incomingRelations } = context.validation
-	for (const id of edgeLossArtifactIds) {
-		if (visited.has(id))
-			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- part of this traversal's result -- declares a relations entry that could not be completely sanitized, so this graph would not be trustworthy.`)
-		if (byId.get(id)?.relations.some(relation => visited.has(relation.target)))
-			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- adjacent to this traversal's result -- declares a relations entry that could not be completely sanitized, so this graph would not be trustworthy.`)
-		if ((incomingRelations.get(id) ?? []).some(edge => visited.has(edge.from)))
-			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- adjacent to this traversal's result -- declares a relations entry that could not be completely sanitized, so this graph would not be trustworthy.`)
+function edgeTrustLocalFailure(context: QueryContext, kind: QueryKind, consumedSourceIds: ReadonlySet<string>): QueryResult | undefined {
+	const { edgeLossArtifactIds, semanticEdgeLossArtifactIds } = context.validation
+	for (const id of consumedSourceIds) {
+		if (edgeLossArtifactIds.has(id) || semanticEdgeLossArtifactIds.has(id))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- whose own declared relations this traversal consulted -- has a relations entry that could not be completely sanitized or was semantically invalid, so this graph would not be trustworthy.`)
 	}
+	return undefined
+}
+
+/**
+ * Finding 4: every `relations`/`trace`/`impact`/`resolve-current` node
+ * embedded in a result is itself an `ArtifactSummaryProjection`
+ * (`buildArtifactSummary`), built from the same raw, unsanitized envelope
+ * `lookup`/`list`/`search` project -- so any node whose Artifact is in
+ * `projectionLossArtifactIds` makes this result's embedded summary just as
+ * untrustworthy as an equivalent `lookup` would be, independent of edge
+ * trust. Checked separately from (and in addition to) every edge-trust gate
+ * above.
+ */
+function projectionLossNodeFailure(context: QueryContext, kind: QueryKind, nodeIds: Iterable<string>): QueryResult | undefined {
+	for (const id of nodeIds) {
+		if (context.validation.projectionLossArtifactIds.has(id))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- part of this result's projected node set -- declares structured content that could not be completely loaded, so its projected summary would not be trustworthy.`)
+	}
+	return undefined
+}
+
+/**
+ * Finding 6: `resolve-current`'s own algorithm (`domain/supersession.ts`)
+ * follows `superseded-by` edges and branches on `status`, but never checks
+ * source/target type compatibility itself, so this gates the two facts it
+ * silently trusts: `statusInvalidArtifactIds` for every visited node (an
+ * unrecognized-or-inapplicable status can otherwise be silently treated as a
+ * legitimate `active`/`draft`/`retired` leaf) and
+ * `supersessionCrossTypeArtifactIds` for every Artifact whose own
+ * `superseded-by` entries were actually traversed (a cross-type replacement,
+ * `EF-SUP-003`, can otherwise be silently followed as though it were a
+ * genuine supersession). Also folds in the same edge-trust facts
+ * `edgeTrustLocalFailure` checks, scoped to exactly the traversed sources
+ * (`result.edges`' `source` side) -- resolve-current's traversal is always
+ * outgoing-only. Shared between `resolve-current` and `impact`'s
+ * `resolve_current` option, which runs the identical algorithm per root.
+ */
+function resolveCurrentTrustFailure(context: QueryContext, kind: QueryKind, result: { nodeIds: readonly string[], edges: readonly RelationEdgeData[] }): QueryResult | undefined {
+	const { statusInvalidArtifactIds, supersessionCrossTypeArtifactIds, edgeLossArtifactIds, semanticEdgeLossArtifactIds } = context.validation
+
+	for (const id of result.nodeIds) {
+		if (statusInvalidArtifactIds.has(id))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- part of this current-resolution result -- has an invalid lifecycle status, so this result would not be trustworthy.`)
+	}
+
+	const consumedSourceIds = new Set(result.edges.map(edge => edge.source))
+	for (const source of consumedSourceIds) {
+		if (supersessionCrossTypeArtifactIds.has(source))
+			return failure(kind, 'EF-QRY-013', `Artifact '${source}' -- part of this current-resolution result -- declares a 'superseded-by' replacement of a different Artifact type, so this result would not be trustworthy.`)
+		if (edgeLossArtifactIds.has(source) || semanticEdgeLossArtifactIds.has(source))
+			return failure(kind, 'EF-QRY-013', `Artifact '${source}' -- whose own declared relations this current-resolution result consulted -- has a relations entry that could not be completely sanitized or was semantically invalid, so this result would not be trustworthy.`)
+	}
+
 	return undefined
 }
 
@@ -377,6 +430,87 @@ function matchesListFilters(record: SnapshotArtifactRecord, request: ListQueryRe
 	return true
 }
 
+/** Resource fields `list`'s own filter options actually read (Finding 9). */
+const LIST_RESOURCE_FILTER_FIELDS: ReadonlySet<ResourceFieldName> = new Set(['type', 'role', 'normative'])
+/** Resource fields full-text search actually reads (`query-search.ts`'s `buildSurfaces`; Finding 9). */
+const SEARCH_RESOURCE_SURFACE_FIELDS: ReadonlySet<ResourceFieldName> = new Set(['location', 'description'])
+
+/**
+ * Whether `record`'s Resource field loss (`resourceFieldLossById`) intersects
+ * `consumedFields` -- the exact named Resource fields the caller's request
+ * surface actually reads. Ninth-round Finding 9: an `EF-RES-001` on
+ * `normative`/`type`/`role` alone must not gate a request that only reads
+ * `location`/`description` (or vice versa), since the two field groups decode
+ * independently of each other.
+ */
+function hasRelevantResourceFieldLoss(validation: SnapshotValidationResult, id: string, consumedFields: ReadonlySet<ResourceFieldName>): boolean {
+	const lost = validation.resourceFieldLossById.get(id)
+	if (!lost)
+		return false
+	for (const field of lost) {
+		if (consumedFields.has(field))
+			return true
+	}
+	return false
+}
+
+/**
+ * Whether `record` could still possibly match `request` based ONLY on its
+ * trustworthy (non-lossy) `type`/`status`/`schema` fields -- i.e. whether a
+ * fully-trusted predicate already excludes it, independent of any lossy
+ * field. Ninth-round Finding 9: a candidate a trustworthy filter already
+ * excludes cannot have its list/search membership changed by loss on some
+ * OTHER field, so it must not be added to a membership-risk set at all.
+ *
+ * Each of the three fields is distrusted independently, using the MOST
+ * PRECISE signal available for it (duplicate-key trust-scope adjudication):
+ *
+ * - `type`: distrusted only when `record` is in
+ *   `envelopeStructuralLossArtifactIds` (a duplicate `id`/`type` key). That
+ *   already blocks `graphTrustworthy` project-wide before any caller reaches
+ *   this function, so this branch is unreachable in practice -- kept for
+ *   correctness independent of call order rather than relying on that
+ *   invariant.
+ * - `status`: distrusted whenever `record` is in `statusInvalidArtifactIds`
+ *   -- an actual `EF-LIFE-001`/`002` invalid status, or a duplicate `status`
+ *   key -- either way `envelope.status`, while a genuine
+ *   first-occurrence-selected decode, is not reliably this file's ONLY
+ *   declared status.
+ * - `schema`: no field-precise tracking exists for a duplicated/dropped
+ *   `schema` key the way `type`/`status` now have, so this filter alone
+ *   still falls back to the broader `envelopeWideLossArtifactIds` signal (a
+ *   duplicate key ANYWHERE in the frontmatter, or a dropped unrecognized
+ *   top-level field) when a `schema` filter is actually requested.
+ *
+ * A duplicate key confined to `relations`/`resources`/`tags` (or a
+ * non-graph-relevant field like `title`/`summary`) can never corrupt
+ * `type`/`status`/`schema`, so it must not conservatively taint any of these
+ * three checks -- unlike the coarser whole-Artifact
+ * `envelopeWideLossArtifactIds` bucket, which is unconditioned on field and
+ * so is reserved for the one filter (`schema`) that has no narrower bucket
+ * of its own.
+ */
+function couldPossiblyMatchTrustedFilters(validation: SnapshotValidationResult, record: SnapshotArtifactRecord, request: Pick<ListQueryRequest, 'type' | 'status' | 'schema'>): boolean {
+	if (validation.envelopeStructuralLossArtifactIds.has(record.id))
+		return true
+	const envelope = record.envelope
+	if (request.type && request.type.length > 0 && !request.type.includes(envelope.type))
+		return false
+	if (request.status && request.status.length > 0) {
+		if (validation.statusInvalidArtifactIds.has(record.id))
+			return true
+		if (!request.status.includes(envelope.status))
+			return false
+	}
+	if (request.schema !== undefined) {
+		if (validation.envelopeWideLossArtifactIds.has(record.id))
+			return true
+		if (envelope.schema !== request.schema)
+			return false
+	}
+	return true
+}
+
 /**
  * Finding B: `matching`/`total` are computed from EVERY Artifact before
  * pagination, so an Artifact whose loss could have changed its own
@@ -386,19 +520,36 @@ function matchesListFilters(record: SnapshotArtifactRecord, request: ListQueryRe
  * previously ran only over `paged`.
  *
  * Scoped per filter surface actually requested (not a whole-project gate):
- * relation loss (`edgeLossArtifactIds` + `relationExtensionLossArtifactIds`)
- * only matters when the request filters by `relationType`/`relationTarget`;
- * Resource loss (`resourceLossArtifactIds`) only when it filters by
- * `resourceType`/`resourceRole`/`resourceNormative`; tag loss
- * (`tagLossArtifactIds`) only when it filters by `tagsAny`/`tagsAll` -- a
- * loss on a surface the request never reads provably cannot have changed
- * this result. `envelopeWideLossArtifactIds` (a duplicate core key or a
- * dropped unknown top-level field) can corrupt ANY core field, including
- * `type`/`status`/`schema`, so it is in scope whenever the request applies
- * any filter at all. A request with NO filters matches every Artifact
- * unconditionally, so no loss anywhere could have changed membership/total;
- * an own-loss Artifact that ends up on the returned page is still caught by
- * the existing per-page check below.
+ * relation SHAPE loss (`edgeLossArtifactIds`) only matters when the request
+ * filters by `relationType`/`relationTarget` -- extension-only loss
+ * (`relationExtensionLossArtifactIds`, `EF-REL-015`) is deliberately EXCLUDED
+ * even then: it can never alter a `(type, target)` pair, so it cannot change
+ * `relationType`/`relationTarget` membership at all (Finding 9). Resource
+ * field loss only matters when it affects a field the request's
+ * `resourceType`/`resourceRole`/`resourceNormative` filters actually read
+ * (`resourceFieldLossById`, Finding 9 -- not the whole-Artifact
+ * `resourceLossArtifactIds` bucket). Tag loss (`tagLossArtifactIds`) only
+ * matters when the request filters by `tagsAny`/`tagsAll` -- a loss on a
+ * surface the request never reads provably cannot have changed this result.
+ * `envelopeWideLossArtifactIds` (a duplicate core key ANYWHERE in the
+ * frontmatter, or a dropped unknown top-level field) is added as an
+ * over-inclusive CANDIDATE set whenever the request applies any filter at
+ * all -- it is narrowed back down immediately below by
+ * `couldPossiblyMatchTrustedFilters`, which (duplicate-key trust-scope
+ * adjudication) distrusts `type`/`status` only via their own precise buckets
+ * (`envelopeStructuralLossArtifactIds`/`statusInvalidArtifactIds`), not this
+ * coarser one; a duplicate confined to `relations`/`resources`/`tags`/
+ * `title`/`summary` cannot have changed a `type`/`status` filter's
+ * membership determination at all. A request with NO filters matches every
+ * Artifact unconditionally, so no loss anywhere could have changed
+ * membership/total; an own-loss Artifact that ends up on the returned page
+ * is still caught by the existing per-page check below.
+ *
+ * Finally (Finding 9), every candidate is filtered through
+ * `couldPossiblyMatchTrustedFilters`: a candidate already excluded by a
+ * fully-trusted `type`/`status`/`schema` predicate cannot have its
+ * membership changed by loss on some OTHER field, so it is dropped from the
+ * risk set even if one of the surface checks above added it.
  */
 function listMembershipRiskArtifactIds(validation: SnapshotValidationResult, request: ListQueryRequest): ReadonlySet<string> {
 	const hasTypeFilter = (request.type?.length ?? 0) > 0
@@ -409,19 +560,29 @@ function listMembershipRiskArtifactIds(validation: SnapshotValidationResult, req
 	const hasResourceFilter = request.resourceType !== undefined || request.resourceRole !== undefined || request.resourceNormative !== undefined
 	const hasAnyFilter = hasTypeFilter || hasStatusFilter || hasSchemaFilter || hasTagsFilter || hasRelationFilter || hasResourceFilter
 
-	const ids = new Set<string>()
+	const candidates = new Set<string>()
 	if (!hasAnyFilter)
-		return ids
-	for (const id of validation.envelopeWideLossArtifactIds) ids.add(id)
+		return candidates
+	for (const id of validation.envelopeWideLossArtifactIds) candidates.add(id)
 	if (hasTagsFilter) {
-		for (const id of validation.tagLossArtifactIds) ids.add(id)
+		for (const id of validation.tagLossArtifactIds) candidates.add(id)
 	}
 	if (hasRelationFilter) {
-		for (const id of validation.edgeLossArtifactIds) ids.add(id)
-		for (const id of validation.relationExtensionLossArtifactIds) ids.add(id)
+		for (const id of validation.edgeLossArtifactIds) candidates.add(id)
 	}
 	if (hasResourceFilter) {
-		for (const id of validation.resourceLossArtifactIds) ids.add(id)
+		for (const id of validation.resourceFieldLossById.keys()) {
+			if (hasRelevantResourceFieldLoss(validation, id, LIST_RESOURCE_FILTER_FIELDS))
+				candidates.add(id)
+		}
+	}
+
+	const ids = new Set<string>()
+	for (const id of candidates) {
+		const record = validation.byId.get(id)
+		if (record && !couldPossiblyMatchTrustedFilters(validation, record, request))
+			continue
+		ids.add(id)
 	}
 	return ids
 }
@@ -490,21 +651,25 @@ function handleSearch(context: QueryContext, request: SearchQueryRequest): Query
 	if (untrustworthy)
 		return untrustworthy
 
-	// Finding B: full-text search always reads `title`/`summary`/`tags`/
+	// Finding B/9: full-text search always reads `title`/`summary`/`tags`/
 	// `resources.location`/`resources.description` for EVERY Artifact
 	// (`query-search.ts`'s `buildSurfaces`, unconditionally, regardless of the
 	// terms requested) to decide matching/total, so a lost tag, a lost/
-	// coerced Resource field, or an envelope-wide loss (duplicate core key /
-	// dropped unknown field, which can corrupt `title`/`summary` too) on ANY
-	// Artifact could have hidden or altered a match -- unlike `list`, there is
-	// no unsearched surface to scope this to. Relation loss is excluded:
-	// search never reads `relations` at all, so it cannot affect matching
-	// here (an affected Artifact that still ends up in the returned page is
-	// caught by the per-page check below instead).
+	// coerced envelope-wide field (duplicate core key / dropped unknown
+	// field, which can corrupt `title`/`summary` too), or a Resource field
+	// loss that actually touches `location`/`description` on ANY Artifact
+	// could have hidden or altered a match -- unlike `list`, there is no
+	// unsearched envelope-wide surface to scope this to. A Resource field
+	// loss confined to `type`/`role`/`normative`/`media_type` (none of which
+	// search reads) is excluded (`resourceFieldLossById`, Finding 9), and
+	// relation loss is excluded entirely: search never reads `relations` at
+	// all, so it cannot affect matching here (an affected Artifact that still
+	// ends up in the returned page is caught by the per-page check below
+	// instead).
 	const searchMembershipRisk = new Set<string>([
 		...context.validation.tagLossArtifactIds,
-		...context.validation.resourceLossArtifactIds,
 		...context.validation.envelopeWideLossArtifactIds,
+		...[...context.validation.resourceFieldLossById.keys()].filter(id => hasRelevantResourceFieldLoss(context.validation, id, SEARCH_RESOURCE_SURFACE_FIELDS)),
 	])
 	if (searchMembershipRisk.size > 0)
 		return failure('search', 'EF-QRY-013', 'One or more Artifacts declare structured content that could not be completely loaded on a surface full-text search reads, so this result\'s matching or total would not be trustworthy.')
@@ -544,9 +709,10 @@ function handleRelations(context: QueryContext, request: RelationsQueryRequest):
 
 	// Finding C: 'incoming'/'both' reads incoming edges, derived project-wide
 	// from every Artifact's outgoing array, so it stays globally gated. Purely
-	// 'outgoing' is scoped to this traversal's own result below, once known.
+	// 'outgoing' is scoped below (Finding 8) to exactly the one outgoing array
+	// this traversal reads: the requested Artifact's own.
 	if (direction === 'incoming' || direction === 'both') {
-		const untrustworthyRelationData = edgeLossGlobalFailure(context, 'relations')
+		const untrustworthyRelationData = edgeTrustGlobalFailure(context, 'relations')
 		if (untrustworthyRelationData)
 			return untrustworthyRelationData
 	}
@@ -559,11 +725,21 @@ function handleRelations(context: QueryContext, request: RelationsQueryRequest):
 	if (!result)
 		return failure('relations', 'EF-QRY-007', 'The requested relation graph is invalid.')
 
+	// Finding 8: `directRelations` reads ONLY `request.id`'s own outgoing
+	// array for an 'outgoing' (or 'both') direction -- never a neighbor's --
+	// so that is the only consumed source, independent of `result.nodeIds`
+	// (which also includes every neighbor ID, whose own arrays are never
+	// read here).
 	if (direction === 'outgoing') {
-		const untrustworthyRelationData = edgeLossLocalFailure(context, 'relations', new Set(result.nodeIds))
+		const untrustworthyRelationData = edgeTrustLocalFailure(context, 'relations', new Set([request.id]))
 		if (untrustworthyRelationData)
 			return untrustworthyRelationData
 	}
+
+	// Finding 4: every embedded node is itself a summary projection.
+	const projectionFailure = projectionLossNodeFailure(context, 'relations', result.nodeIds)
+	if (projectionFailure)
+		return projectionFailure
 
 	return {
 		schema: 'ef/query-result@1',
@@ -604,7 +780,7 @@ function handleTrace(context: QueryContext, request: TraceQueryRequest): QueryRe
 
 	// Finding C: same 'incoming'/'both' vs 'outgoing' split as `handleRelations`.
 	if (request.direction === 'incoming' || request.direction === 'both') {
-		const untrustworthyTraceRelationData = edgeLossGlobalFailure(context, 'trace')
+		const untrustworthyTraceRelationData = edgeTrustGlobalFailure(context, 'trace')
 		if (untrustworthyTraceRelationData)
 			return untrustworthyTraceRelationData
 	}
@@ -621,10 +797,23 @@ function handleTrace(context: QueryContext, request: TraceQueryRequest): QueryRe
 		return failure('trace', 'EF-QRY-007', 'The requested relation graph is invalid.')
 
 	if (request.direction === 'outgoing') {
-		const untrustworthyTraceRelationData = edgeLossLocalFailure(context, 'trace', new Set(result.depths.keys()))
+		// Finding 8: `traceGraph` only expands (reads the outgoing array of) a
+		// node whose depth is strictly less than `max_depth`; a node at exactly
+		// `max_depth` is a discovered leaf whose own array is never read, and
+		// `max_depth: 0` expands nothing at all (roots-only, no edges), so this
+		// naturally yields an empty consumed set for that contractual case.
+		const consumedSourceIds = new Set([...result.depths]
+			.filter(([, depth]) => depth < request.maxDepth)
+			.map(([id]) => id))
+		const untrustworthyTraceRelationData = edgeTrustLocalFailure(context, 'trace', consumedSourceIds)
 		if (untrustworthyTraceRelationData)
 			return untrustworthyTraceRelationData
 	}
+
+	// Finding 4: every embedded node is itself a summary projection.
+	const projectionFailure = projectionLossNodeFailure(context, 'trace', result.depths.keys())
+	if (projectionFailure)
+		return projectionFailure
 
 	return {
 		schema: 'ef/query-result@1',
@@ -659,7 +848,7 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 	// Finding C: impact traversal direction is always incoming
 	// (10-query-and-trace.md "Traversal direction is incoming"), so it stays
 	// globally gated regardless of request options.
-	const untrustworthyImpactRelationData = edgeLossGlobalFailure(context, 'impact')
+	const untrustworthyImpactRelationData = edgeTrustGlobalFailure(context, 'impact')
 	if (untrustworthyImpactRelationData)
 		return untrustworthyImpactRelationData
 
@@ -692,6 +881,14 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 			perRoot.push(outcome.result)
 		}
 		const merged = mergeResolveCurrentResults(perRoot)
+
+		// Finding 6: `impact`'s `resolve_current` option runs the identical
+		// per-root current-resolution algorithm `resolve-current` does, and
+		// consumes the same supersession/status facts.
+		const untrustworthyResolution = resolveCurrentTrustFailure(context, 'impact', merged)
+		if (untrustworthyResolution)
+			return untrustworthyResolution
+
 		resolvedRoots = merged.currentIds
 		resolution = { nodes: buildNodeSummaries(merged.nodeIds, context.validation.byId), edges: merged.edges }
 	}
@@ -703,6 +900,28 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 	const traversal = impactGraph(resolvedRoots, typeSet, request.maxDepth, includeNonCurrent, context.validation.byId, context.validation.incomingRelations)
 	if (!traversal)
 		return failure('impact', 'EF-QRY-007', 'The requested relation graph is invalid.')
+
+	// Finding 6: `impactGraph` prunes a depth>0 candidate from further
+	// expansion/inclusion whenever `record.status !== 'active'` (unless
+	// `includeNonCurrent`), silently treating an Artifact with an invalid
+	// status (`EF-LIFE-001`/`002`) the same as one legitimately
+	// draft/superseded/retired. Gate on exactly the candidates whose status
+	// this traversal actually consulted: depth>0 nodes, only when
+	// `includeNonCurrent` is `false` (otherwise `impactGraph` never reads
+	// `status` at all).
+	if (!includeNonCurrent) {
+		for (const [id, depth] of traversal.depths) {
+			if (depth > 0 && context.validation.statusInvalidArtifactIds.has(id))
+				return failure('impact', 'EF-QRY-013', `Artifact '${id}' -- a candidate this impact traversal evaluated for current status -- has an invalid lifecycle status, so this result would not be trustworthy.`)
+		}
+	}
+
+	// Finding 4: every embedded node -- both the impact traversal's own nodes
+	// and (when requested) the resolve_current sub-resolution's nodes -- is
+	// itself a summary projection.
+	const projectionFailure = projectionLossNodeFailure(context, 'impact', [...resolution.nodes.map(n => n.id), ...traversal.includedIds])
+	if (projectionFailure)
+		return projectionFailure
 
 	return {
 		schema: 'ef/query-result@1',
@@ -744,13 +963,19 @@ function handleResolveCurrent(context: QueryContext, request: ResolveCurrentQuer
 		return failure('resolve-current', code, `Current resolution for '${request.id}' failed (${outcome.reason}).`)
 	}
 
-	// Finding C: current resolution follows `superseded-by` edges strictly
+	// Finding C/6/8: current resolution follows `superseded-by` edges strictly
 	// outgoing from the input ID (05-supersession "Current-resolution
-	// algorithm"), so it is scoped to this result's own node set, the same as
-	// an outgoing-only `relations`/`trace` traversal.
-	const untrustworthyRelationData = edgeLossLocalFailure(context, 'resolve-current', new Set(outcome.result.nodeIds))
+	// algorithm"), so edge/status/supersession trust is scoped to this
+	// result's own traversal, the same as an outgoing-only `relations`/`trace`
+	// traversal.
+	const untrustworthyRelationData = resolveCurrentTrustFailure(context, 'resolve-current', outcome.result)
 	if (untrustworthyRelationData)
 		return untrustworthyRelationData
+
+	// Finding 4: every embedded node is itself a summary projection.
+	const projectionFailure = projectionLossNodeFailure(context, 'resolve-current', outcome.result.nodeIds)
+	if (projectionFailure)
+		return projectionFailure
 
 	return {
 		schema: 'ef/query-result@1',

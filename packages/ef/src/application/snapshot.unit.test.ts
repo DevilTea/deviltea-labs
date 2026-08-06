@@ -1,4 +1,5 @@
 import type { GitRepository } from '../git/repository'
+import type { ReadRegularFileNoFollowResult } from '../platform/fs-facts'
 import type { SnapshotFsDeps } from './snapshot'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
@@ -218,8 +219,8 @@ describe('loadSnapshotFromWorkingTree', () => {
 			isDirectory: async () => true,
 			isSymlink: async () => true,
 			walkDirectory: async () => [],
-			readFileBytes: async () => {
-				throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+			readRegularFileNoFollow: async () => {
+				throw new Error('must not be called: no walk entry was observed for this path')
 			},
 		}
 		const result = await loadSnapshotFromWorkingTree('/fake/project', deps)
@@ -231,26 +232,109 @@ describe('loadSnapshotFromWorkingTree', () => {
 			.toBe('symlink')
 	})
 
-	it('silently excludes an artifact file that vanishes between listing and read (ENOENT), rather than treating it as read-error', async () => {
-		const deps: SnapshotFsDeps = {
-			isDirectory: async () => true,
-			isSymlink: async () => false,
-			walkDirectory: async () => [
-				{ relativePath: 'req/REQ-001.md', isRegularFile: true, isDirectory: false, isSymlink: false },
-			],
-			readFileBytes: async () => {
-				throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
-			},
+	// FINDING 2 (snapshot.ts, loadSnapshotFromWorkingTree): the directory walk
+	// records a regular Artifact, but the earlier implementation's
+	// pathname-based `readFile` was never bound to that observation. A
+	// discrepancy discovered between the walk and the read (the file vanished,
+	// changed kind, or was replaced) must make the WHOLE snapshot load
+	// incomplete (`read-error`), never silently omit the affected file while
+	// still reporting `ok: true` -- which left `hasUndecodedArtifact` unset
+	// downstream and made the graph look complete when it was not. Each case
+	// asserts `expectedIdentity` is exactly what `walkDirectory` recorded,
+	// proving the read is actually bound to the walk observation rather than
+	// merely retried against the bare path.
+	describe('races between the directory walk and the per-file read', () => {
+		const walkedIdentity = { dev: 1, ino: 42 }
+
+		function racingDeps(raceResult: ReadRegularFileNoFollowResult): SnapshotFsDeps {
+			return {
+				isDirectory: async () => true,
+				isSymlink: async () => false,
+				walkDirectory: async () => [
+					{ relativePath: 'req/REQ-001.md', isRegularFile: true, isDirectory: false, isSymlink: false, identity: walkedIdentity },
+				],
+				readRegularFileNoFollow: async (_target, expectedIdentity) => {
+					expect(expectedIdentity)
+						.toEqual(walkedIdentity)
+					return raceResult
+				},
+			}
 		}
-		const result = await loadSnapshotFromWorkingTree('/fake/project', deps)
+
+		it('reports read-error (not a silent omission) when the artifact file disappears between walk and read', async () => {
+			const result = await loadSnapshotFromWorkingTree('/fake/project', racingDeps({ kind: 'not-found' }))
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('read-error')
+			expect(result.ok === false && result.message)
+				.toContain('req/REQ-001.md')
+		})
+
+		it('reports read-error (not a silent omission) when the final entry is replaced by a symlink between walk and read', async () => {
+			const result = await loadSnapshotFromWorkingTree('/fake/project', racingDeps({ kind: 'not-a-regular-file' }))
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('read-error')
+			expect(result.ok === false && result.message)
+				.toContain('req/REQ-001.md')
+		})
+
+		it('reports read-error (not a silent omission) when an ancestor directory swap makes the final open resolve to a different file', async () => {
+			const result = await loadSnapshotFromWorkingTree('/fake/project', racingDeps({ kind: 'identity-mismatch' }))
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('read-error')
+			expect(result.ok === false && result.message)
+				.toContain('req/REQ-001.md')
+		})
+
+		it('succeeds when the identity-bound read matches the walk observation exactly (no race)', async () => {
+			const deps: SnapshotFsDeps = {
+				isDirectory: async () => true,
+				isSymlink: async () => false,
+				walkDirectory: async () => [
+					{ relativePath: 'req/REQ-001.md', isRegularFile: true, isDirectory: false, isSymlink: false, identity: walkedIdentity },
+				],
+				readRegularFileNoFollow: async () => ({ kind: 'ok', bytes: new TextEncoder()
+					.encode('---\nschema: ef/req@1\n---\n') }),
+			}
+			const result = await loadSnapshotFromWorkingTree('/fake/project', deps)
+			expect(result.ok)
+				.toBe(true)
+			if (!result.ok)
+				return
+			expect(result.snapshot.artifacts)
+				.toHaveLength(1)
+		})
+	})
+
+	// FINDING 3 (layout.ts / working-tree walk): a FIFO named exactly like a
+	// canonical Artifact path is not readable as a file; it must be reported
+	// (`EF-FS-003`), never silently vanish from both `artifacts` and
+	// `layoutDiagnostics`.
+	it('reports EF-FS-003 (not a silent omission) for a FIFO named PROJECT.md in the working tree', async () => {
+		if (process.platform === 'win32') {
+			// mkfifo has no direct Windows equivalent; POSIX-only per the
+			// finding's own guidance.
+			return
+		}
+		await fs.mkdir(path.join(tempDir, '.engineering'), { recursive: true })
+		execFileSync('mkfifo', [path.join(tempDir, '.engineering', 'PROJECT.md')])
+
+		const result = await loadSnapshotFromWorkingTree(tempDir)
 		expect(result.ok)
 			.toBe(true)
 		if (!result.ok)
 			return
 		expect(result.snapshot.artifacts)
 			.toEqual([])
-		expect(result.snapshot.configBytes)
-			.toBeUndefined()
+		expect(result.snapshot.entryKinds.get('.engineering/PROJECT.md'))
+			.toBe('other')
+		expect(result.snapshot.layoutDiagnostics.some(d => d.code === 'EF-FS-003' && d.path === '.engineering/PROJECT.md'))
+			.toBe(true)
 	})
 })
 
@@ -526,6 +610,41 @@ describe('loadSnapshotFromCommit', () => {
 			.toBe('read-error')
 		expect(result.ok === false && result.message)
 			.toContain('.engineering/ef.yaml')
+	})
+
+	// FINDING 3 (git/repository.ts `readTree` classification -> snapshot.ts
+	// `entryKindOf`): a gitlink (`type: 'commit'`, Git submodule reference)
+	// named exactly like a canonical Artifact path was previously classified
+	// as `'file'` (the same fallback used for a genuine blob), so
+	// `listArtifactFiles` reported it as a readable Artifact candidate. It is
+	// never in `blobEntries` (only `type: 'blob'` entries are), so
+	// `readBlobOrThrow(git, undefined)` silently returned `undefined` and the
+	// artifacts loop dropped it with `continue` -- no diagnostic, no
+	// `hasUndecodedArtifact`, `readBlob` never even called. It must instead be
+	// reported as a canonical-layout violation (`EF-FS-003`), never silently
+	// treated as absent.
+	it('reports EF-FS-003 (not a silent omission) for a Git gitlink (submodule) entry named like an Artifact file', async () => {
+		const repo = fakeGitRepository({
+			readTree: async () => ({
+				kind: 'resolved',
+				entries: [
+					{ path: '.engineering', mode: '040000', oid: 'tree-oid', type: 'tree' },
+					{ path: '.engineering/req', mode: '040000', oid: 'tree-req-oid', type: 'tree' },
+					{ path: '.engineering/req/REQ-001.md', mode: '160000', oid: 'gitlink-oid', type: 'commit' },
+				],
+			}),
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(true)
+		if (!result.ok)
+			return
+		expect(result.snapshot.artifacts)
+			.toEqual([])
+		expect(result.snapshot.entryKinds.get('.engineering/req/REQ-001.md'))
+			.toBe('other')
+		expect(result.snapshot.layoutDiagnostics.some(d => d.code === 'EF-FS-003' && d.path === '.engineering/req/REQ-001.md'))
+			.toBe(true)
 	})
 
 	it('rethrows a non-GitUnavailableError raised while materializing the commit tree', async () => {

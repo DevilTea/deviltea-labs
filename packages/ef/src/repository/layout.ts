@@ -72,8 +72,19 @@ export function listArtifactFiles(entries: readonly WalkEntry[]): ListArtifactFi
 			const name = segments[0]!
 
 			if (name === 'PROJECT.md') {
-				if (entry.isRegularFile)
+				if (entry.isRegularFile) {
 					artifactFiles.push('.engineering/PROJECT.md')
+					continue
+				}
+				// A `PROJECT.md` entry that is not a regular file (a directory, a
+				// symlink, a FIFO/socket/device, or a Git gitlink) is not an
+				// Artifact file under the discovery scope and must be reported,
+				// not silently dropped: without this, a non-blob candidate at this
+				// exact canonical path would vanish from both `artifactFiles` and
+				// `diagnostics` with no trace, letting validation/query look
+				// complete over a project that is actually missing its PROJECT
+				// Artifact for an undiagnosed reason.
+				reportUnexpected(name, entry.isDirectory)
 				continue
 			}
 

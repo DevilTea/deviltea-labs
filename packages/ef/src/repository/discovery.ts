@@ -19,13 +19,13 @@
  * implementation for integration cases.
  */
 
-import type { Buffer } from 'node:buffer'
 import type { Diagnostic } from '../domain/diagnostics'
 import type { WorktreeRootResult } from '../git/repository'
+import type { ReadRegularFileNoFollowResult } from '../platform/fs-facts'
 import type { Config } from './config'
-import { lstat, readFile } from 'node:fs/promises'
+import { lstat } from 'node:fs/promises'
 import path from 'pathe'
-import { isDirectory } from '../platform/fs-facts'
+import { isDirectory, readRegularFileNoFollow } from '../platform/fs-facts'
 import { isSameLocation } from '../platform/path-identity'
 import { decodeConfig } from './config'
 
@@ -82,9 +82,21 @@ async function ascendForEngineering(startDir: string): Promise<string | undefine
 	}
 }
 
-function decodeUtf8(bytes: Buffer): string {
+function decodeUtf8(bytes: Uint8Array): string {
 	return new TextDecoder('utf-8', { fatal: false })
 		.decode(bytes)
+}
+
+/** Human-readable reason for every non-`ok` {@link ReadRegularFileNoFollowResult} kind, for a `read-error` message. */
+function noFollowFailureReason(kind: Exclude<ReadRegularFileNoFollowResult['kind'], 'ok'>): string {
+	switch (kind) {
+		case 'not-found':
+			return 'it could not be found when it was expected to exist'
+		case 'not-a-regular-file':
+			return 'it is not a regular file (it may be a symlink, directory, or other special entry); a managed configuration file must never be read through a symlink, even to a target inside the project'
+		case 'identity-mismatch':
+			return 'it changed between being observed and being opened'
+	}
 }
 
 export async function discoverProject(input: DiscoverProjectInput, deps: DiscoverProjectDeps): Promise<DiscoverProjectResult> {
@@ -110,7 +122,20 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 
 	const efYamlPath = path.join(engineeringPath, 'ef.yaml')
 	const initMarkerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
-	const [hasEfYaml, hasInitMarker] = await Promise.all([pathExists(efYamlPath), pathExists(initMarkerPath)])
+	// Both reads happen once, up front: `readRegularFileNoFollow` lstat's the
+	// entry, then opens and `fstat`s it without following a symlink at the
+	// final path component (Finding: `.engineering/ef.yaml` -> a symlink to a
+	// file outside the project root must never be followed and used as
+	// configuration, even transiently, before the later snapshot validator
+	// can report `EF-FS-004`). `ef.yaml`'s bytes -- if it decoded as a genuine
+	// regular file -- are captured now and reused below rather than reopened
+	// by path a second time.
+	const [efYamlRead, initMarkerRead] = await Promise.all([
+		readRegularFileNoFollow(efYamlPath),
+		readRegularFileNoFollow(initMarkerPath),
+	])
+	const hasEfYaml = efYamlRead.kind !== 'not-found'
+	const hasInitMarker = initMarkerRead.kind !== 'not-found'
 
 	if (!hasEfYaml || hasInitMarker)
 		return { kind: 'incomplete-initialization', root: candidateRoot }
@@ -121,13 +146,14 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 	if (worktreeResult.kind === 'not-a-worktree' || !isSameLocation(worktreeResult.root, candidateRoot))
 		return { kind: 'not-project-worktree-root', root: candidateRoot }
 
-	let configText: string
-	try {
-		configText = decodeUtf8(await readFile(efYamlPath))
+	if (efYamlRead.kind !== 'ok') {
+		return {
+			kind: 'read-error',
+			root: candidateRoot,
+			message: `'${efYamlPath}' exists but could not be read as configuration: ${noFollowFailureReason(efYamlRead.kind)}.`,
+		}
 	}
-	catch (error) {
-		return { kind: 'read-error', root: candidateRoot, message: (error as Error).message }
-	}
+	const configText = decodeUtf8(efYamlRead.bytes)
 
 	const { config, diagnostics } = decodeConfig(configText, '.engineering/ef.yaml')
 
