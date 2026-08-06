@@ -376,6 +376,7 @@ function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRe
 		resourceOwnership: new Map(),
 		currentIds: new Map(),
 		chgEffects: [],
+		graphTrustworthy: true,
 	}
 	return { snapshot, validation }
 }
@@ -433,6 +434,130 @@ describe('executeQuery', () => {
 				.toBe('ef/query-result@1')
 			expect(result.kind)
 				.toBe('lookup')
+		})
+	})
+
+	describe('graph trustworthiness gate (10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
+		/** Makes REQ-001's ID ambiguous (a second file also declares `id: REQ-001`), which flips `context.validation.graphTrustworthy` to `false` project-wide. */
+		async function untrustworthyContext(): Promise<QueryContext> {
+			await writeFile(tempDir, '.engineering/req/REQ-050.md', REQ_001)
+			return reloadContext()
+		}
+
+		it('every query kind returns complete: false, data: null, EF-QRY-013 once an ID is ambiguous -- including exact lookup for an untouched, existing Artifact', async () => {
+			const bad = await untrustworthyContext()
+
+			const lookupFound = await executeQuery(bad, { kind: 'lookup', id: 'REQ-002' })
+			expect(lookupFound.complete)
+				.toBe(false)
+			expect(lookupFound.data)
+				.toBeNull()
+			expect(lookupFound.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates exact lookup not-found too, instead of the normal complete: true / found: false result', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'lookup', id: 'REQ-999' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates list', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'list' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates search', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'search', terms: ['filtering'] })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates relations', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'relations', id: 'REQ-002' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates trace', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'trace', roots: ['REQ-002'], types: ['derived-from'], direction: 'outgoing', maxDepth: 1 })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates impact', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'impact', roots: ['REQ-002'], maxDepth: 1 })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates resolve-current', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'resolve-current', id: 'REQ-002' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates history', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'history', id: 'REQ-002' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('does not gate a body-schema-only warning/error that leaves every Artifact decoded in byId', async () => {
+			// A sanity check that the gate is specific to decode/identity/layout
+			// conditions: the untouched, valid rich-project fixture itself must
+			// stay ungated.
+			const result = await executeQuery(context, { kind: 'lookup', id: 'REQ-002' })
+			expect(result.complete)
+				.toBe(true)
+		})
+
+		it('still lets request-shape validation (EF-QRY-001) take precedence over the trustworthiness gate', async () => {
+			const bad = await untrustworthyContext()
+			const result = await executeQuery(bad, { kind: 'lookup', id: '' })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-001')
 		})
 	})
 

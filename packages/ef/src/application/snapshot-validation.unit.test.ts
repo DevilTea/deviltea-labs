@@ -277,6 +277,113 @@ describe('validateSnapshot', () => {
 			expect(codesOf(result.diagnostics))
 				.toContain('EF-ID-005')
 		})
+
+		it('excludes a duplicated ID from byId/relationById/currentIds entirely, blocks relations targeting it without a speculative EF-REL-003, and marks the graph untrustworthy', async () => {
+			// Two files declare the same ID (REQ-001); a third, unambiguous
+			// Artifact (REQ-003) declares a relation TARGETING that ambiguous ID.
+			// 02-identity.md "Duplicate handling": "graph validation MUST NOT
+			// resolve the ID to either file"; 09-validation.md "Cascading
+			// Diagnostics": the resulting relation-target check must not report
+			// a second, speculative "does not exist" finding once EF-ID-004
+			// already reports the collision.
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001' }))
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', requirementMd({ id: 'REQ-001' }))
+			await writeFile(tempDir, '.engineering/req/REQ-003.md', requirementMd({
+				id: 'REQ-003',
+				relations: '\n  - type: references\n    target: REQ-001\n',
+			}))
+			const result = await load()
+
+			// Excluded from every dependent index -- not resolved to either file.
+			expect(result.byId.has('REQ-001'))
+				.toBe(false)
+			expect(result.incomingRelations.get('REQ-001'))
+				.toBeUndefined()
+			expect(result.currentIds.has('REQ-001'))
+				.toBe(false)
+
+			// The unambiguous Artifact is unaffected.
+			expect(result.byId.has('REQ-003'))
+				.toBe(true)
+
+			// No speculative EF-REL-003 for the blocked (not "nonexistent")
+			// target; EF-ID-004 (plus the unrelated EF-ID-005 filename mismatch)
+			// remain the only identity/relation findings.
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-ID-004', 'EF-ID-005'])
+
+			// A query over this snapshot cannot be trusted while the ID stays
+			// ambiguous (10-query-and-trace.md "Invalid Graph and Partial
+			// Results").
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('resolve-current for a duplicated ID has no entry in currentIds (resolution fails rather than picking either file)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', status: 'superseded', relations: '\n  - type: superseded-by\n    target: REQ-900\n' }))
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', requirementMd({ id: 'REQ-001', status: 'superseded', relations: '\n  - type: superseded-by\n    target: REQ-900\n' }))
+			await writeFile(tempDir, '.engineering/req/REQ-900.md', requirementMd({ id: 'REQ-900' }))
+			const result = await load()
+
+			expect(result.byId.has('REQ-001'))
+				.toBe(false)
+			expect(result.currentIds.has('REQ-001'))
+				.toBe(false)
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+	})
+
+	describe('graph trustworthiness (10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
+		it('is trustworthy for a minimal valid project', async () => {
+			await writeMinimalProject(tempDir)
+			const result = await load()
+			expect(result.graphTrustworthy)
+				.toBe(true)
+		})
+
+		it('is untrustworthy when an Artifact file fails to decode (unterminated frontmatter)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', '---\nschema: ef/requirement@1\ntype: requirement\n')
+			const result = await load()
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('is untrustworthy when an Artifact envelope fails to decode', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', '---\nschema: ef/requirement@1\ntype: requirement\n---\n\nbody\n')
+			const result = await load()
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('is untrustworthy when a layout entry could itself be an unparsed Artifact (EF-FS-003)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/stray.txt', 'not a control file\n')
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-FS-003')
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('stays trustworthy for a body-schema-only error that does not exclude the Artifact from the graph', async () => {
+			await writeMinimalProject(tempDir)
+			// A required section left in placeholder form is a body-schema
+			// finding, not a decode/identity/layout one; the Artifact still
+			// decodes into byId.
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', acceptanceCriteria: '- TODO' }))
+			const result = await load()
+			expect(result.byId.has('REQ-001'))
+				.toBe(true)
+			expect(result.diagnostics.length)
+				.toBeGreaterThan(0)
+			expect(result.graphTrustworthy)
+				.toBe(true)
+		})
 	})
 
 	describe('relation graph integrity', () => {
