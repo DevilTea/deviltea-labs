@@ -1,5 +1,7 @@
+import type { GitExecOutcome, GitExecutor } from '../../git/executor'
 import type { Prompts } from '../prompts'
 import type { InitCommandOptions, InitCommandValues } from './init'
+import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -7,6 +9,26 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runInitCommand } from './init'
+
+/** Wraps a real executor, forcing failure for every `execIn` call; used to simulate `computeInitPlan`'s own read-only Git checks becoming unavailable. */
+function unavailableExecutor(message: string): GitExecutor {
+	return {
+		exec: async () => ({ ok: false, failure: { kind: 'unavailable', message } }),
+		execIn: async () => ({ ok: false, failure: { kind: 'unavailable', message } }),
+	}
+}
+
+/** Wraps a real executor, forcing `git symbolic-ref --short HEAD` to succeed with empty output (a branch name `detectCurrentBranch` must treat as absent). */
+function emptyBranchNameExecutor(base: GitExecutor): GitExecutor {
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: (root, args, options): Promise<GitExecOutcome> => {
+			if (args[0] === 'symbolic-ref')
+				return Promise.resolve({ ok: true, result: { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode: 0, signal: null } })
+			return base.execIn(root, args, options)
+		},
+	}
+}
 
 const GIT_TEST_ENV = {
 	GIT_AUTHOR_NAME: 'EF Test',
@@ -242,5 +264,238 @@ describe('runInitCommand', () => {
 			.toBe(2)
 		expect(await engineeringExists())
 			.toBe(false)
+	})
+
+	// ---- detectCurrentBranch edge cases ------------------------------------------
+
+	it('falls back to a plain text prompt for the integration ref when HEAD is detached (no current branch)', async () => {
+		await fs.writeFile(path.join(root, 'README.md'), '# placeholder\n')
+		git(root, ['add', '-A'])
+		git(root, ['commit', '-q', '-m', 'placeholder'])
+		git(root, ['checkout', '-q', '--detach'])
+
+		const prompts: Prompts = {
+			intro: () => {},
+			outro: () => {},
+			note: () => {},
+			text: async (opts) => {
+				if (opts.message === 'Integration ref (full local branch ref, e.g. refs/heads/main)')
+					return 'refs/heads/main'
+				throw new Error(`unexpected text prompt: ${opts.message}`)
+			},
+			confirm: async (opts) => {
+				if (opts.message.includes('Terminology'))
+					return false
+				throw new Error(`unexpected confirm prompt: ${opts.message}`)
+			},
+			confirmMutation: async () => true,
+		}
+		const outcome = await runInitCommand({ format: 'human', noColor: true, noInput: false, dryRun: false, yes: false, values: { ...VALUES, integrationRef: undefined } }, deps(prompts))
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(await engineeringExists())
+			.toBe(true)
+	})
+
+	it('treats an empty resolved branch name the same as no current branch', async () => {
+		const prompts: Prompts = {
+			intro: () => {},
+			outro: () => {},
+			note: () => {},
+			text: async (opts) => {
+				if (opts.message === 'Integration ref (full local branch ref, e.g. refs/heads/main)')
+					return 'refs/heads/main'
+				throw new Error(`unexpected text prompt: ${opts.message}`)
+			},
+			confirm: async (opts) => {
+				if (opts.message.includes('Terminology'))
+					return false
+				throw new Error(`unexpected confirm prompt: ${opts.message}`)
+			},
+			confirmMutation: async () => true,
+		}
+		const outcome = await runInitCommand(
+			{ format: 'human', noColor: true, noInput: false, dryRun: false, yes: false, values: { ...VALUES, integrationRef: undefined } },
+			{ cwd: root, executor: emptyBranchNameExecutor(createGitExecutor()), prompts },
+		)
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(await engineeringExists())
+			.toBe(true)
+	})
+
+	it('cancelling the suggested-integration-ref confirmation aborts without writing, exit 2', async () => {
+		const prompts: Prompts = {
+			intro: () => {},
+			outro: () => {},
+			note: () => {},
+			text: async () => { throw new Error('unexpected text prompt') },
+			confirm: async (opts) => {
+				if (opts.message.includes('integration ref'))
+					return undefined
+				throw new Error(`unexpected confirm prompt: ${opts.message}`)
+			},
+			confirmMutation: async () => { throw new Error('confirmMutation must not be reached') },
+		}
+		const outcome = await runInitCommand({ format: 'human', noColor: true, noInput: false, dryRun: false, yes: false, values: { ...VALUES, integrationRef: undefined } }, deps(prompts))
+		expect(outcome.exitCode)
+			.toBe(2)
+		expect(await engineeringExists())
+			.toBe(false)
+	})
+
+	it('declining (not cancelling) the suggested integration ref falls back to a plain text prompt', async () => {
+		const prompts: Prompts = {
+			intro: () => {},
+			outro: () => {},
+			note: () => {},
+			text: async (opts) => {
+				if (opts.message === 'Integration ref (full local branch ref, e.g. refs/heads/main)')
+					return 'refs/heads/main'
+				throw new Error(`unexpected text prompt: ${opts.message}`)
+			},
+			confirm: async (opts) => {
+				if (opts.message.includes('integration ref'))
+					return false
+				if (opts.message.includes('Terminology'))
+					return false
+				throw new Error(`unexpected confirm prompt: ${opts.message}`)
+			},
+			confirmMutation: async () => true,
+		}
+		const outcome = await runInitCommand({ format: 'human', noColor: true, noInput: false, dryRun: false, yes: false, values: { ...VALUES, integrationRef: undefined } }, deps(prompts))
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(await engineeringExists())
+			.toBe(true)
+	})
+
+	// ---- Terminology collection edge cases ---------------------------------------
+
+	it('skips the Terminology prompt entirely when terminology is already provided, and preserves it verbatim', async () => {
+		const customTerminology = '| Term | Definition | Avoid or aliases |\n|---|---|---|\n| Widget | A thing. | Gadget |\n'
+		const outcome = await runInitCommand(
+			{ format: 'human', noColor: true, noInput: false, dryRun: false, yes: false, values: { ...VALUES, terminology: customTerminology } },
+			deps({ intro: () => {}, outro: () => {}, note: () => {}, text: neverPrompts().text, confirm: neverPrompts().confirm, confirmMutation: async () => true }),
+		)
+		expect(outcome.exitCode)
+			.toBe(0)
+		const written = await fs.readFile(path.join(root, '.engineering', 'PROJECT.md'), 'utf8')
+		expect(written)
+			.toContain('| Widget | A thing. | Gadget |')
+	})
+
+	it('cancelling the "Add Terminology rows now?" confirmation aborts without writing, exit 2', async () => {
+		const prompts: Prompts = {
+			intro: () => {},
+			outro: () => {},
+			note: () => {},
+			text: async () => { throw new Error('unexpected text prompt') },
+			confirm: async (opts) => {
+				if (opts.message.includes('Terminology'))
+					return undefined
+				throw new Error(`unexpected confirm prompt: ${opts.message}`)
+			},
+			confirmMutation: async () => { throw new Error('confirmMutation must not be reached') },
+		}
+		const outcome = await runInitCommand({ format: 'human', noColor: true, noInput: false, dryRun: false, yes: false, values: VALUES }, deps(prompts))
+		expect(outcome.exitCode)
+			.toBe(2)
+		expect(await engineeringExists())
+			.toBe(false)
+	})
+
+	// ---- Target selection: worktree resolution failure -----------------------
+
+	it('exits 2 when cwd (no --project) is not inside any Git worktree at all', async () => {
+		const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-init-outside-')))
+		try {
+			const outcome = await runInitCommand(baseOptions({ yes: true }), { cwd: outsideDir, executor: createGitExecutor(), prompts: neverPrompts() })
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-001')
+		}
+		finally {
+			await fs.rm(outsideDir, { recursive: true, force: true })
+		}
+	})
+
+	// ---- computeInitPlan failure reasons ---------------------------------------
+
+	it('exits 2 with EF-VAL-006 when Git becomes unavailable during plan computation', async () => {
+		const outcome = await runInitCommand(
+			baseOptions({ yes: true, project: root }),
+			{ cwd: root, executor: unavailableExecutor('stub: git unavailable'), prompts: neverPrompts() },
+		)
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('stub: git unavailable')
+	})
+
+	it('exits 2 (missing-value) when title is non-blank but contains a newline', async () => {
+		const outcome = await runInitCommand(baseOptions({ yes: true, values: { ...VALUES, title: 'Line one\nLine two' } }), deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-001')
+		expect(json.diagnostics[0].message)
+			.toContain('single line')
+	})
+
+	it('exits 1 (invalid-plan) when a value carries a CRLF line ending into the computed content', async () => {
+		const outcome = await runInitCommand(baseOptions({ yes: true, values: { ...VALUES, vision: 'Line one.\r\nLine two.' } }), deps())
+		expect(outcome.exitCode)
+			.toBe(1)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(true)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics.some((d: { code: string }) => d.code === 'EF-FS-005'))
+			.toBe(true)
+		expect(await engineeringExists())
+			.toBe(false)
+	})
+
+	// ---- applyInitPlan outcomes: raced vs. a non-raced apply failure -----------
+
+	it('exits 1 (raced) when `.engineering` already exists by the time the plan is applied', async () => {
+		await fs.mkdir(path.join(root, '.engineering'))
+		const outcome = await runInitCommand(baseOptions({ yes: true }), deps())
+		expect(outcome.exitCode)
+			.toBe(1)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(true)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-001')
+	})
+
+	it('exits 2 (incomplete, not raced) when the claim itself fails, e.g. an unwritable target root', async () => {
+		await fs.chmod(root, 0o555)
+		try {
+			const outcome = await runInitCommand(baseOptions({ yes: true }), deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(false)
+			expect(json.applied)
+				.toBe(false)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-001')
+		}
+		finally {
+			await fs.chmod(root, 0o755)
+		}
 	})
 })

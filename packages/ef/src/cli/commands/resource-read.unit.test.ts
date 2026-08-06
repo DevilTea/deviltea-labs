@@ -211,6 +211,39 @@ describe('runResourceReadCommand', () => {
 			.toBe(1)
 	})
 
+	it('exits 2 when the project snapshot cannot be loaded (read-error, not engineering-missing)', async () => {
+		await setupProject()
+		// `.gitignore` is read unconditionally by `loadSnapshotFromWorkingTree`
+		// but never inspected by project discovery/resolution, so replacing it
+		// with a directory lets `resolveProject` succeed while the snapshot load
+		// itself fails with `read-error` (mirrors
+		// `application/snapshot.unit.test.ts`'s own `read-error` fixture).
+		await fs.rm(path.join(root, '.engineering', '.gitignore'))
+		await fs.mkdir(path.join(root, '.engineering', '.gitignore'))
+
+		const outcome = await runResourceReadCommand('REQ-001', '.engineering/resources/req/REQ-001/example.json', {}, deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		expect(outcome.stdout)
+			.toEqual(new Uint8Array(0))
+		expect(outcome.stderr)
+			.toContain('EF project snapshot could not be loaded')
+	})
+
+	it('exits 1 for an external (http/https) location matched by descriptor, treated as a missing managed local file', async () => {
+		await setupProject()
+		const location = 'https://example.com/spec.json'
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
+
+		const outcome = await runResourceReadCommand('REQ-001', location, {}, deps())
+		expect(outcome.exitCode)
+			.toBe(1)
+		expect(outcome.stdout)
+			.toEqual(new Uint8Array(0))
+		expect(outcome.stderr)
+			.toBe(`Location '${location}' is an external URL, not a managed local file.\n`)
+	})
+
 	it('does not accept --format (has no format option in its input shape at all)', () => {
 		// Structural guarantee: `ResourceReadOptions` has no `format` field, so
 		// `program.ts` rejecting `--format` for this command is enforced by

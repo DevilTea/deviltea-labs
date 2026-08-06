@@ -162,6 +162,55 @@ This requirement exists to keep the example fixture meaningful.
 `
 }
 
+// An image-only H2 heading: extractPlainText has no `value` (not a text
+// node) and no `children` (images are leaf nodes) to fall back to, so the
+// section title resolves to the empty string rather than throwing.
+const REQ_060 = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-060
+title: Diagram Requirement
+status: active
+summary: This requirement is about a diagram.
+tags: []
+relations: []
+resources: []
+---
+
+## ![Diagram](diagram.png)
+
+The diagram-marker line appears under an image-only heading.
+`
+
+// The body line below spells "café" in NFD (decomposed: "e" + a combining
+// acute accent, U+0301), which differs from its NFC form -- exercising the
+// "text required NFC normalization to match" path (no exact position
+// reported).
+const REQ_070 = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-070
+title: NFC Normalization Requirement
+status: active
+summary: Exercises NFC normalization fallback matching.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Uses café as a decomposed-form Unicode keyword.
+
+## Rationale
+
+This requirement exists to keep the example fixture meaningful.
+
+## Acceptance Criteria
+
+- The system behaves as specified.
+`
+
 async function writeFile(root: string, relativePath: string, content: string): Promise<void> {
 	const fullPath = path.join(root, relativePath)
 	await fs.mkdir(path.dirname(fullPath), { recursive: true })
@@ -342,5 +391,80 @@ describe('executeSearch', () => {
 		const data = executeSearch(snapshot, validation, terms, false, 0, null)
 		expect(data.terms)
 			.toEqual(['filtering'])
+	})
+
+	it('attributes a body match to an empty section title under an image-only H2 heading', async () => {
+		await writeFile(tempDir, '.engineering/req/REQ-060.md', REQ_060)
+		const { snapshot, validation } = await load()
+		const terms = prepareSearchTerms(['diagram-marker'], false)!
+		const data = executeSearch(snapshot, validation, terms, false, 0, null)
+		const result = data.results.find(r => r.artifact.id === 'REQ-060')!
+		const bodyMatch = result.matches.find(m => m.field === 'body')!
+		expect(bodyMatch.section)
+			.toBe('')
+	})
+
+	it('matches text that required NFC normalization, without reporting an exact column', async () => {
+		await writeFile(tempDir, '.engineering/req/REQ-070.md', REQ_070)
+		const { snapshot, validation } = await load()
+		const terms = prepareSearchTerms(['café'], false)!
+		const data = executeSearch(snapshot, validation, terms, false, 0, null)
+		const result = data.results.find(r => r.artifact.id === 'REQ-070')!
+		const bodyMatch = result.matches.find(m => m.field === 'body' && m.text.includes('decomposed-form'))!
+		expect(bodyMatch.column)
+			.toBeNull()
+	})
+
+	it('keeps the earliest term-match position within one surface as the reported column', async () => {
+		const { snapshot, validation } = await load()
+		// Both terms occur on the same REQ-031 body line, "filtering" before
+		// "content"; the later term's match must not overwrite the earlier,
+		// already-minimal exact position.
+		const terms = prepareSearchTerms(['filtering', 'content'], false)!
+		const data = executeSearch(snapshot, validation, terms, false, 0, null)
+		const result = data.results.find(r => r.artifact.id === 'REQ-031')!
+		const bodyMatch = result.matches.find(m => m.text === 'The system must support filtering by content type.')!
+		const filteringIndex = bodyMatch.text.toLowerCase()
+			.indexOf('filtering')
+		expect(bodyMatch.column)
+			.toBe(filteringIndex + 1)
+	})
+
+	it('falls back to a null section for every body line when a file\'s sections could not be computed', async () => {
+		const { snapshot, validation } = await load()
+		// `sections` is `undefined` whenever body parsing failed
+		// (snapshot.ts: "Present only when frontmatter.ok && body.ok"); real
+		// GFM parse failures are impractical to trigger from genuine Markdown
+		// (mdast-util-from-markdown rarely throws), so this overrides the field
+		// directly to exercise `buildLineSectionMap`'s own documented fallback.
+		const patchedArtifacts = snapshot.artifacts.map(a => a.path === '.engineering/req/REQ-031.md' ? { ...a, sections: undefined } : a)
+		const patchedSnapshot = { ...snapshot, artifacts: patchedArtifacts }
+		const terms = prepareSearchTerms(['filtering'], false)!
+		const data = executeSearch(patchedSnapshot, validation, terms, false, 0, null)
+		const result = data.results.find(r => r.artifact.id === 'REQ-031')!
+		const bodyMatches = result.matches.filter(m => m.field === 'body')
+		expect(bodyMatches.length)
+			.toBeGreaterThan(0)
+		expect(bodyMatches.every(m => m.section === null))
+			.toBe(true)
+	})
+
+	it('still matches non-body fields when the record\'s file is absent from the snapshot', async () => {
+		const { snapshot, validation } = await load()
+		// `executeSearch` takes `snapshot` and `validation` as independent
+		// parameters; a real, matched pair always has a `snapshot.artifacts`
+		// entry for every `validation.byId` record's path, so this mismatch is
+		// only reachable by constructing it directly, exercising
+		// `buildSurfaces`' own documented `file?.` fallback.
+		const patchedSnapshot = { ...snapshot, artifacts: snapshot.artifacts.filter(a => a.path !== '.engineering/req/REQ-031.md') }
+		const terms = prepareSearchTerms(['filtering'], false)!
+		const data = executeSearch(patchedSnapshot, validation, terms, false, 0, null)
+		const result = data.results.find(r => r.artifact.id === 'REQ-031')!
+		expect(result)
+			.toBeDefined()
+		expect(result.matches.some(m => m.field === 'title'))
+			.toBe(true)
+		expect(result.matches.some(m => m.field === 'body'))
+			.toBe(false)
 	})
 })

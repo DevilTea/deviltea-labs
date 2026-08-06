@@ -1,4 +1,8 @@
+import type { ArtifactType, Envelope, RelationEntry, Status } from '../domain/model'
+import type { GitRepository } from '../git/repository'
 import type { QueryContext } from './query'
+import type { ProjectSnapshot } from './snapshot'
+import type { IncomingRelationEdge, SnapshotArtifactRecord, SnapshotValidationResult } from './snapshot-validation'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -223,6 +227,87 @@ Result: passed
 - Verified.
 `
 
+const REQ_GHOST_SRC = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-GHOST-SRC
+title: Ghost Source
+status: active
+summary: A requirement with a dangling relation target, for graph-invalid tests.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-GHOST
+resources: []
+---
+
+## Requirement
+
+Exercises a dangling relation target reached during traversal.
+
+## Rationale
+
+Exercises EF-QRY-007.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+const REQ_GHOST_SUP = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-GHOST-SUP
+title: Ghost Superseded
+status: superseded
+summary: A superseded requirement whose replacement does not exist, for invalid-graph tests.
+tags: []
+relations:
+  - type: superseded-by
+    target: REQ-GHOST-REPLACEMENT
+resources: []
+---
+
+## Requirement
+
+Exercises a dangling supersession target.
+
+## Rationale
+
+Exercises EF-QRY-008 (invalid-graph).
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+const ADR_REFERENCES_POL = `---
+schema: ef/decision@1
+type: decision
+id: ADR-REFERENCES-POL
+title: References Policy
+status: active
+summary: A decision that references POL-001, for include_references tests.
+tags: []
+relations:
+  - type: references
+    target: POL-001
+resources: []
+---
+
+## Context
+
+References fixture context.
+
+## Decision
+
+N/A.
+
+## Consequences
+
+N/A.
+`
+
 async function writeFile(root: string, relativePath: string, content: string): Promise<void> {
 	const fullPath = path.join(root, relativePath)
 	await fs.mkdir(path.dirname(fullPath), { recursive: true })
@@ -244,6 +329,78 @@ async function writeRichProject(root: string): Promise<void> {
 	await writeFile(root, '.engineering/resources/REQ-001/notes.md', '# Notes\n')
 }
 
+/** Builds a minimal, self-consistent {@link SnapshotArtifactRecord} without going through frontmatter/envelope decoding, for hand-built graph fixtures. */
+function fabricatedRecord(id: string, type: ArtifactType, status: Status, relations: RelationEntry[] = []): SnapshotArtifactRecord {
+	const envelope: Envelope = {
+		schema: `ef/${type}@1`,
+		type,
+		id,
+		title: `Title of ${id}`,
+		status,
+		summary: `Summary of ${id}.`,
+		tags: [],
+		relations,
+		resources: [],
+		extensions: {},
+	}
+	return { path: `path/${id}.md`, id, type, status, envelope, relations }
+}
+
+/**
+ * Builds a minimal, type-correct {@link QueryContext} directly from hand-built
+ * `byId`/`incomingRelations` indexes, bypassing snapshot loading and
+ * validation entirely. `impactGraph`'s "dangling incoming reference"
+ * graph-invalid case (an incoming edge whose `from` Artifact ID is absent
+ * from `byId`) cannot arise from a real, self-consistent
+ * `validateSnapshot` result -- `incomingRelations` is always indexed from
+ * the same file outcomes that populate `byId` -- so exercising it precisely
+ * requires constructing the two indexes independently, the same technique
+ * `query-graph.unit.test.ts` already uses for this exact scenario.
+ */
+function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRelations: Map<string, IncomingRelationEdge[]>): QueryContext {
+	const snapshot: ProjectSnapshot = {
+		source: { kind: 'working-tree', projectRoot: '/fabricated' },
+		configBytes: undefined,
+		config: { config: null, diagnostics: [] },
+		gitignoreBytes: undefined,
+		artifacts: [],
+		resourceFiles: [],
+		entryKinds: new Map(),
+		layoutDiagnostics: [],
+	}
+	const validation: SnapshotValidationResult = {
+		diagnostics: [],
+		complete: true,
+		byId,
+		incomingRelations,
+		resourceOwnership: new Map(),
+		currentIds: new Map(),
+		chgEffects: [],
+	}
+	return { snapshot, validation }
+}
+
+/**
+ * Delegates every {@link GitRepository} method to `real` except the ones
+ * named in `overrides`, so a single low-level Git outcome can be forced
+ * without spawning a real Git failure.
+ */
+function wrapGitRepository(real: GitRepository, overrides: Partial<GitRepository>): GitRepository {
+	return {
+		root: real.root,
+		findWorktreeRoot: overrides.findWorktreeRoot ?? real.findWorktreeRoot.bind(real),
+		getObjectFormat: overrides.getObjectFormat ?? real.getObjectFormat.bind(real),
+		resolveCommit: overrides.resolveCommit ?? real.resolveCommit.bind(real),
+		resolveRef: overrides.resolveRef ?? real.resolveRef.bind(real),
+		getFirstParent: overrides.getFirstParent ?? real.getFirstParent.bind(real),
+		readTree: overrides.readTree ?? real.readTree.bind(real),
+		readBlob: overrides.readBlob ?? real.readBlob.bind(real),
+		listFirstParentHistory: overrides.listFirstParentHistory ?? real.listFirstParentHistory.bind(real),
+		pathExistsInFirstParentHistory: overrides.pathExistsInFirstParentHistory ?? real.pathExistsInFirstParentHistory.bind(real),
+		diffTrees: overrides.diffTrees ?? real.diffTrees.bind(real),
+	}
+}
+
 describe('executeQuery', () => {
 	let tempDir: string
 	let context: QueryContext
@@ -260,6 +417,14 @@ describe('executeQuery', () => {
 	afterEach(async () => {
 		await fs.rm(tempDir, { recursive: true, force: true })
 	})
+
+	/** Reloads `context` from `tempDir`'s current contents, for tests that add extra fixture files after `beforeEach`. */
+	async function reloadContext(): Promise<QueryContext> {
+		const result = await loadSnapshotFromWorkingTree(tempDir)
+		if (!result.ok)
+			throw new Error(`failed to load snapshot: ${result.reason}`)
+		return { snapshot: result.snapshot, validation: validateSnapshot(result.snapshot) }
+	}
 
 	describe('envelope shape', () => {
 		it('always uses the fixed ef/query-result@1 schema and echoes the requested kind', async () => {
@@ -330,6 +495,28 @@ describe('executeQuery', () => {
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-004')
 		})
+
+		it('a full projection reports an empty body when the record\'s file is not in the snapshot', async () => {
+			// `QueryContext` does not itself enforce that `snapshot` and
+			// `validation` were produced from the same load: `bodyTextFor` (query.ts)
+			// falls back to an empty string when the record's path has no matching
+			// snapshot file entry (or that file's frontmatter isn't ok), a real
+			// branch this defensive fallback covers. Under a real,
+			// self-consistent `validateSnapshot` result this cannot happen (every
+			// `byId` record's path always has a matching, frontmatter-ok
+			// `snapshot.artifacts` entry), so it is only exercisable by
+			// deliberately mismatching the two, as here.
+			const mismatchedContext: QueryContext = {
+				...context,
+				snapshot: { ...context.snapshot, artifacts: context.snapshot.artifacts.filter(a => a.path !== '.engineering/req/REQ-001.md') },
+			}
+			const result = await executeQuery(mismatchedContext, { kind: 'lookup', id: 'REQ-001' })
+			const artifact = result.data!.artifact as Record<string, unknown>
+			expect(artifact.id)
+				.toBe('REQ-001')
+			expect(artifact.body)
+				.toBe('')
+		})
 	})
 
 	describe('list', () => {
@@ -391,6 +578,62 @@ describe('executeQuery', () => {
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-002')
 		})
+
+		it('status filter narrows to matching records and excludes the rest', async () => {
+			const result = await executeQuery(context, { kind: 'list', status: ['completed'] })
+			expect(result.data!.artifacts.map(a => a.id))
+				.toEqual(['CHG-001'])
+		})
+
+		it('eF-QRY-002 for an unknown status value', async () => {
+			const result = await executeQuery(context, { kind: 'list', status: ['not-a-status'] })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-002')
+			expect(result.diagnostics[0]!.message)
+				.toContain('Unknown status')
+		})
+
+		it('eF-QRY-002 for an unknown relation type filter', async () => {
+			const result = await executeQuery(context, { kind: 'list', relationType: 'not-a-type' })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-002')
+		})
+
+		it('eF-QRY-002 for a negative offset', async () => {
+			const result = await executeQuery(context, { kind: 'list', offset: -1 })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-002')
+			expect(result.diagnostics[0]!.message)
+				.toContain('\'offset\' must be a non-negative integer')
+		})
+
+		it('eF-QRY-002 for a zero limit', async () => {
+			const result = await executeQuery(context, { kind: 'list', limit: 0 })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-002')
+			expect(result.diagnostics[0]!.message)
+				.toContain('\'limit\' must be a positive integer or null')
+		})
+
+		it('schema filter narrows to records declaring exactly that schema', async () => {
+			const result = await executeQuery(context, { kind: 'list', schema: 'ef/requirement@1' })
+			expect(result.data!.artifacts.map(a => a.id))
+				.toEqual(['REQ-001', 'REQ-002', 'REQ-010', 'REQ-011', 'REQ-012'])
+		})
+
+		it('tags_any uses OR semantics', async () => {
+			const result = await executeQuery(context, { kind: 'list', tagsAny: ['alpha'] })
+			expect(result.data!.artifacts.map(a => a.id))
+				.toEqual(['REQ-001'])
+		})
+
+		it('resource_role filters on the resource\'s role field', async () => {
+			const result = await executeQuery(context, { kind: 'list', resourceRole: 'reference' })
+			expect(result.data!.artifacts.map(a => a.id))
+				.toEqual(['REQ-001'])
+		})
 	})
 
 	describe('search', () => {
@@ -414,6 +657,22 @@ describe('executeQuery', () => {
 			const result = await executeQuery(context, { kind: 'search', terms: [''] })
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-002')
+		})
+
+		it('eF-QRY-002 for a negative offset', async () => {
+			const result = await executeQuery(context, { kind: 'search', terms: ['filtering'], offset: -1 })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-002')
+			expect(result.diagnostics[0]!.message)
+				.toContain('\'offset\' must be a non-negative integer')
+		})
+
+		it('eF-QRY-002 for a zero limit', async () => {
+			const result = await executeQuery(context, { kind: 'search', terms: ['filtering'], limit: 0 })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-002')
+			expect(result.diagnostics[0]!.message)
+				.toContain('\'limit\' must be a positive integer or null')
 		})
 	})
 
@@ -461,6 +720,25 @@ describe('executeQuery', () => {
 				.toBe(false)
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-014')
+		})
+
+		it('deduplicates a repeated relation type in both the echoed types and the traversal type set', async () => {
+			const result = await executeQuery(context, { kind: 'relations', id: 'REQ-001', types: ['derived-from', 'derived-from'] })
+			expect(result.data!.types)
+				.toEqual(['derived-from'])
+			expect(result.data!.edges)
+				.toEqual([{ source: 'REQ-001', type: 'derived-from', target: 'PRD-001' }])
+		})
+
+		it('eF-QRY-007 when a returned edge references a dangling (non-existent) target', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-GHOST-SRC.md', REQ_GHOST_SRC)
+			const ghostContext = await reloadContext()
+
+			const result = await executeQuery(ghostContext, { kind: 'relations', id: 'REQ-GHOST-SRC', types: ['derived-from'] })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-007')
 		})
 	})
 
@@ -517,6 +795,29 @@ describe('executeQuery', () => {
 			const result = await executeQuery(context, { kind: 'trace', roots: ['REQ-999'], types: ['derived-from'], direction: 'both', maxDepth: 1 })
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-014')
+		})
+
+		it('eF-QRY-006 for an invalid direction', async () => {
+			const result = await executeQuery(context, { kind: 'trace', roots: ['PRD-001'], types: ['derived-from'], direction: 'sideways', maxDepth: 1 })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-006')
+		})
+
+		it('eF-QRY-002 for an unknown relation type in the type set', async () => {
+			const result = await executeQuery(context, { kind: 'trace', roots: ['PRD-001'], types: ['not-a-type'], direction: 'both', maxDepth: 1 })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-002')
+		})
+
+		it('eF-QRY-007 when traversal reaches a dangling (non-existent) target', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-GHOST-SRC.md', REQ_GHOST_SRC)
+			const ghostContext = await reloadContext()
+
+			const result = await executeQuery(ghostContext, { kind: 'trace', roots: ['REQ-GHOST-SRC'], types: ['derived-from'], direction: 'outgoing', maxDepth: 1 })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-007')
 		})
 	})
 
@@ -577,6 +878,51 @@ describe('executeQuery', () => {
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-014')
 		})
+
+		it('include_references adds references edges to the impact traversal only when requested', async () => {
+			await writeFile(tempDir, '.engineering/adr/ADR-REFERENCES-POL.md', ADR_REFERENCES_POL)
+			const referencesContext = await reloadContext()
+
+			const withoutReferences = await executeQuery(referencesContext, { kind: 'impact', roots: ['POL-001'], maxDepth: 1 })
+			expect(withoutReferences.data!.impact.nodes.map(n => n.artifact.id))
+				.not.toContain('ADR-REFERENCES-POL')
+
+			const withReferences = await executeQuery(referencesContext, { kind: 'impact', roots: ['POL-001'], maxDepth: 1, includeReferences: true })
+			expect(withReferences.data!.include_references)
+				.toBe(true)
+			expect(withReferences.data!.impact.nodes.map(n => n.artifact.id))
+				.toContain('ADR-REFERENCES-POL')
+		})
+
+		it('eF-QRY-008 when resolve_current reaches an invalid supersession graph (dangling replacement)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-GHOST-SUP.md', REQ_GHOST_SUP)
+			const ghostContext = await reloadContext()
+
+			const result = await executeQuery(ghostContext, { kind: 'impact', roots: ['REQ-GHOST-SUP'], maxDepth: 1, resolveCurrent: true })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-008')
+		})
+
+		it('eF-QRY-007 when the impact traversal reaches a dangling incoming reference', async () => {
+			// Not reachable through a real, self-consistent `validateSnapshot`
+			// result: `incomingRelations` is always indexed from the same file
+			// outcomes that populate `byId`, so an incoming edge's `from` side is
+			// always a real Artifact ID. Constructing the two indexes
+			// independently (as `query-graph.unit.test.ts` does for the
+			// equivalent `impactGraph` case) is the only way to exercise this
+			// defensive branch precisely.
+			const byId = new Map([['POL-001', fabricatedRecord('POL-001', 'policy', 'active')]])
+			const incomingRelations = new Map<string, IncomingRelationEdge[]>([
+				['POL-001', [{ from: 'REQ-GHOST', type: 'governed-by' }]],
+			])
+			const fabricated = fabricatedContext(byId, incomingRelations)
+
+			const result = await executeQuery(fabricated, { kind: 'impact', roots: ['POL-001'], maxDepth: 4 })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-007')
+		})
 	})
 
 	describe('resolve-current', () => {
@@ -619,6 +965,15 @@ describe('executeQuery', () => {
 			const result = await executeQuery(context, { kind: 'resolve-current', id: '' })
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-001')
+		})
+
+		it('eF-QRY-008 for an invalid supersession graph (dangling replacement)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-GHOST-SUP.md', REQ_GHOST_SUP)
+			const ghostContext = await reloadContext()
+
+			const result = await executeQuery(ghostContext, { kind: 'resolve-current', id: 'REQ-GHOST-SUP' })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-008')
 		})
 	})
 
@@ -663,6 +1018,42 @@ describe('executeQuery', () => {
 				.toEqual([tipOid])
 			expect(result.data!.commits[0]!.changed_paths)
 				.toEqual(expect.arrayContaining(['.engineering/req/REQ-001.md']))
+		})
+
+		it('eF-QRY-001 for an empty Artifact ID', async () => {
+			const result = await executeQuery(context, { kind: 'history', id: '' })
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-001')
+		})
+
+		it('eF-QRY-010 when the captured integration ref history cannot be completely materialized', async () => {
+			const GIT_TEST_ENV = {
+				GIT_AUTHOR_NAME: 'EF Test',
+				GIT_AUTHOR_EMAIL: 'ef-test@example.com',
+				GIT_COMMITTER_NAME: 'EF Test',
+				GIT_COMMITTER_EMAIL: 'ef-test@example.com',
+			}
+			execFileSync('git', ['-C', tempDir, 'init', '-q', '-b', 'main'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			execFileSync('git', ['-C', tempDir, 'add', '-A'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			execFileSync('git', ['-C', tempDir, 'commit', '-q', '-m', 'bootstrap'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			const tipOid = execFileSync('git', ['-C', tempDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
+				.trim()
+
+			const realGit = createGitRepository(tempDir, createGitExecutor())
+			const brokenGit = wrapGitRepository(realGit, {
+				listFirstParentHistory: async () => ({ kind: 'shallow' }),
+			})
+			const historyContext: QueryContext = {
+				...context,
+				history: { git: brokenGit, integrationRefOid: tipOid },
+			}
+			const result = await executeQuery(historyContext, { kind: 'history', id: 'REQ-001' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-010')
+			expect(result.diagnostics[0]!.message)
+				.toContain('could not be completely materialized')
 		})
 	})
 
