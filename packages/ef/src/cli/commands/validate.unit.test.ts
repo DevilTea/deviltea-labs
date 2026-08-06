@@ -695,4 +695,111 @@ describe('runValidateCommand', () => {
 		expect(outcome.exitCode)
 			.toBe(1)
 	})
+
+	// ---- Commit-bound `--project` exception (11-filesystem-and-config.md ----
+	// ---- "Project Discovery": bootstrap/transition from a pre-EF checkout) ----
+
+	describe('commit-bound --project exception', () => {
+		it('bootstrap scope succeeds with an explicit --project even though the current checkout has no .engineering at all', async () => {
+			// `main` must carry at least one commit before it can be checked
+			// back out to (an unborn branch has no ref to switch to), and that
+			// commit must not itself contain `.engineering` -- the bootstrap
+			// candidate lives only on the separate `bootstrap-branch` commit.
+			// Ordinary discovery from this final working tree would report
+			// `not-found`, but an explicit `--project` must still let the
+			// validator load configuration straight from the commit tree.
+			await writeFile(root, 'README.md', '# not an EF project yet\n')
+			commitAll(root, 'pre-existing non-EF history')
+			git(root, ['checkout', '-q', '-b', 'bootstrap-branch'])
+			await writeMinimalProject(root)
+			const proposed = commitAll(root, 'bootstrap candidate')
+			git(root, ['checkout', '-q', 'main'])
+
+			const outcome = await runValidateCommand({ scope: 'bootstrap', proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false, project: root }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.scope)
+				.toBe('bootstrap')
+			expect(outcome.exitCode)
+				.toBe(0)
+			expect(json.valid)
+				.toBe(true)
+		})
+
+		it('transition scope succeeds with an explicit --project even though the current checkout has no .engineering at all', async () => {
+			// `refs/heads/main` (the configured `integration_ref`) must still
+			// resolve to `baseline` at operation start (as ordinary transition
+			// validation requires), so `baseline` is committed directly on
+			// `main`. The working tree is then left detached at the earlier
+			// pre-EF commit -- a state ordinary discovery could never resolve
+			// from -- to prove the explicit `--project` bypass is what makes
+			// this succeed, not an incidental `.engineering` presence.
+			await writeFile(root, 'README.md', '# not an EF project yet\n')
+			const preEf = commitAll(root, 'pre-existing non-EF history')
+			await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+			await writeMinimalProject(root)
+			const baseline = commitAll(root, 'baseline')
+			git(root, ['checkout', '-q', '-b', 'feature'])
+			await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+			await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: modifies, target: REQ-001 }]'))
+			const proposed = commitAll(root, 'proposed')
+			git(root, ['checkout', '-q', preEf])
+
+			const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false, project: root }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.scope)
+				.toBe('transition')
+			expect(outcome.exitCode)
+				.toBe(0)
+			expect(json.valid)
+				.toBe(true)
+		})
+
+		it('snapshot scope keeps ordinary discovery: an explicit --project still requires the working tree to already contain configuration', async () => {
+			// Snapshot scope's semantic input is the working tree itself, so the
+			// commit-bound exception does not apply: `root`'s checked-out `main`
+			// has no `.engineering`, and an explicit `--project` must still fail
+			// exactly like implicit discovery would.
+			const outcome = await runValidateCommand({ scope: 'snapshot', strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false, project: root }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(false)
+		})
+
+		it('implicit (no --project) bootstrap validation keeps current behavior: a pre-EF cwd with no .engineering anywhere still reports failure', async () => {
+			await writeFile(root, 'README.md', '# not an EF project yet\n')
+			commitAll(root, 'pre-existing non-EF history')
+			git(root, ['checkout', '-q', '-b', 'bootstrap-branch'])
+			await writeMinimalProject(root)
+			const proposed = commitAll(root, 'bootstrap candidate')
+			git(root, ['checkout', '-q', 'main'])
+
+			const outcome = await runValidateCommand({ scope: 'bootstrap', proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(false)
+		})
+
+		it('bootstrap scope rejects an explicit --project that is not itself the Git worktree root', async () => {
+			await writeFile(root, 'README.md', '# not an EF project yet\n')
+			commitAll(root, 'pre-existing non-EF history')
+			git(root, ['checkout', '-q', '-b', 'bootstrap-branch'])
+			await writeMinimalProject(root)
+			const proposed = commitAll(root, 'bootstrap candidate')
+			git(root, ['checkout', '-q', 'main'])
+
+			const nested = path.join(root, 'sub')
+			await fs.mkdir(nested, { recursive: true })
+
+			const outcome = await runValidateCommand({ scope: 'bootstrap', proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false, project: nested }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(false)
+		})
+	})
 })

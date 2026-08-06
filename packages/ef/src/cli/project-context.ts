@@ -20,6 +20,7 @@ import type { Config } from '../repository/config'
 import path from 'pathe'
 import { createGitExecutor } from '../git/executor'
 import { createGitRepository, findWorktreeRoot } from '../git/repository'
+import { isSameLocation } from '../platform/path-identity'
 import { discoverProject } from '../repository/discovery'
 
 export interface ProjectContext {
@@ -78,4 +79,53 @@ export async function resolveProject(input: ResolveProjectInput, executor: GitEx
 		case 'git-unavailable':
 			return { ok: false, reason: 'git-unavailable', message: result.message }
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Commit-bound project resolution (transition/bootstrap `--project`)
+// ---------------------------------------------------------------------------
+
+export interface CommitBoundProjectContext {
+	root: string
+	git: GitRepository
+}
+
+export type ResolveCommitBoundProjectFailureReason = 'not-project-worktree-root' | 'git-unavailable'
+
+export type ResolveCommitBoundProjectResult
+	= | { ok: true, context: CommitBoundProjectContext }
+		| { ok: false, reason: ResolveCommitBoundProjectFailureReason, message: string }
+
+export interface ResolveCommitBoundProjectInput {
+	cwd: string
+	/** The raw `--project` option value, resolved against `cwd` when relative. Required: this path has no meaning for implicit discovery. */
+	explicitProject: string
+}
+
+/**
+ * Resolve an explicit `--project` root for commit-bound transition/bootstrap
+ * validation (11-filesystem-and-config.md "Project Discovery": "For
+ * commit-bound transition or bootstrap validation, an explicit `--project`
+ * identifies the project Git worktree root even when its checked-out tree
+ * does not contain the candidate configuration. The validator loads
+ * authoritative configuration from the supplied commit or commits.").
+ *
+ * Unlike `resolveProject`, this performs no working-tree `.engineering`/
+ * `ef.yaml` discovery and does not classify a config-less working tree as an
+ * incomplete initialization: the caller loads authoritative configuration
+ * from the supplied commit(s) instead (`peekConfigAt` in
+ * `../cli/commands/validate.ts`). It verifies only that `explicitProject` is
+ * exactly the Git worktree root -- "this exception allows bootstrap
+ * validation from a pre-EF checkout when the repository root is explicit."
+ */
+export async function resolveCommitBoundProject(input: ResolveCommitBoundProjectInput, executor: GitExecutor = createDefaultGitExecutor()): Promise<ResolveCommitBoundProjectResult> {
+	const root = path.resolve(input.cwd, input.explicitProject)
+
+	const worktree = await findWorktreeRoot(executor, root)
+	if (worktree.kind === 'git-unavailable')
+		return { ok: false, reason: 'git-unavailable', message: worktree.message }
+	if (worktree.kind === 'not-a-worktree' || !isSameLocation(worktree.root, root))
+		return { ok: false, reason: 'not-project-worktree-root', message: `'${root}' is not the Git worktree root.` }
+
+	return { ok: true, context: { root, git: createGitRepository(root, executor) } }
 }

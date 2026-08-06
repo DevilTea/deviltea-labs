@@ -139,6 +139,32 @@ export function incompleteInitializationQueryResult(kind: QueryKind): QueryResul
 	return failure(kind, 'EF-QRY-013', 'An incomplete working-tree initialization was discovered before authoritative files could be loaded.')
 }
 
+/**
+ * The shared `EF-QRY-013` prerequisite gate every handler below applies right
+ * after its own request-shape validation and before touching `byId` or
+ * performing any graph work (10-query-and-trace.md "Invalid Graph and Partial
+ * Results"). `context.validation.graphTrustworthy` is `false` whenever a
+ * parse/identity/layout condition means `byId` and its dependent indexes
+ * cannot be trusted as complete (`snapshot-validation.ts`): an Artifact file
+ * failed to decode, an ID is ambiguous, or a layout entry could itself be an
+ * unparsed Artifact. In that case EVERY query kind -- including exact lookup,
+ * whose "not found" is otherwise a normal complete result -- returns
+ * `complete: false`, `data: null` here, rather than risking a `list`/`search`
+ * result silently missing an undecoded Artifact, or a `lookup` reporting a
+ * merely-ambiguous ID as an ordinary not-found.
+ *
+ * This is intentionally broader than the localized "graph invalid" detection
+ * `./query-graph.ts` performs for a traversal that actually reaches a
+ * dangling target (`EF-QRY-007`/`008`): those stay scoped to the specific
+ * query that touches the bad edge, and are unaffected by (and still fire
+ * independently of) this prerequisite check.
+ */
+function graphTrustworthyFailure(context: QueryContext, kind: QueryKind): QueryResult | undefined {
+	if (context.validation.graphTrustworthy)
+		return undefined
+	return failure(kind, 'EF-QRY-013', 'The Artifact graph could not be completely and unambiguously loaded, so the query result would not be trustworthy.')
+}
+
 const DIRECTIONS: ReadonlySet<string> = new Set(['outgoing', 'incoming', 'both'])
 const RELATION_TYPE_SET: ReadonlySet<string> = new Set(RELATION_TYPES)
 const CORE_IMPACT_TYPES = ['derived-from', 'addresses', 'governed-by'] as const
@@ -192,6 +218,10 @@ function handleLookup(context: QueryContext, request: LookupQueryRequest): Query
 	const projection = request.projection ?? 'full'
 	if (projection !== 'summary' && projection !== 'full')
 		return failure('lookup', 'EF-QRY-004', `Unsupported lookup projection '${projection}'.`)
+
+	const untrustworthy = graphTrustworthyFailure(context, 'lookup')
+	if (untrustworthy)
+		return untrustworthy
 
 	const record = context.validation.byId.get(request.id)
 	if (!record) {
@@ -280,6 +310,10 @@ function handleList(context: QueryContext, request: ListQueryRequest): QueryResu
 	if (filterError)
 		return { schema: 'ef/query-result@1', kind: 'list', complete: false, data: null, diagnostics: [filterError] }
 
+	const untrustworthy = graphTrustworthyFailure(context, 'list')
+	if (untrustworthy)
+		return untrustworthy
+
 	const offset = request.offset ?? 0
 	const limit = request.limit ?? null
 
@@ -318,6 +352,10 @@ function handleSearch(context: QueryContext, request: SearchQueryRequest): Query
 	if (!prepared)
 		return failure('search', 'EF-QRY-002', 'A search term is empty before or after normalization.')
 
+	const untrustworthy = graphTrustworthyFailure(context, 'search')
+	if (untrustworthy)
+		return untrustworthy
+
 	const data = executeSearch(context.snapshot, context.validation, prepared, caseSensitive, offset, limit)
 	return { schema: 'ef/query-result@1', kind: 'search', complete: true, data, diagnostics: [] }
 }
@@ -339,6 +377,10 @@ function handleRelations(context: QueryContext, request: RelationsQueryRequest):
 		if (!RELATION_TYPE_SET.has(type))
 			return failure('relations', 'EF-QRY-002', `Unknown relation type '${type}'.`)
 	}
+
+	const untrustworthy = graphTrustworthyFailure(context, 'relations')
+	if (untrustworthy)
+		return untrustworthy
 
 	if (!context.validation.byId.has(request.id))
 		return failure('relations', 'EF-QRY-014', `Artifact '${request.id}' does not exist.`)
@@ -381,6 +423,10 @@ function handleTrace(context: QueryContext, request: TraceQueryRequest): QueryRe
 			return failure('trace', 'EF-QRY-002', `Unknown relation type '${type}'.`)
 	}
 
+	const untrustworthyTrace = graphTrustworthyFailure(context, 'trace')
+	if (untrustworthyTrace)
+		return untrustworthyTrace
+
 	const missing = request.roots.filter(id => !context.validation.byId.has(id))
 	if (missing.length > 0) {
 		return failure('trace', 'EF-QRY-014', `Artifact ID(s) not found: ${dedupeSortIds(missing)
@@ -417,6 +463,10 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 		return failure('impact', 'EF-QRY-001', 'Impact requires at least one root Artifact ID.')
 	if (!Number.isInteger(request.maxDepth) || request.maxDepth < 0)
 		return failure('impact', 'EF-QRY-006', '\'max_depth\' must be a non-negative integer.')
+
+	const untrustworthyImpact = graphTrustworthyFailure(context, 'impact')
+	if (untrustworthyImpact)
+		return untrustworthyImpact
 
 	const missing = request.roots.filter(id => !context.validation.byId.has(id))
 	if (missing.length > 0) {
@@ -484,6 +534,11 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 function handleResolveCurrent(context: QueryContext, request: ResolveCurrentQueryRequest): QueryResult {
 	if (request.id.length === 0)
 		return failure('resolve-current', 'EF-QRY-001', 'Current resolution requires a non-empty Artifact ID.')
+
+	const untrustworthy = graphTrustworthyFailure(context, 'resolve-current')
+	if (untrustworthy)
+		return untrustworthy
+
 	if (!context.validation.byId.has(request.id))
 		return failure('resolve-current', 'EF-QRY-014', `Artifact '${request.id}' does not exist.`)
 
@@ -515,6 +570,10 @@ function handleResolveCurrent(context: QueryContext, request: ResolveCurrentQuer
 async function handleHistory(context: QueryContext, request: HistoryQueryRequest): Promise<QueryResult> {
 	if (request.id.length === 0)
 		return failure('history', 'EF-QRY-001', 'History lookup requires a non-empty Artifact ID.')
+
+	const untrustworthy = graphTrustworthyFailure(context, 'history')
+	if (untrustworthy)
+		return untrustworthy
 
 	const record = context.validation.byId.get(request.id)
 	if (!record)

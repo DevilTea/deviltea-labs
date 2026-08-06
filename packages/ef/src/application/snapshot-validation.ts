@@ -89,6 +89,16 @@ export interface SnapshotValidationResult {
 	currentIds: ReadonlyMap<string, string[]>
 	/** Every `introduces`/`modifies`/`retires` edge declared by a CHG whose relation entries passed shape/vocabulary validation. */
 	chgEffects: ChgEffectEdge[]
+	/**
+	 * `false` when a parse/identity/layout condition prevents ANY query
+	 * result over this snapshot from being complete and trustworthy
+	 * (10-query-and-trace.md "Invalid Graph and Partial Results"): an
+	 * Artifact file failed to decode, an ID is ambiguous (duplicate or
+	 * PROJECT-singleton), or a layout entry could itself be an unparsed
+	 * Artifact (`EF-FS-003`). Callers building a `QueryContext` gate every
+	 * query kind -- including exact lookup -- on this.
+	 */
+	graphTrustworthy: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -186,10 +196,20 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	// ---- resources, body ----------------------------------------------------
 
 	const fileOutcomes: FileOutcome[] = []
+	// Whether any Artifact file could not be decoded into a `fileOutcomes`
+	// entry at all (frontmatter split or envelope decode failure). A `list`,
+	// `search`, or unrelated `lookup` result computed while this is `true`
+	// could silently omit that Artifact from an otherwise `complete: true`
+	// result (10-query-and-trace.md "Invalid Graph and Partial Results": "MUST
+	// NOT return a partial ... collection that an Agent could mistake for
+	// complete context"); `graphTrustworthy` below folds this into every
+	// query's own completeness gate.
+	let hasUndecodedArtifact = false
 
 	for (const artifact of snapshot.artifacts) {
 		if (!artifact.frontmatter.ok) {
 			diagnostics.push({ ...artifact.frontmatter.diagnostic, path: artifact.path })
+			hasUndecodedArtifact = true
 			continue
 		}
 
@@ -202,8 +222,10 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 			diagnostics.push({ ...artifact.body.diagnostic, path: artifact.path })
 
 		const envelope = envelopeResult.envelope
-		if (!envelope)
+		if (!envelope) {
+			hasUndecodedArtifact = true
 			continue
+		}
 
 		diagnostics.push(...validateIdSyntax({ type: envelope.type, id: envelope.id }, artifact.path))
 		diagnostics.push(...validateFilename({ type: envelope.type, id: envelope.id }, artifact.path))
@@ -233,22 +255,47 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 
 	diagnostics.push(...validateGraphIdentity(fileOutcomes.map(o => ({ id: o.envelope.id, type: o.envelope.type, path: o.path }))))
 
-	const relationGraphArtifacts: RelationGraphArtifact[] = fileOutcomes.map(o => ({
+	// 02-identity.md "Duplicate handling": "graph validation MUST NOT resolve
+	// the ID to either file; tooling MUST NOT infer a canonical copy." Count
+	// every declared ID first so every dependent index below -- `byId`,
+	// relation-graph/supersession construction, `incomingRelations`,
+	// `currentIds`, and `chgEffects` -- can exclude an ambiguous ID entirely
+	// instead of the prior code silently keeping an arbitrary one of the
+	// colliding files (a `Map` construction overwrites earlier entries for a
+	// repeated key). A relation entry that TARGETS an ambiguous ID is excluded
+	// the same way its target's own outgoing relations are: reporting it as a
+	// dangling target (`EF-REL-003`) would be a speculative secondary
+	// diagnostic once `EF-ID-004` already reports the collision
+	// (09-validation.md "Cascading Diagnostics").
+	const idCounts = new Map<string, number>()
+	for (const outcome of fileOutcomes)
+		idCounts.set(outcome.envelope.id, (idCounts.get(outcome.envelope.id) ?? 0) + 1)
+	const ambiguousIds = new Set<string>([...idCounts.entries()].filter(([, count]) => count > 1)
+		.map(([id]) => id))
+
+	const resolvedOutcomes = fileOutcomes.filter(o => !ambiguousIds.has(o.envelope.id))
+
+	function withoutAmbiguousTargets(relations: RelationGraphArtifact['relations']): RelationGraphArtifact['relations'] {
+		return relations.filter(r => !ambiguousIds.has(r.target))
+	}
+
+	const relationGraphArtifacts: RelationGraphArtifact[] = resolvedOutcomes.map(o => ({
 		path: o.path,
 		id: o.envelope.id,
 		type: o.envelope.type,
-		relations: o.relations,
+		relations: withoutAmbiguousTargets(o.relations),
 	}))
 	const relationById = new Map(relationGraphArtifacts.map(a => [a.id, a] as const))
 	diagnostics.push(...validateRelationGraph(relationGraphArtifacts, relationById))
 
-	const supersessionFacts: SupersessionGraphFact[] = fileOutcomes
+	const supersessionFacts: SupersessionGraphFact[] = resolvedOutcomes
 		.filter(o => o.envelope.type !== 'change')
 		.map(o => ({
 			id: o.envelope.id,
 			type: o.envelope.type,
 			status: o.envelope.status,
-			supersededBy: o.relations.filter(r => r.type === 'superseded-by')
+			supersededBy: withoutAmbiguousTargets(o.relations)
+				.filter(r => r.type === 'superseded-by')
 				.map(r => r.target),
 		}))
 	diagnostics.push(...validateSupersessionGraph(supersessionFacts))
@@ -269,10 +316,10 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	}
 
 	const chgEffects: ChgEffectEdge[] = []
-	for (const outcome of fileOutcomes) {
+	for (const outcome of resolvedOutcomes) {
 		if (outcome.envelope.type !== 'change')
 			continue
-		for (const relation of outcome.relations) {
+		for (const relation of withoutAmbiguousTargets(outcome.relations)) {
 			if (relation.type === 'introduces' || relation.type === 'modifies' || relation.type === 'retires')
 				chgEffects.push({ chgId: outcome.envelope.id, type: relation.type, target: relation.target })
 		}
@@ -331,7 +378,7 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	diagnostics.push(...checkPathNormalization(pathNormalizationEntries))
 
 	const byId = new Map<string, SnapshotArtifactRecord>()
-	for (const outcome of fileOutcomes) {
+	for (const outcome of resolvedOutcomes) {
 		byId.set(outcome.envelope.id, {
 			path: outcome.path,
 			id: outcome.envelope.id,
@@ -342,6 +389,17 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		})
 	}
 
+	// 10-query-and-trace.md "Invalid Graph and Partial Results": a query
+	// result is untrustworthy whenever an error condition prevented an
+	// Artifact file from being decoded (`hasUndecodedArtifact`), made an ID
+	// ambiguous (`EF-ID-004`; `EF-ID-006` for the analogous PROJECT-singleton
+	// case), or flagged a layout entry that could itself be an unparsed
+	// Artifact (`EF-FS-003`). Every other diagnostic (body-schema, resource,
+	// ordering warnings, ...) leaves every already-decoded Artifact in the
+	// graph and does not affect this.
+	const hasBlockingIdentityOrLayoutFinding = diagnostics.some(d => d.code === 'EF-ID-004' || d.code === 'EF-ID-006' || d.code === 'EF-FS-003')
+	const graphTrustworthy = !hasUndecodedArtifact && !hasBlockingIdentityOrLayoutFinding
+
 	return {
 		diagnostics: aggregateDiagnostics(diagnostics),
 		complete,
@@ -350,6 +408,7 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		resourceOwnership,
 		currentIds,
 		chgEffects,
+		graphTrustworthy,
 	}
 }
 

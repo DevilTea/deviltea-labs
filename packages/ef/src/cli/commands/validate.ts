@@ -42,7 +42,7 @@ import { decodeConfig } from '../../repository/config'
 import { validateWorkspace } from '../../repository/workspace'
 import { buildValidationResultJson } from '../envelopes'
 import { renderValidationHuman } from '../human-render'
-import { resolveProject } from '../project-context'
+import { resolveCommitBoundProject, resolveProject } from '../project-context'
 import { createWorkspaceDeps } from '../workspace-deps'
 
 export type ValidateScope = 'snapshot' | 'transition' | 'bootstrap'
@@ -127,16 +127,42 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	if (options.scope !== 'snapshot' && options.proposed === undefined)
 		return earlyFailure(options, 'EF-VAL-011', `'--proposed' is required for '${options.scope}' scope.`)
 
-	// ---- Project resolution (13-cli-contract.md "Common Options") ----------
+	// ---- Project resolution (13-cli-contract.md "Common Options"; ----------
+	// ---- 11-filesystem-and-config.md "Project Discovery" commit-bound -----
+	// ---- exception) ----------------------------------------------------------
 
-	const resolved = await resolveProject({ cwd: deps.cwd, explicitProject: options.project }, deps.executor)
-	if (!resolved.ok) {
-		const code = resolved.reason === 'incomplete-initialization'
-			? 'EF-VAL-012'
-			: resolved.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-001'
-		return earlyFailure(options, code, resolved.message)
+	let root: string
+	let config: Config | null
+	let git: GitRepository
+
+	if (options.scope !== 'snapshot' && options.project !== undefined) {
+		// Commit-bound transition/bootstrap validation may target a working
+		// tree whose checked-out state does not (yet) contain the candidate
+		// configuration -- e.g. bootstrapping from a pre-EF checkout. An
+		// explicit `--project` only needs to be the exact Git worktree root;
+		// authoritative configuration comes from the supplied commit(s)
+		// below (`peekConfigAt`), never from this working tree.
+		const resolved = await resolveCommitBoundProject({ cwd: deps.cwd, explicitProject: options.project }, deps.executor)
+		if (!resolved.ok) {
+			const code = resolved.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-001'
+			return earlyFailure(options, code, resolved.message)
+		}
+		root = resolved.context.root
+		git = resolved.context.git
+		config = null
 	}
-	const { root, config, git } = resolved.context
+	else {
+		const resolved = await resolveProject({ cwd: deps.cwd, explicitProject: options.project }, deps.executor)
+		if (!resolved.ok) {
+			const code = resolved.reason === 'incomplete-initialization'
+				? 'EF-VAL-012'
+				: resolved.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-001'
+			return earlyFailure(options, code, resolved.message)
+		}
+		root = resolved.context.root
+		config = resolved.context.config
+		git = resolved.context.git
+	}
 
 	// ---- Scope-specific validation ------------------------------------------
 
