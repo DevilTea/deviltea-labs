@@ -384,6 +384,83 @@ describe('validateSnapshot', () => {
 			expect(result.graphTrustworthy)
 				.toBe(true)
 		})
+
+		// Adjudicated ruling (Finding C): the gate must also include EF-ID-001,
+		// 002, 003, 007, 008 -- every identity finding that invalidates
+		// graph-membership trust, not just EF-ID-004/006/FS-003. EF-ID-005/014
+		// (filename/path convention violations where the ID itself is unique
+		// and decoded) must NOT gate.
+
+		it('is untrustworthy when no PROJECT Artifact exists (EF-ID-007)', async () => {
+			// Deliberately omit PROJECT.md; a required-PROJECT-context query
+			// (e.g. lookup PROJECT) must not be able to return an ordinary
+			// complete: true/found: false result over this snapshot.
+			await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001' }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ID-007')
+			expect(result.byId.has('PROJECT'))
+				.toBe(false)
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('is untrustworthy when the PROJECT Artifact declares an ID other than PROJECT (EF-ID-008)', async () => {
+			await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(tempDir, '.engineering/PROJECT.md', PROJECT_MD.replace('id: PROJECT', 'id: NOTPROJECT'))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ID-008')
+			expect(result.byId.has('PROJECT'))
+				.toBe(false)
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('is untrustworthy for a malformed Artifact ID (EF-ID-001)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ_001.md', requirementMd({ id: 'REQ_001' }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-ID-001'])
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('is untrustworthy for an ID prefix that does not match the Artifact type (EF-ID-002)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/ADR-001.md', requirementMd({ id: 'ADR-001' }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-ID-002'])
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('is untrustworthy for a non-canonical numeric ID component (EF-ID-003)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-01.md', requirementMd({ id: 'REQ-01' }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-ID-003'])
+			expect(result.graphTrustworthy)
+				.toBe(false)
+		})
+
+		it('stays trustworthy for an EF-ID-005-only filename mismatch (the declared ID itself is unique and decoded)', async () => {
+			await writeMinimalProject(tempDir)
+			// REQ-001 is well-formed and unambiguous; only the filename fails
+			// to match it.
+			await writeFile(tempDir, '.engineering/req/REQ-999.md', requirementMd({ id: 'REQ-001' }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-ID-005'])
+			expect(result.byId.has('REQ-001'))
+				.toBe(true)
+			expect(result.graphTrustworthy)
+				.toBe(true)
+		})
 	})
 
 	describe('relation graph integrity', () => {
@@ -496,6 +573,18 @@ describe('validateSnapshot', () => {
 				.toBe(0)
 		})
 
+		it('does not report EF-RES-009 when two different Artifacts reference the same external HTTPS URL (06-resources.md: external URLs have no exclusive ownership)', async () => {
+			await writeMinimalProject(tempDir)
+			const sharedUrlResource = '\n  - type: reference\n    location: https://example.com/shared-spec\n    role: reference\n    media_type: text/html\n    normative: false\n    description: A shared external reference.\n'
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', resources: sharedUrlResource }))
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', requirementMd({ id: 'REQ-002', resources: sharedUrlResource }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-RES-009')
+			expect(result.resourceOwnership.get('https://example.com/shared-spec'))
+				.toBeUndefined()
+		})
+
 		it('deduplicates resourceOwnership when the same Artifact declares two Resource descriptors at the same location', async () => {
 			await writeMinimalProject(tempDir)
 			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
@@ -508,6 +597,39 @@ describe('validateSnapshot', () => {
 				.toContain('EF-RES-008')
 			expect(result.resourceOwnership.get('.engineering/resources/REQ-001/schema.json'))
 				.toEqual(['REQ-001'])
+		})
+	})
+
+	describe('path normalization (11-filesystem-and-config.md "exact filesystem case")', () => {
+		it('reports EF-FS-006 for a declared local Resource whose case does not exactly match the walked filesystem entry', async () => {
+			await writeMinimalProject(tempDir)
+			// The real file on disk is 'foo.json' (lowercase); the descriptor
+			// declares a different-case location. Only one real file ever
+			// exists at this exact path -- no OS case-folding is involved in
+			// creating it -- so this is deterministic on any host filesystem.
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				resources: '\n  - type: json-schema\n    location: .engineering/resources/REQ-001/Foo.JSON\n    role: contract\n    media_type: application/json\n    normative: true\n    description: A schema.\n',
+			}))
+			await writeFile(tempDir, '.engineering/resources/REQ-001/foo.json', '{}\n')
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-FS-006')
+			const caseFinding = result.diagnostics.find(d => d.code === 'EF-FS-006')
+			expect(caseFinding?.message)
+				.toContain('foo.json')
+		})
+
+		it('does not report EF-FS-006 when the declared local Resource location exactly matches the walked filesystem entry', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				resources: '\n  - type: json-schema\n    location: .engineering/resources/REQ-001/schema.json\n    role: contract\n    media_type: application/json\n    normative: true\n    description: A schema.\n',
+			}))
+			await writeFile(tempDir, '.engineering/resources/REQ-001/schema.json', '{}\n')
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-FS-006')
 		})
 	})
 

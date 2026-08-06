@@ -324,22 +324,36 @@ describe('gitRepository', () => {
 				.toEqual({ kind: 'resolved', oid })
 		})
 
-		it('reports unresolved for an unborn branch ref with no commits', async () => {
+		it('reports proven-absent (exit 1) for an unborn branch ref with no commits', async () => {
 			const dir = initRepo()
 			const result = await repo(dir)
 				.resolveRef('refs/heads/main')
 			expect(result)
-				.toEqual({ kind: 'unresolved' })
+				.toEqual({ kind: 'proven-absent' })
 		})
 
-		it('reports unresolved for a ref name that has never existed', async () => {
+		it('reports proven-absent (exit 1) for a ref name that has never existed', async () => {
 			const dir = initRepo()
 			writeTrackedFile(dir, 'a.txt', 'a\n')
 			commitAll(dir, 'first')
 			const result = await repo(dir)
 				.resolveRef('refs/heads/does-not-exist')
 			expect(result)
-				.toEqual({ kind: 'unresolved' })
+				.toEqual({ kind: 'proven-absent' })
+		})
+
+		// FINDING A regression: `show-ref --verify` uses exit 1 specifically for
+		// "none of the given refs exist" (a PROVEN absence); any other non-zero
+		// exit is an execution/repository error and must not be conflated with
+		// that proof, or bootstrap/transition would wrongly treat a failed probe
+		// as though `integration_ref` does not exist.
+		it('reports a distinct error (not proven-absent) for a fatal show-ref exit other than 1', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('fatal: bad ref database\n', 128)]))
+				.resolveRef('refs/heads/main')
+			expect(result.kind)
+				.toBe('error')
+			expect(result.kind === 'error' && result.message)
+				.toContain('128')
 		})
 	})
 
@@ -561,6 +575,46 @@ describe('gitRepository', () => {
 			expect(result)
 				.toEqual({ kind: 'unresolved' })
 		})
+
+		// FINDING B regression (same repo-wide-flag defect as
+		// `pathExistsInFirstParentHistory`, but reported as more severe: this
+		// method used to consult `--is-shallow-repository` *before* even
+		// attempting to walk, so a repository-wide shallow boundary on some
+		// unrelated branch made every `listFirstParentHistory` call report
+		// `shallow` -- even one whose own first-parent chain is completely
+		// available and reaches a true root.
+		it('reports complete (not shallow) for a commitish whose own first-parent chain is completely available, while an unrelated shallow-fetched branch in the same repository still reports shallow', async () => {
+			const shallowSource = initRepo()
+			writeTrackedFile(shallowSource, 's1.txt', 's1\n')
+			commitAll(shallowSource, 's1')
+			writeTrackedFile(shallowSource, 's2.txt', 's2\n')
+			const shallowSourceTip = commitAll(shallowSource, 's2')
+
+			const local = initRepo()
+			writeTrackedFile(local, 'c1.txt', 'c1\n')
+			const completeRoot = commitAll(local, 'c1')
+			writeTrackedFile(local, 'c2.txt', 'c2\n')
+			const completeTip = commitAll(local, 'c2')
+
+			// Bring in an unrelated shallow-fetched branch: the repository as a
+			// whole now has a shallow boundary, but only on `shallow-branch`.
+			// `local`'s own `main` (`completeTip`) was never touched by the fetch
+			// and its first-parent chain still reaches a true root commit.
+			git(local, ['fetch', '-q', '--depth', '1', `file://${shallowSource}`, `main:refs/heads/shallow-branch`])
+			expect(git(local, ['rev-parse', '--is-shallow-repository'])
+				.trim())
+				.toBe('true')
+
+			const completeResult = await repo(local)
+				.listFirstParentHistory(completeTip)
+			expect(completeResult)
+				.toEqual({ kind: 'complete', oids: [completeTip, completeRoot] })
+
+			const shallowResult = await repo(local)
+				.listFirstParentHistory(shallowSourceTip)
+			expect(shallowResult)
+				.toEqual({ kind: 'shallow' })
+		})
 	})
 
 	// -------------------------------------------------------------------------
@@ -670,6 +724,45 @@ describe('gitRepository', () => {
 				.pathExistsInFirstParentHistory(head, '.engineering/ef.yaml')
 			expect(result)
 				.toEqual({ kind: 'found', commitOid: head })
+		})
+
+		// FINDING B regression: `--is-shallow-repository` is true whenever ANY
+		// shallow boundary exists anywhere in the repository, even on a branch
+		// unrelated to the one being walked. A repository can still have a
+		// fully available first-parent chain for a *different* branch; wrongly
+		// concluding `shallow` purely from the repo-wide flag blocks a valid
+		// bootstrap/init on that complete branch.
+		it('reports not-found (not shallow) for a complete branch reaching a true root, while an unrelated shallow-fetched branch in the same repository still reports shallow', async () => {
+			const shallowSource = initRepo()
+			writeTrackedFile(shallowSource, 's1.txt', 's1\n')
+			commitAll(shallowSource, 's1')
+			writeTrackedFile(shallowSource, 's2.txt', 's2\n')
+			const shallowSourceTip = commitAll(shallowSource, 's2')
+
+			const local = initRepo()
+			writeTrackedFile(local, 'c1.txt', 'c1\n')
+			commitAll(local, 'c1')
+			writeTrackedFile(local, 'c2.txt', 'c2\n')
+			const completeTip = commitAll(local, 'c2')
+
+			// Bring in an unrelated shallow-fetched branch: the repository as a
+			// whole now has a shallow boundary, but only on `shallow-branch`.
+			// `local`'s own `main` (`completeTip`) was never touched by the fetch
+			// and its first-parent chain still reaches a true root commit.
+			git(local, ['fetch', '-q', '--depth', '1', `file://${shallowSource}`, `main:refs/heads/shallow-branch`])
+			expect(git(local, ['rev-parse', '--is-shallow-repository'])
+				.trim())
+				.toBe('true')
+
+			const completeResult = await repo(local)
+				.pathExistsInFirstParentHistory(completeTip, 'nonexistent-path.txt')
+			expect(completeResult)
+				.toEqual({ kind: 'not-found' })
+
+			const shallowResult = await repo(local)
+				.pathExistsInFirstParentHistory(shallowSourceTip, 'nonexistent-path.txt')
+			expect(shallowResult)
+				.toEqual({ kind: 'shallow' })
 		})
 	})
 
@@ -836,11 +929,11 @@ describe('gitRepository', () => {
 				.toEqual({ kind: 'git-unavailable', message: 'git output on stdout exceeded 10 bytes' })
 		})
 
-		it('resolveRef reports unresolved when show-ref succeeds with blank output', async () => {
+		it('resolveRef reports error (not proven-absent) when show-ref exits 0 with blank, unparseable output', async () => {
 			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('   ')]))
 				.resolveRef('refs/heads/main')
-			expect(result)
-				.toEqual({ kind: 'unresolved' })
+			expect(result.kind)
+				.toBe('error')
 		})
 
 		it('getFirstParent propagates git-unavailable from the cat-file type check', async () => {
@@ -892,15 +985,15 @@ describe('gitRepository', () => {
 				.toEqual({ kind: 'missing' })
 		})
 
-		it('listFirstParentHistory propagates git-unavailable from the shallow check', async () => {
+		it('listFirstParentHistory propagates git-unavailable from rev-list', async () => {
 			const result = await createGitRepository('/r', scriptedExecutor([unavailableOutcome('no git')]))
 				.listFirstParentHistory('main')
 			expect(result)
 				.toEqual({ kind: 'git-unavailable', message: 'no git' })
 		})
 
-		it('listFirstParentHistory propagates git-unavailable from rev-list', async () => {
-			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('false'), unavailableOutcome('no git')]))
+		it('listFirstParentHistory propagates git-unavailable from the post-walk boundary cat-file check', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), unavailableOutcome('no git')]))
 				.listFirstParentHistory('main')
 			expect(result)
 				.toEqual({ kind: 'git-unavailable', message: 'no git' })

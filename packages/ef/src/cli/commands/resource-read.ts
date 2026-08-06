@@ -93,6 +93,20 @@ export async function runResourceReadCommand(ownerId: string, location: string, 
 	if (isExternalLocation(location))
 		return failure(1, `Location '${location}' is an external URL, not a managed local file.`)
 
+	// A local Resource location MUST have exactly one owning Artifact across
+	// the whole project (06-resources.md exclusive local ownership; `EF-RES-
+	// 009`). Finding `descriptor` above only proves `ownerId`'s OWN envelope
+	// declares `location` -- it says nothing about whether some OTHER
+	// Artifact ALSO declares the identical local path, which is exactly the
+	// condition the project-wide `resourceOwnership` index (populated from
+	// every Artifact's descriptors, local locations only) exists to catch.
+	// Without this check, a location claimed by more than one Artifact could
+	// still be read to completion through whichever claimant happens to be
+	// named, even though the repository is invalid.
+	const owners = validation.resourceOwnership.get(location) ?? []
+	if (owners.length !== 1 || owners[0] !== ownerId)
+		return failure(1, `Location '${location}' has more than one declared owner, which repository integrity forbids.`)
+
 	// Reject a descriptor whose `location` repository integrity already
 	// invalidates (root escape, backslash/segment violation, wrong-scheme, or
 	// declared outside the owner's managed Resource directory) before ever
@@ -102,6 +116,17 @@ export async function runResourceReadCommand(ownerId: string, location: string, 
 		.filter(d => REJECTED_DESCRIPTOR_CODES.has(d.code))
 	if (descriptorDiagnostics.length > 0)
 		return failure(1, `Descriptor location '${location}' violates repository integrity: ${descriptorDiagnostics[0]!.message}`)
+
+	// Reject a location the project-wide validation already flagged with an
+	// error-severity finding keyed to this exact location string -- most
+	// notably `EF-FS-006` (a declared path that is not Unicode-NFC-normalized,
+	// or that does not exactly match the on-disk entry once case is
+	// considered). Path-integrity findings like this are keyed by the bare
+	// location text (not by owner/artifactId, unlike the descriptor-shape
+	// findings above), so they are found by scanning for that instead.
+	const locationDiagnostics = validation.diagnostics.filter(d => d.severity === 'error' && d.path === location)
+	if (locationDiagnostics.length > 0)
+		return failure(1, `Location '${location}' violates repository integrity: ${locationDiagnostics[0]!.message}`)
 
 	const absolutePath = path.join(root, location)
 
@@ -115,7 +140,16 @@ export async function runResourceReadCommand(ownerId: string, location: string, 
 			return failure(1, `Managed path '${component}' is a forbidden symlink.`)
 	}
 
-	if (!(await isRegularFile(absolutePath)))
+	// `isRegularFile` alone resolves `absolutePath` through the live
+	// filesystem, which on a case-insensitive (but case-preserving)
+	// filesystem happily finds a file whose actual on-disk name differs from
+	// `location` in case or Unicode normalization -- exactly the mismatch
+	// repository integrity forbids. `loaded.snapshot.entryKinds` was built
+	// from an exact-string-keyed, case-preserving directory listing
+	// (`walkDirectory`'s real `readdir` entries), so requiring `location`
+	// itself to be a key of it closes that gap without any live filesystem
+	// case-folding involved.
+	if (loaded.snapshot.entryKinds.get(location) !== 'file' || !(await isRegularFile(absolutePath)))
 		return failure(1, `Managed local file '${location}' is missing or is not a regular file.`)
 
 	// ---- (6) the file is readable ---------------------------------------------

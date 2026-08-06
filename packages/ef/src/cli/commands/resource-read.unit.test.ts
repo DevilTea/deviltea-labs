@@ -184,6 +184,58 @@ describe('runResourceReadCommand', () => {
 			.toBe(2)
 	})
 
+	it('exits 1, empty stdout, when two Artifacts declare the same local path, whichever owner is used to read it (EF-RES-009 exclusive ownership)', async () => {
+		await setupProject()
+		// `REQ-001` legitimately declares a location inside its own managed
+		// Resource directory. `REQ-002` improperly declares the identical
+		// location (itself also a repository-integrity violation, EF-RES-014,
+		// for `REQ-002`'s own descriptor -- but that is irrelevant to this
+		// regression: the point is that reading through `REQ-001`, whose own
+		// descriptor is perfectly well-formed, must still be rejected because
+		// the project-wide ownership index shows the location has two owners).
+		const location = '.engineering/resources/REQ-001/example.json'
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
+		await writeFile(root, '.engineering/req/REQ-002.md', requirementMdWithResource('REQ-002', location))
+		await writeFile(root, location, 'content')
+
+		const viaLegitimateOwner = await runResourceReadCommand('REQ-001', location, {}, deps())
+		expect(viaLegitimateOwner.exitCode)
+			.toBe(1)
+		expect(viaLegitimateOwner.stdout)
+			.toEqual(new Uint8Array(0))
+
+		const viaRogueOwner = await runResourceReadCommand('REQ-002', location, {}, deps())
+		expect(viaRogueOwner.exitCode)
+			.toBe(1)
+		expect(viaRogueOwner.stdout)
+			.toEqual(new Uint8Array(0))
+	})
+
+	it('exits 1 and does not serve the file when a declared location differs only in letter case from the on-disk entry (case-insensitive filesystem)', async (ctx) => {
+		await setupProject()
+		const actualLocation = '.engineering/resources/REQ-001/example.json'
+		const declaredLocation = '.engineering/resources/REQ-001/Example.JSON'
+		await writeFile(root, actualLocation, 'content')
+
+		// This regression is only meaningful on a filesystem that resolves the
+		// wrong-case path to the same on-disk entry; skip on a genuinely
+		// case-sensitive filesystem where the scenario cannot arise.
+		const resolvesCaseInsensitively = await fs.stat(path.join(root, declaredLocation))
+			.then(() => true, () => false)
+		if (!resolvesCaseInsensitively) {
+			ctx.skip()
+			return
+		}
+
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', declaredLocation))
+
+		const outcome = await runResourceReadCommand('REQ-001', declaredLocation, {}, deps())
+		expect(outcome.exitCode)
+			.toBe(1)
+		expect(outcome.stdout)
+			.toEqual(new Uint8Array(0))
+	})
+
 	it('exits 1 when the descriptor exists but the managed local file is missing', async () => {
 		await setupProject()
 		const location = '.engineering/resources/REQ-001/example.json'

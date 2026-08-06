@@ -255,6 +255,19 @@ export async function computeInitPlan(input: ComputeInitPlanInput, deps: Compute
 	const refResult = await deps.resolveRef(values.integrationRef)
 	if (refResult.kind === 'git-unavailable')
 		return { ok: false, reason: 'git-unavailable', message: refResult.message }
+	if (refResult.kind === 'error') {
+		// The ref probe ran but could not conclusively determine whether
+		// `integration_ref` exists (distinct from `git-unavailable`, where Git
+		// could not even be run). Falling through would treat it as though the
+		// ref simply does not exist and let bootstrap proceed by assumption
+		// (09-validation.md "An inaccessible ref ... makes the operation
+		// incomplete rather than eligible by assumption").
+		return {
+			ok: false,
+			reason: 'history-incomplete',
+			message: `'${values.integrationRef}' could not be conclusively resolved: ${refResult.message}`,
+		}
+	}
 	if (refResult.kind === 'resolved') {
 		const historyResult = await deps.pathExistsInFirstParentHistory(refResult.oid, '.engineering/ef.yaml')
 		if (historyResult.kind === 'git-unavailable')

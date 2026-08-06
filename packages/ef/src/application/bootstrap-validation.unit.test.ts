@@ -228,6 +228,34 @@ describe('validateBootstrap', () => {
 			.toBeNull()
 	})
 
+	// FINDING A regression: a failed ref probe (Git ran but could not
+	// conclusively determine whether `integration_ref` resolves -- distinct
+	// from `resolved: false`, which is a PROVEN absence) must make bootstrap
+	// incomplete, not validate as though the ref does not exist. Otherwise
+	// this "eligible bootstrap target" conclusion (and `expected_ref_oid:
+	// null`) would rest on an unproven assumption
+	// (09-validation.md "An inaccessible ref ... makes the operation
+	// incomplete rather than eligible by assumption").
+	it('reports incomplete with EF-VAL-006 (not a valid bootstrap) when the operation-start ref probe failed', async () => {
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+
+		const result = await validateBootstrap({
+			git: repo(),
+			proposedOid,
+			operationStartRefState: { resolved: 'error', message: 'git show-ref --verify --quiet exited with status 128.' },
+		})
+
+		expect(result.complete)
+			.toBe(false)
+		expect(result.valid)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-006'])
+	})
+
 	it('is valid for a bootstrap state with draft and active knowledge Artifacts and no CHG', async () => {
 		await writeMinimalProject(tempDir)
 		await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', status: 'active' }))

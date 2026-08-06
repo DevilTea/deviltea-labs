@@ -29,6 +29,7 @@
 
 import type { OperationStartRefState } from '../../application/bootstrap-validation'
 import type { ValidationPolicy } from '../../application/snapshot-validation'
+import type { OperationStartRefOid } from '../../application/transition-validation'
 import type { GitExecutor } from '../../git/executor'
 import type { GitRepository } from '../../git/repository'
 import type { Config } from '../../repository/config'
@@ -272,12 +273,47 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	return outcomeFor(options.format, options.noColor, options.workspace, summary, diagnostics)
 }
 
-async function resolveRefOidOrNull(git: GitRepository, ref: string): Promise<string | null> {
+/**
+ * Threads {@link GitRepository.resolveRef}'s outcome into `validateTransition`'s
+ * `OperationStartRefOid` input without collapsing its `'error'`/`'git-unavailable'`
+ * kinds into a bare `null`: a failed probe is neither a proven resolution nor a
+ * proven absence, and folding it into `null` here would make `validateTransition`
+ * misreport a genuine Git failure as an ordinary ref mismatch (`EF-VAL-002`)
+ * instead of the probe failure itself (`EF-VAL-006`, applied by
+ * `validateTransition` itself once this distinct shape reaches it;
+ * 09-validation.md "An inaccessible ref ... makes the operation incomplete
+ * rather than eligible by assumption").
+ */
+async function resolveRefOidOrNull(git: GitRepository, ref: string): Promise<OperationStartRefOid> {
 	const result = await git.resolveRef(ref)
-	return result.kind === 'resolved' ? result.oid : null
+	switch (result.kind) {
+		case 'resolved':
+			return result.oid
+		case 'proven-absent':
+			return null
+		case 'error':
+		case 'git-unavailable':
+			return { kind: 'ref-probe-error', message: result.message }
+	}
 }
 
+/**
+ * Same distinction as {@link resolveRefOidOrNull}, threaded into
+ * `validateBootstrap`'s `OperationStartRefState` input instead: folding a probe
+ * failure into `{ resolved: false }` previously let bootstrap validation
+ * proceed as though the ref simply had not resolved yet, silently skipping the
+ * required "no prior EF state" history check rather than reporting the probe
+ * failure (`EF-VAL-006`, applied by `validateBootstrap` itself).
+ */
 async function resolveRefStateOrUnresolved(git: GitRepository, ref: string): Promise<OperationStartRefState> {
 	const result = await git.resolveRef(ref)
-	return result.kind === 'resolved' ? { resolved: true, oid: result.oid } : { resolved: false }
+	switch (result.kind) {
+		case 'resolved':
+			return { resolved: true, oid: result.oid }
+		case 'proven-absent':
+			return { resolved: false }
+		case 'error':
+		case 'git-unavailable':
+			return { resolved: 'error', message: result.message }
+	}
 }

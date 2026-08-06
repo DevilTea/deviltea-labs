@@ -654,6 +654,56 @@ describe('runValidateCommand', () => {
 			.toContain('stub: cat-file -p transiently unavailable')
 	})
 
+	it('transition scope reports EF-VAL-006 (not EF-VAL-002) when the operation-start integration-ref probe itself fails', async () => {
+		// `git show-ref` (used only by `GitRepository#resolveRef`) is forced to
+		// fail here, simulating the `'error'`/`'git-unavailable'` `RefResolutionResult`
+		// kinds. Folding those into a bare `null` operationStartRefOid is
+		// indistinguishable from the ref genuinely never having resolved, so the
+		// CLI would previously misreport this as an ordinary EF-VAL-002 ref
+		// mismatch instead of surfacing the real probe failure (09-validation.md
+		// "An inaccessible ref ... makes the operation incomplete rather than
+		// eligible by assumption").
+		await writeMinimalProject(root)
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+		const baseline = commitAll(root, 'baseline')
+		git(root, ['checkout', '-q', '-b', 'feature'])
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+		await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: modifies, target: REQ-001 }]'))
+		const proposed = commitAll(root, 'proposed')
+		git(root, ['checkout', '-q', 'main'])
+
+		const flakyExecutor = withSelectiveFailure(createGitExecutor(), args => args[0] === 'show-ref', 'stub: show-ref transiently unavailable')
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('stub: show-ref transiently unavailable')
+	})
+
+	it('bootstrap scope reports EF-VAL-006 (not a silent proceed-as-unresolved) when the operation-start integration-ref probe itself fails', async () => {
+		// Same fault as above, but for bootstrap scope: previously, folding the
+		// probe failure into `{ resolved: false }` let bootstrap validation
+		// proceed as though the ref simply had not resolved yet, silently
+		// skipping the required "no prior EF state" history check instead of
+		// reporting the real probe failure.
+		git(root, ['checkout', '-q', '-b', 'bootstrap-branch'])
+		await writeMinimalProject(root)
+		const proposed = commitAll(root, 'bootstrap candidate')
+
+		const flakyExecutor = withSelectiveFailure(createGitExecutor(), args => args[0] === 'show-ref', 'stub: show-ref transiently unavailable')
+		const outcome = await runValidateCommand({ scope: 'bootstrap', proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('stub: show-ref transiently unavailable')
+	})
+
 	it('transition scope reports EF-VAL-002 when the baseline commit predates .engineering entirely (no ef.yaml in its tree)', async () => {
 		await writeFile(root, 'README.md', '# not an EF project yet\n')
 		const baseline = commitAll(root, 'pre-EF history')

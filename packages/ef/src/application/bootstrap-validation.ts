@@ -45,12 +45,20 @@ function makeDiagnostic(code: DiagnosticCode, message: string, options: { path?:
 // ---------------------------------------------------------------------------
 
 /**
- * The operation-start state of the candidate `integration_ref`: either it was
- * unresolved, or it resolved to `oid`. Mutable ref state is an explicit
- * caller-supplied input rather than re-resolved here (09-validation.md
- * "operation-start captured project-repository and local-ref state").
+ * The operation-start state of the candidate `integration_ref`: it was
+ * PROVEN unresolved (`resolved: false`), it resolved to `oid`, or the probe
+ * that was supposed to establish either fact failed (`resolved: 'error'`) --
+ * distinct from `resolved: false` and MUST NOT be treated as though the ref
+ * does not exist (09-validation.md "An inaccessible ref ... makes the
+ * operation incomplete rather than eligible by assumption"). Mutable ref
+ * state is an explicit caller-supplied input rather than re-resolved here
+ * (09-validation.md "operation-start captured project-repository and
+ * local-ref state").
  */
-export type OperationStartRefState = { resolved: true, oid: string } | { resolved: false }
+export type OperationStartRefState
+	= | { resolved: true, oid: string }
+		| { resolved: false }
+		| { resolved: 'error', message: string }
 
 export interface ValidateBootstrapInput {
 	git: GitRepository
@@ -78,7 +86,7 @@ function incompleteResult(
 export async function validateBootstrap(input: ValidateBootstrapInput): Promise<BootstrapValidationResult> {
 	const { git, proposedOid, operationStartRefState } = input
 	const policy = input.policy ?? DEFAULT_POLICY
-	const expectedRefOid = operationStartRefState.resolved ? operationStartRefState.oid : null
+	const expectedRefOid = operationStartRefState.resolved === true ? operationStartRefState.oid : null
 
 	// ---- Resolve and materialize the explicit proposed commit ---------------
 
@@ -117,12 +125,23 @@ export async function validateBootstrap(input: ValidateBootstrapInput): Promise<
 	}
 	const integrationRef = config.repository.integrationRef
 
+	// ---- Operation-start ref probe failure -----------------------------------
+	// A failed probe is neither a proven resolution nor a proven absence: it
+	// MUST make bootstrap incomplete, never fall through and be treated as
+	// though `integration_ref` does not exist.
+
+	if (operationStartRefState.resolved === 'error') {
+		return incompleteResult([
+			makeDiagnostic('EF-VAL-006', `Git is unavailable while resolving the integration ref '${integrationRef}' at the start of the operation: ${operationStartRefState.message}`),
+		], policy, { proposedOid: resolvedProposedOid, integrationRef, expectedRefOid: null })
+	}
+
 	// ---- Establish the required bootstrap history condition -----------------
 	// (09-validation.md "Bootstrap exception": the ref does not yet resolve, or
 	// resolves and no commit in its first-parent history contains
 	// `.engineering/ef.yaml`.)
 
-	const historyCheck = operationStartRefState.resolved
+	const historyCheck = operationStartRefState.resolved === true
 		? await checkNoPriorEfState(git, operationStartRefState.oid)
 		: undefined
 
@@ -153,7 +172,7 @@ export async function validateBootstrap(input: ValidateBootstrapInput): Promise<
 		], policy, { proposedOid: resolvedProposedOid, integrationRef, expectedRefOid })
 	}
 
-	if (operationStartRefState.resolved) {
+	if (operationStartRefState.resolved === true) {
 		if (firstParent.kind !== 'resolved' || firstParent.parentOid !== operationStartRefState.oid) {
 			return incompleteResult([
 				makeDiagnostic('EF-VAL-011', `Proposed bootstrap commit '${resolvedProposedOid}' does not use the captured ref tip '${operationStartRefState.oid}' as its first parent.`),

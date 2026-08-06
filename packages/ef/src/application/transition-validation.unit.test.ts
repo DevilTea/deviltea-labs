@@ -409,6 +409,33 @@ describe('validateTransition', () => {
 			.toContain('EF-VAL-002')
 	})
 
+	// FINDING A regression: a failed operation-start ref probe (Git ran but
+	// could not conclusively resolve `integration_ref` -- distinct from a
+	// genuine mismatch, which is a PROVEN fact) must be reported as
+	// incomplete with EF-VAL-006, not misclassified as an ordinary
+	// baseline-mismatch EF-VAL-002 (09-validation.md "An inaccessible ref ...
+	// makes the operation incomplete rather than eligible by assumption").
+	it('reports EF-VAL-006 (not EF-VAL-002 baseline-mismatch) when the operation-start ref probe failed', async () => {
+		await writeMinimalProject(tempDir)
+		const baselineOid = commitAll(tempDir, 'bootstrap')
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', status: 'draft' }))
+		const proposedOid = commitAll(tempDir, 'draft REQ-001')
+
+		const result = await validateTransition({
+			git: repo(),
+			baselineOid,
+			proposedOid,
+			operationStartRefOid: { kind: 'ref-probe-error', message: 'git show-ref --verify --quiet exited with status 128.' },
+		})
+
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-006'])
+	})
+
 	it('reports EF-VAL-002 when the proposed configuration changes the fixed integration_ref', async () => {
 		await writeMinimalProject(tempDir)
 		const baselineOid = commitAll(tempDir, 'bootstrap')

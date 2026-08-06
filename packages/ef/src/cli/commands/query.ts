@@ -21,6 +21,7 @@ import type { CommandOutcome } from '../command-outcome'
 import { executeQuery, incompleteInitializationQueryResult } from '../../application/query'
 import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
 import { validateSnapshot } from '../../application/snapshot-validation'
+import { severityOf } from '../../domain/diagnostic-codes'
 import { queryResultToJson } from '../envelopes'
 import { renderQueryHuman } from '../human-render'
 import { resolveProject } from '../project-context'
@@ -70,8 +71,34 @@ export async function runQueryCommand(request: QueryRequest, options: QueryComma
 	let history: QueryContext['history']
 	if (request.kind === 'history' && config) {
 		const refResult = await git.resolveRef(config.repository.integrationRef)
-		if (refResult.kind === 'resolved')
+		if (refResult.kind === 'resolved') {
 			history = { git, integrationRefOid: refResult.oid }
+		}
+		else if (refResult.kind === 'error' || refResult.kind === 'git-unavailable') {
+			// A failed probe is neither a proven resolution nor a proven absence
+			// (`'proven-absent'`, which legitimately falls through and lets
+			// `executeQuery`'s own generic "no history context" `EF-QRY-010`
+			// apply below): it MUST make history incomplete, with the actual Git
+			// failure surfaced, rather than silently collapsing into the same
+			// undifferentiated "history context unavailable" outcome as an
+			// ordinary unresolved ref (10-query-and-trace.md "the query fails
+			// with EF-QRY-010" for history that is "inaccessible ... or
+			// otherwise cannot be materialized completely"; parity with
+			// `validate.ts`'s `EF-VAL-006` messages for the same class of
+			// failure).
+			return outcomeFor({
+				schema: 'ef/query-result@1',
+				kind: 'history',
+				complete: false,
+				data: null,
+				diagnostics: [{
+					code: 'EF-QRY-010',
+					severity: severityOf('EF-QRY-010'),
+					message: `Git failed while resolving the integration ref '${config.repository.integrationRef}' required for history: ${refResult.message}`,
+					related: [],
+				}],
+			}, options.format, options.noColor)
+		}
 	}
 
 	const result = await executeQuery({ snapshot: loaded.snapshot, validation, history }, request)

@@ -123,6 +123,31 @@ Because relevance matters.
 - Ranking works.
 `
 
+const REQ_777_MISFILED = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-777
+title: Misfiled Requirement
+status: active
+summary: A well-formed, unambiguous requirement declared under the wrong filename.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Exercises EF-ID-005-only (filename does not match ID) staying ungated.
+
+## Rationale
+
+Confirms EF-ID-005 alone does not flip graphTrustworthy.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
 function supersessionReq(id: string, status: string, supersededBy?: string): string {
 	const relations = supersededBy
 		? `relations:\n  - type: superseded-by\n    target: ${supersededBy}\n`
@@ -230,7 +255,7 @@ Result: passed
 const REQ_GHOST_SRC = `---
 schema: ef/requirement@1
 type: requirement
-id: REQ-GHOST-SRC
+id: REQ-901
 title: Ghost Source
 status: active
 summary: A requirement with a dangling relation target, for graph-invalid tests.
@@ -257,7 +282,7 @@ Exercises EF-QRY-007.
 const REQ_GHOST_SUP = `---
 schema: ef/requirement@1
 type: requirement
-id: REQ-GHOST-SUP
+id: REQ-902
 title: Ghost Superseded
 status: superseded
 summary: A superseded requirement whose replacement does not exist, for invalid-graph tests.
@@ -284,7 +309,7 @@ Exercises EF-QRY-008 (invalid-graph).
 const ADR_REFERENCES_POL = `---
 schema: ef/decision@1
 type: decision
-id: ADR-REFERENCES-POL
+id: ADR-901
 title: References Policy
 status: active
 summary: A decision that references POL-001, for include_references tests.
@@ -558,6 +583,96 @@ describe('executeQuery', () => {
 			const result = await executeQuery(bad, { kind: 'lookup', id: '' })
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-001')
+		})
+
+		// Finding C (adjudicated ruling): the gate must also cover mandatory
+		// PROJECT identity failures (EF-ID-007/008), not just duplicate-ID/
+		// PROJECT-singleton/undecoded-file/layout conditions. Without this,
+		// `lookup PROJECT` returned the ordinary `complete: true, found: false`
+		// result, and `list`/`search` returned an otherwise-"complete"
+		// collection, even with no trustworthy PROJECT context loaded.
+
+		it('gates lookup PROJECT, list, and search when the required PROJECT Artifact is missing (EF-ID-007)', async () => {
+			await fs.rm(path.join(tempDir, '.engineering/PROJECT.md'))
+			const bad = await reloadContext()
+			expect(bad.validation.graphTrustworthy)
+				.toBe(false)
+
+			const lookup = await executeQuery(bad, { kind: 'lookup', id: 'PROJECT' })
+			expect(lookup.complete)
+				.toBe(false)
+			expect(lookup.data)
+				.toBeNull()
+			expect(lookup.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const list = await executeQuery(bad, { kind: 'list' })
+			expect(list.complete)
+				.toBe(false)
+			expect(list.data)
+				.toBeNull()
+			expect(list.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const search = await executeQuery(bad, { kind: 'search', terms: ['filtering'] })
+			expect(search.complete)
+				.toBe(false)
+			expect(search.data)
+				.toBeNull()
+			expect(search.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates lookup PROJECT, list, and search when PROJECT declares an ID other than PROJECT (EF-ID-008)', async () => {
+			await writeFile(tempDir, '.engineering/PROJECT.md', PROJECT_MD.replace('id: PROJECT', 'id: NOTPROJECT'))
+			const bad = await reloadContext()
+			expect(bad.validation.graphTrustworthy)
+				.toBe(false)
+
+			const lookup = await executeQuery(bad, { kind: 'lookup', id: 'PROJECT' })
+			expect(lookup.complete)
+				.toBe(false)
+			expect(lookup.data)
+				.toBeNull()
+			expect(lookup.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const list = await executeQuery(bad, { kind: 'list' })
+			expect(list.complete)
+				.toBe(false)
+			expect(list.data)
+				.toBeNull()
+			expect(list.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const search = await executeQuery(bad, { kind: 'search', terms: ['filtering'] })
+			expect(search.complete)
+				.toBe(false)
+			expect(search.data)
+				.toBeNull()
+			expect(search.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('stays ungated for an EF-ID-005-only filename mismatch: the declared ID is unique and decoded, so queries still succeed', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-999.md', REQ_777_MISFILED)
+			const ok = await reloadContext()
+			expect(ok.validation.graphTrustworthy)
+				.toBe(true)
+
+			const lookup = await executeQuery(ok, { kind: 'lookup', id: 'REQ-777' })
+			expect(lookup.complete)
+				.toBe(true)
+			expect(lookup.data?.found)
+				.toBe(true)
+
+			const list = await executeQuery(ok, { kind: 'list' })
+			expect(list.complete)
+				.toBe(true)
+
+			const search = await executeQuery(ok, { kind: 'search', terms: ['misfiled'] })
+			expect(search.complete)
+				.toBe(true)
 		})
 	})
 
@@ -856,10 +971,10 @@ describe('executeQuery', () => {
 		})
 
 		it('eF-QRY-007 when a returned edge references a dangling (non-existent) target', async () => {
-			await writeFile(tempDir, '.engineering/req/REQ-GHOST-SRC.md', REQ_GHOST_SRC)
+			await writeFile(tempDir, '.engineering/req/REQ-901.md', REQ_GHOST_SRC)
 			const ghostContext = await reloadContext()
 
-			const result = await executeQuery(ghostContext, { kind: 'relations', id: 'REQ-GHOST-SRC', types: ['derived-from'] })
+			const result = await executeQuery(ghostContext, { kind: 'relations', id: 'REQ-901', types: ['derived-from'] })
 			expect(result.complete)
 				.toBe(false)
 			expect(result.diagnostics[0]!.code)
@@ -935,10 +1050,10 @@ describe('executeQuery', () => {
 		})
 
 		it('eF-QRY-007 when traversal reaches a dangling (non-existent) target', async () => {
-			await writeFile(tempDir, '.engineering/req/REQ-GHOST-SRC.md', REQ_GHOST_SRC)
+			await writeFile(tempDir, '.engineering/req/REQ-901.md', REQ_GHOST_SRC)
 			const ghostContext = await reloadContext()
 
-			const result = await executeQuery(ghostContext, { kind: 'trace', roots: ['REQ-GHOST-SRC'], types: ['derived-from'], direction: 'outgoing', maxDepth: 1 })
+			const result = await executeQuery(ghostContext, { kind: 'trace', roots: ['REQ-901'], types: ['derived-from'], direction: 'outgoing', maxDepth: 1 })
 			expect(result.complete)
 				.toBe(false)
 			expect(result.diagnostics[0]!.code)
@@ -1005,25 +1120,25 @@ describe('executeQuery', () => {
 		})
 
 		it('include_references adds references edges to the impact traversal only when requested', async () => {
-			await writeFile(tempDir, '.engineering/adr/ADR-REFERENCES-POL.md', ADR_REFERENCES_POL)
+			await writeFile(tempDir, '.engineering/adr/ADR-901.md', ADR_REFERENCES_POL)
 			const referencesContext = await reloadContext()
 
 			const withoutReferences = await executeQuery(referencesContext, { kind: 'impact', roots: ['POL-001'], maxDepth: 1 })
 			expect(withoutReferences.data!.impact.nodes.map(n => n.artifact.id))
-				.not.toContain('ADR-REFERENCES-POL')
+				.not.toContain('ADR-901')
 
 			const withReferences = await executeQuery(referencesContext, { kind: 'impact', roots: ['POL-001'], maxDepth: 1, includeReferences: true })
 			expect(withReferences.data!.include_references)
 				.toBe(true)
 			expect(withReferences.data!.impact.nodes.map(n => n.artifact.id))
-				.toContain('ADR-REFERENCES-POL')
+				.toContain('ADR-901')
 		})
 
 		it('eF-QRY-008 when resolve_current reaches an invalid supersession graph (dangling replacement)', async () => {
-			await writeFile(tempDir, '.engineering/req/REQ-GHOST-SUP.md', REQ_GHOST_SUP)
+			await writeFile(tempDir, '.engineering/req/REQ-902.md', REQ_GHOST_SUP)
 			const ghostContext = await reloadContext()
 
-			const result = await executeQuery(ghostContext, { kind: 'impact', roots: ['REQ-GHOST-SUP'], maxDepth: 1, resolveCurrent: true })
+			const result = await executeQuery(ghostContext, { kind: 'impact', roots: ['REQ-902'], maxDepth: 1, resolveCurrent: true })
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-008')
 		})
@@ -1093,10 +1208,10 @@ describe('executeQuery', () => {
 		})
 
 		it('eF-QRY-008 for an invalid supersession graph (dangling replacement)', async () => {
-			await writeFile(tempDir, '.engineering/req/REQ-GHOST-SUP.md', REQ_GHOST_SUP)
+			await writeFile(tempDir, '.engineering/req/REQ-902.md', REQ_GHOST_SUP)
 			const ghostContext = await reloadContext()
 
-			const result = await executeQuery(ghostContext, { kind: 'resolve-current', id: 'REQ-GHOST-SUP' })
+			const result = await executeQuery(ghostContext, { kind: 'resolve-current', id: 'REQ-902' })
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-008')
 		})
