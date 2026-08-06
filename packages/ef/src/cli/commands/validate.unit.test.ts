@@ -82,6 +82,29 @@ function withFirstMatchingCallFailure(base: GitExecutor, shouldFail: (args: read
 	}
 }
 
+/**
+ * Wraps a real executor, running `sideEffect` once, immediately BEFORE the
+ * first `execIn` call matching `matches`, then passing that call through to
+ * the real executor unchanged. Used to simulate an in-place rewrite of
+ * `.engineering/ef.yaml` landing exactly in the window between project
+ * discovery's own read of the file (which happens synchronously before
+ * `discoverProject`'s `findWorktreeRoot` call) and a later, separate read
+ * (`loadSnapshotFromWorkingTree`'s own) -- Finding 3.
+ */
+function withSideEffectBeforeCall(base: GitExecutor, matches: (args: readonly string[]) => boolean, sideEffect: () => Promise<void>): GitExecutor {
+	let triggered = false
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: async (root, args, options): Promise<GitExecOutcome> => {
+			if (!triggered && matches(args)) {
+				triggered = true
+				await sideEffect()
+			}
+			return base.execIn(root, args, options)
+		},
+	}
+}
+
 const GIT_TEST_ENV = {
 	GIT_AUTHOR_NAME: 'EF Test',
 	GIT_AUTHOR_EMAIL: 'ef-test@example.com',
@@ -91,6 +114,37 @@ const GIT_TEST_ENV = {
 
 function git(dir: string, args: string[]): string {
 	return execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+}
+
+/** Like {@link git}, but feeds `input` to the process's STDIN. */
+function gitWithStdin(dir: string, args: string[], input: string): string {
+	return execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, input, encoding: 'utf8' })
+}
+
+/**
+ * Stage `.engineering/ef.yaml` in the index as a symlink (Git mode `120000`)
+ * whose blob content is `targetText` -- via `git update-index --add
+ * --cacheinfo`, without ever creating a real filesystem symlink. `ls-tree`
+ * reports this entry's `type` as `blob`, identical to an ordinary file; only
+ * its MODE reveals it is a symlink (Finding 5's fixture requirement).
+ */
+function stageSymlinkModeConfig(dir: string, targetText: string): void {
+	const blobOid = gitWithStdin(dir, ['hash-object', '-w', '--stdin'], targetText)
+		.trim()
+	git(dir, ['update-index', '--add', '--cacheinfo', `120000,${blobOid},.engineering/ef.yaml`])
+}
+
+/** `git write-tree`: materialize the current index as a tree object, returning its OID. */
+function writeTreeOid(dir: string): string {
+	return git(dir, ['write-tree'])
+		.trim()
+}
+
+/** `git commit-tree`: create a commit for `treeOid` (optionally with `parentOid`) without touching any ref, returning its OID. */
+function commitTreeOid(dir: string, treeOid: string, message: string, parentOid?: string): string {
+	const args = parentOid !== undefined ? ['commit-tree', treeOid, '-p', parentOid, '-m', message] : ['commit-tree', treeOid, '-m', message]
+	return git(dir, args)
+		.trim()
 }
 
 function commitAll(dir: string, message: string): string {
@@ -673,6 +727,46 @@ describe('runValidateCommand', () => {
 			.toBe(true)
 	})
 
+	// ---- Finding 3: single observation for the ref summary and --workspace --
+
+	it('snapshot scope uses the config materialized by the snapshot load -- not project discovery\'s own earlier read -- for the ref summary and --workspace checks', async () => {
+		await writeMinimalProject(root) // integration_ref: refs/heads/main, linked_repositories: []
+		commitAll(root, 'bootstrap')
+
+		const rewrittenConfig = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/other
+linked_repositories:
+  - id: missing-repo
+    path: vendor/missing-repo
+    role: implementation
+    required: true
+schemas:
+  artifact_write_major: 1
+`
+		// Project discovery's OWN read of `.engineering/ef.yaml` happens
+		// synchronously before `discoverProject` calls `findWorktreeRoot`
+		// (`rev-parse --show-toplevel`); triggering the rewrite here simulates
+		// an in-place rewrite landing exactly in the window between that read
+		// and `loadSnapshotFromWorkingTree`'s own, later, separate read.
+		const executor = withSideEffectBeforeCall(
+			createGitExecutor(),
+			args => args[0] === 'rev-parse' && args[1] === '--show-toplevel',
+			async () => { await fs.writeFile(path.join(root, '.engineering', 'ef.yaml'), rewrittenConfig) },
+		)
+
+		const outcome = await runValidateCommand({ scope: 'snapshot', strict: false, warningsAsErrors: false, workspace: true, format: 'json', noColor: false }, { cwd: root, executor })
+		const json = JSON.parse(outcome.stdout as string)
+		// If discovery's stale (empty-linked-repositories, `refs/heads/main`)
+		// read governed these instead of the snapshot load's fresher read,
+		// `integration_ref` would still read `refs/heads/main` and no
+		// `EF-FS-007` would ever be reported.
+		expect(json.integration_ref)
+			.toBe('refs/heads/other')
+		expect(json.diagnostics.some((d: { code: string }) => d.code === 'EF-FS-007'))
+			.toBe(true)
+	})
+
 	// ---- Transition scope: `peekConfigAt` (baseline config peek) edge cases ----
 
 	it('transition scope reports EF-VAL-006 when Git becomes unavailable while reading the baseline tree', async () => {
@@ -948,6 +1042,77 @@ describe('runValidateCommand', () => {
 			.toBe(false)
 		expect(outcome.exitCode)
 			.toBe(1)
+	})
+
+	// ---- Finding 5: mode-120000 (symlink) ef.yaml at a probed commit --------
+
+	it('transition scope reports EF-VAL-006 (not a trusted ref state) when the baseline\'s ef.yaml is a symlink (mode 120000) whose target text is otherwise valid config', async () => {
+		await writeMinimalProject(root)
+		git(root, ['add', '-A'])
+		// `ls-tree` reports this entry's `type` as `blob`, identical to an
+		// ordinary file -- only its mode (`120000`) reveals it is a symlink.
+		// Its "content" is otherwise syntactically valid config YAML text,
+		// exactly what a mode-blind peek would decode and trust as though it
+		// were the baseline's real configuration.
+		stageSymlinkModeConfig(root, CONFIG_YAML)
+		const baselineTree = writeTreeOid(root)
+		const baseline = commitTreeOid(root, baselineTree, 'baseline with symlinked config')
+
+		// An ordinary, honest proposed commit: `commitAll`'s `git add -A`
+		// restages the real (unmodified, ordinary-file) working-tree
+		// `ef.yaml`, overwriting the crafted index entry above --
+		// `baseline`'s already-written tree object is unaffected.
+		const proposed = commitAll(root, 'proposed')
+
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.diagnostics.some((d: { code: string, message: string }) => d.code === 'EF-VAL-006' && d.message.includes('not a regular file')))
+			.toBe(true)
+	})
+
+	it('bootstrap scope reports EF-VAL-006 (not a trusted ref state) when the proposed commit\'s ef.yaml is a symlink (mode 120000) whose target text is otherwise valid config', async () => {
+		await writeMinimalProject(root)
+		git(root, ['add', '-A'])
+		stageSymlinkModeConfig(root, CONFIG_YAML)
+		const proposedTree = writeTreeOid(root)
+		const proposed = commitTreeOid(root, proposedTree, 'proposed with symlinked config')
+
+		const outcome = await runValidateCommand({ scope: 'bootstrap', proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.diagnostics.some((d: { code: string, message: string }) => d.code === 'EF-VAL-006' && d.message.includes('not a regular file')))
+			.toBe(true)
+	})
+
+	it('transition scope with --workspace reports EF-VAL-006 (not a silently empty linked-repositories fallback) when the proposed commit\'s ef.yaml is a symlink (mode 120000)', async () => {
+		await writeMinimalProject(root)
+		const baseline = commitAll(root, 'baseline')
+		// The proposed candidate is a dangling commit built directly from
+		// plumbing on top of the current (already committed) index, never
+		// checked out onto any branch, so the real working tree is never
+		// disturbed. Its first parent is explicitly `baseline` --
+		// `validateTransition` requires exactly that parentage before this
+		// command's `--workspace` check (and this test's `peekConfigAt` probe)
+		// is ever reached.
+		stageSymlinkModeConfig(root, CONFIG_YAML)
+		const proposedTree = writeTreeOid(root)
+		const proposed = commitTreeOid(root, proposedTree, 'proposed with symlinked config', baseline)
+
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: true, format: 'json', noColor: false }, deps())
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.workspace)
+			.toBe(true)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.diagnostics.some((d: { code: string, message: string }) => d.code === 'EF-VAL-006' && d.message.includes('not a regular file')))
+			.toBe(true)
 	})
 
 	// ---- Commit-bound `--project` exception (11-filesystem-and-config.md ----

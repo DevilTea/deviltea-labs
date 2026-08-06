@@ -121,7 +121,36 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 		return { kind: 'not-a-directory', path: engineeringPath }
 
 	const efYamlPath = path.join(engineeringPath, 'ef.yaml')
-	const initMarkerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+	const tmpPath = path.join(engineeringPath, '.tmp')
+	const initMarkerPath = path.join(tmpPath, 'init-state.json')
+
+	// `containmentRoot: candidateRoot` on the `ef.yaml` read binds it to an
+	// ancestor-verified `.engineering`: identity binding on the target file
+	// alone cannot catch `.engineering` itself being moved out of the project
+	// and symlinked back to that exact (relocated) directory (see
+	// `platform/fs-facts.ts`'s `readRegularFileNoFollow` doc), which leaves the
+	// file's own `dev`/`ino` unchanged even though it is now reached through a
+	// forbidden ancestor symlink. This is safe here specifically because
+	// `.engineering` was JUST proven to be a real, non-symlink directory by the
+	// `isDirectory` check above.
+	//
+	// The init-marker read cannot unconditionally receive the same
+	// `containmentRoot`, though: `.tmp` is only ever present during an actual
+	// incomplete initialization, and `readRegularFileNoFollow`'s ancestor
+	// verification treats a WHOLLY ABSENT ancestor identically to a forbidden
+	// (non-directory) one -- applying it unconditionally would misreport
+	// `identity-mismatch` (never `not-found`) for the overwhelmingly common
+	// case of no `.tmp` at all, turning every ordinary, fully-initialized
+	// project into a false `incomplete-initialization`. Gating on mere
+	// existence first (`pathExists`, not `isDirectory`) still catches the
+	// attack this protection exists for: a `.tmp` REPLACED BY a symlink is
+	// itself "something existing" at that path, so `containmentRoot` is still
+	// applied in exactly that case, and its ancestor verification then
+	// correctly refuses the read as `identity-mismatch` for `.tmp` being a
+	// symlink rather than a real directory -- rather than silently following
+	// it through to whatever it now resolves to.
+	const tmpAncestorExists = await pathExists(tmpPath)
+
 	// Both reads happen once, up front: `readRegularFileNoFollow` lstat's the
 	// entry, then opens and `fstat`s it without following a symlink at the
 	// final path component (Finding: `.engineering/ef.yaml` -> a symlink to a
@@ -131,8 +160,8 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 	// regular file -- are captured now and reused below rather than reopened
 	// by path a second time.
 	const [efYamlRead, initMarkerRead] = await Promise.all([
-		readRegularFileNoFollow(efYamlPath),
-		readRegularFileNoFollow(initMarkerPath),
+		readRegularFileNoFollow(efYamlPath, undefined, candidateRoot),
+		readRegularFileNoFollow(initMarkerPath, undefined, tmpAncestorExists ? candidateRoot : undefined),
 	])
 	const hasEfYaml = efYamlRead.kind !== 'not-found'
 	const hasInitMarker = initMarkerRead.kind !== 'not-found'

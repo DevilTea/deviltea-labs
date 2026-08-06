@@ -19,6 +19,29 @@ function withSelectiveFailure(base: GitExecutor, shouldFail: (args: readonly str
 	}
 }
 
+/**
+ * Wraps a real executor, running `sideEffect` once, immediately BEFORE the
+ * first `execIn` call matching `matches`, then passing that call through to
+ * the real executor unchanged. Used to simulate an in-place rewrite of
+ * `.engineering/ef.yaml` landing exactly in the window between project
+ * discovery's own read of the file (which happens synchronously before
+ * `discoverProject`'s `findWorktreeRoot` call) and a later, separate read
+ * (`loadSnapshotFromWorkingTree`'s own) -- Finding 3.
+ */
+function withSideEffectBeforeCall(base: GitExecutor, matches: (args: readonly string[]) => boolean, sideEffect: () => Promise<void>): GitExecutor {
+	let triggered = false
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: async (root, args, options): Promise<GitExecOutcome> => {
+			if (!triggered && matches(args)) {
+				triggered = true
+				await sideEffect()
+			}
+			return base.execIn(root, args, options)
+		},
+	}
+}
+
 const GIT_TEST_ENV = {
 	GIT_AUTHOR_NAME: 'EF Test',
 	GIT_AUTHOR_EMAIL: 'ef-test@example.com',
@@ -327,5 +350,41 @@ describe('runQueryCommand', () => {
 			.toBeNull()
 		expect(json.diagnostics[0].code)
 			.toBe('EF-QRY-013')
+	})
+
+	// ---- Finding 3: single observation for history's integration ref --------
+
+	it('uses the integration ref materialized by the snapshot load for history, not project discovery\'s own earlier read of the same file', async () => {
+		await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML) // integration_ref: refs/heads/main
+		await writeFile(root, '.engineering/.gitignore', GITIGNORE)
+		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
+		commitAll(root, 'bootstrap')
+
+		const rewrittenConfig = CONFIG_YAML.replace('refs/heads/main', 'refs/heads/does-not-exist')
+		// Project discovery's OWN read of `.engineering/ef.yaml` happens
+		// synchronously before `discoverProject` calls `findWorktreeRoot`
+		// (`rev-parse --show-toplevel`); triggering the rewrite here simulates
+		// an in-place rewrite landing exactly in the window between that read
+		// and `loadSnapshotFromWorkingTree`'s own, later, separate read.
+		const executor = withSideEffectBeforeCall(
+			createGitExecutor(),
+			args => args[0] === 'rev-parse' && args[1] === '--show-toplevel',
+			async () => { await fs.writeFile(path.join(root, '.engineering', 'ef.yaml'), rewrittenConfig) },
+		)
+
+		const outcome = await runQueryCommand({ kind: 'history', id: 'PROJECT' }, { format: 'json', noColor: false }, { cwd: root, executor })
+		// If discovery's stale `refs/heads/main` (which DOES resolve, since
+		// the fixture committed to `main`) governed history's ref instead of
+		// the snapshot load's fresher read, this would incorrectly succeed
+		// (exit 0, EF-QRY-010 absent). The single observation this command
+		// must use is the rewritten `refs/heads/does-not-exist`, which does
+		// NOT resolve, so `EF-QRY-010` is required instead.
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-QRY-010')
 	})
 })

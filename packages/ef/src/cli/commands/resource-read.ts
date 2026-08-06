@@ -25,8 +25,7 @@ import path from 'pathe'
 import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
 import { validateSnapshot } from '../../application/snapshot-validation'
 import { validateResourceDescriptors } from '../../domain/resources'
-import { isRegularFile, isSymlink, readFileBytes } from '../../platform/fs-facts'
-import { pathComponents } from '../../repository/symlinks'
+import { readRegularFileNoFollow } from '../../platform/fs-facts'
 import { resolveProject } from '../project-context'
 
 /**
@@ -130,35 +129,55 @@ export async function runResourceReadCommand(ownerId: string, location: string, 
 
 	const absolutePath = path.join(root, location)
 
-	// lstat every existing path component from `.engineering` down to the file
-	// itself: a symlinked ancestor directory (e.g. `.engineering/resources/
-	// REQ-001` replaced with a symlink to an external directory) is just as
-	// much a forbidden symlink as the final component being one, even though
-	// the final component's own `lstat` would report a plain file.
-	for (const component of pathComponents(location)) {
-		if (await isSymlink(path.join(root, component)))
-			return failure(1, `Managed path '${component}' is a forbidden symlink.`)
-	}
-
-	// `isRegularFile` alone resolves `absolutePath` through the live
-	// filesystem, which on a case-insensitive (but case-preserving)
-	// filesystem happily finds a file whose actual on-disk name differs from
-	// `location` in case or Unicode normalization -- exactly the mismatch
-	// repository integrity forbids. `loaded.snapshot.entryKinds` was built
-	// from an exact-string-keyed, case-preserving directory listing
-	// (`walkDirectory`'s real `readdir` entries), so requiring `location`
-	// itself to be a key of it closes that gap without any live filesystem
-	// case-folding involved.
-	if (loaded.snapshot.entryKinds.get(location) !== 'file' || !(await isRegularFile(absolutePath)))
+	// `loaded.snapshot.entryKinds` was built from an exact-string-keyed,
+	// case-preserving directory listing (`walkDirectory`'s real `readdir`
+	// entries; a symlinked ancestor is recorded as `'symlink'` and never
+	// descended into, so nothing beneath it is ever recorded as `'file'`
+	// either). Requiring `location` itself to be a `'file'` key of it closes
+	// the gap that resolving `absolutePath` through the live filesystem alone
+	// cannot: a file whose actual on-disk name differs from `location` only in
+	// case or Unicode normalization on a case-insensitive (but
+	// case-preserving) filesystem.
+	if (loaded.snapshot.entryKinds.get(location) !== 'file')
 		return failure(1, `Managed local file '${location}' is missing or is not a regular file.`)
 
-	// ---- (6) the file is readable ---------------------------------------------
-
+	// ---- (5)/(6) the managed path is not a forbidden symlink, and the file --
+	// ---- is readable ------------------------------------------------------------
+	//
+	// `readRegularFileNoFollow` re-verifies all of this live, right before the
+	// read, rather than relying solely on the snapshot's (by-now possibly
+	// stale) observation above: `lstat` classifies `absolutePath` itself
+	// before ever opening it (a symlink, directory, FIFO, socket, or device is
+	// refused outright), the file is then opened with `O_NOFOLLOW`, and --
+	// via `containmentRoot: root` -- every directory component between the
+	// project root and `absolutePath` (e.g. a `.engineering/resources/
+	// REQ-001` replaced with a symlink to an external directory, even though
+	// the final component reached through it is a perfectly ordinary file) is
+	// `lstat`'d as a non-symlink directory both before and after the read
+	// (13-cli-contract.md's "The managed path or its state violates
+	// repository integrity, such as a forbidden symlink" row; see
+	// `platform/fs-facts.ts`'s `readRegularFileNoFollow` doc for exactly what
+	// this closes that a one-shot symlink check right before the read cannot:
+	// the entry being swapped in the narrow window between that check and the
+	// read itself).
+	let readResult
 	try {
-		const bytes = await readFileBytes(absolutePath)
-		return { exitCode: 0, stdout: bytes, stderr: '' }
+		readResult = await readRegularFileNoFollow(absolutePath, undefined, root)
 	}
 	catch (error) {
 		return failure(2, `Managed local file '${location}' could not be read: ${(error as Error).message}`)
 	}
+
+	if (readResult.kind === 'ok')
+		return { exitCode: 0, stdout: readResult.bytes, stderr: '' }
+
+	if (readResult.kind === 'not-found')
+		return failure(1, `Managed local file '${location}' is missing or is not a regular file.`)
+
+	// `readResult.kind` is `'not-a-regular-file'` (a symlink -- or any other
+	// non-regular entry -- at the final component) or `'identity-mismatch'`
+	// (a forbidden ancestor symlink, or the entry replaced between being
+	// observed and being opened): both are repository-integrity violations
+	// under 13-cli-contract.md's "forbidden symlink" row.
+	return failure(1, `Managed path '${location}' violates repository integrity: it is a forbidden symlink, or was replaced between being observed and being read.`)
 }

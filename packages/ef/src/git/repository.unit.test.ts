@@ -72,6 +72,49 @@ function initRepo(): string {
 	return dir
 }
 
+/**
+ * Write `content` to the object database via `git hash-object -w --stdin`,
+ * returning the resulting blob OID. Unlike {@link writeTrackedFile}, this
+ * never touches the working tree or index by path, so it composes with
+ * {@link addRawIndexEntry}'s raw-byte path injection below (Finding 4/5
+ * fixtures) without any working-tree path ever needing to hold the exact
+ * bytes under test.
+ */
+function hashObjectFromStdin(dir: string, content: Buffer): string {
+	return execFileSync('git', ['-C', dir, 'hash-object', '-w', '--stdin'], { env: { ...process.env, ...GIT_TEST_ENV }, input: content, encoding: 'utf8' })
+		.trim()
+}
+
+/**
+ * Stage one index entry whose PATH is exactly `pathBytes` -- which may
+ * contain byte sequences that are not valid UTF-8 -- via `git update-index
+ * --index-info`. Node's `child_process` API accepts only JS strings (never
+ * raw bytes) as argv, so a path containing invalid UTF-8 cannot be passed as
+ * a normal CLI argument; feeding the index-info line to the process's STDIN
+ * as a `Buffer` sidesteps that entirely (Finding 4's fixture requirement).
+ */
+function addRawIndexEntry(dir: string, mode: string, blobOid: string, pathBytes: Buffer): void {
+	const line = Buffer.concat([Buffer.from(`${mode} blob ${blobOid}\t`), pathBytes, Buffer.from('\n')])
+	execFileSync('git', ['-C', dir, 'update-index', '--add', '--index-info'], { env: { ...process.env, ...GIT_TEST_ENV }, input: line })
+}
+
+/** Stage one index entry at an ordinary (ASCII) `path` with an explicit `mode` -- e.g. `120000` for a symlink -- via `git update-index --add --cacheinfo`, without ever creating a real filesystem symlink (Finding 5's fixture requirement). */
+function addCacheinfoEntry(dir: string, mode: string, blobOid: string, path: string): void {
+	execFileSync('git', ['-C', dir, 'update-index', '--add', '--cacheinfo', `${mode},${blobOid},${path}`], { env: { ...process.env, ...GIT_TEST_ENV } })
+}
+
+/** `git write-tree`: materialize the current index as a tree object, returning its OID. */
+function writeTreeOid(dir: string): string {
+	return execFileSync('git', ['-C', dir, 'write-tree'], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+		.trim()
+}
+
+/** `git commit-tree`: create a parentless commit for `treeOid`, returning its OID. */
+function commitTreeOid(dir: string, treeOid: string, message: string): string {
+	return execFileSync('git', ['-C', dir, 'commit-tree', treeOid, '-m', message], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+		.trim()
+}
+
 describe('gitRepository', () => {
 	let executor: GitExecutor
 	const tempDirs: string[] = []
@@ -473,6 +516,94 @@ describe('gitRepository', () => {
 			expect(result)
 				.toEqual({ kind: 'missing' })
 		})
+
+		it('reports the raw mode for a symlink entry, unchanged from an ordinary blob\'s mode (Finding 5 foundation: ls-tree reports both as type "blob")', async () => {
+			const dir = initRepo()
+			const targetBlobOid = hashObjectFromStdin(dir, Buffer.from('irrelevant symlink target text'))
+			addCacheinfoEntry(dir, '120000', targetBlobOid, 'a-symlink')
+			const treeOid = writeTreeOid(dir)
+			const commitOid = commitTreeOid(dir, treeOid, 'symlink entry')
+
+			const result = await repo(dir)
+				.readTree(commitOid)
+			expect(result.kind)
+				.toBe('resolved')
+			if (result.kind !== 'resolved')
+				return
+			const entry = result.entries.find(e => e.path === 'a-symlink')
+			expect(entry)
+				.toMatchObject({ mode: '120000', type: 'blob' })
+		})
+
+		// ---- Finding 4: invalid UTF-8 path bytes --------------------------------
+
+		it('decodes a raw path containing invalid UTF-8 bytes as a typed invalid-path entry, never a lossy replacement-character string', async () => {
+			const dir = initRepo()
+			const blobOid = hashObjectFromStdin(dir, Buffer.from('content\n'))
+			const invalidPathBytes = Buffer.concat([Buffer.from('bad-'), Buffer.from([0xFF, 0xFE]), Buffer.from('-name.txt')])
+			addRawIndexEntry(dir, '100644', blobOid, invalidPathBytes)
+			const treeOid = writeTreeOid(dir)
+			const commitOid = commitTreeOid(dir, treeOid, 'invalid path')
+
+			const result = await repo(dir)
+				.readTree(commitOid)
+			expect(result.kind)
+				.toBe('resolved')
+			if (result.kind !== 'resolved')
+				return
+
+			const entry = result.entries.find(e => e.pathValid === false)
+			expect(entry)
+				.toBeDefined()
+			expect(entry!.pathBytes)
+				.toEqual(new Uint8Array(invalidPathBytes))
+			// Never the lossy `Buffer#toString('utf8')` replacement-character
+			// decoding of the same raw bytes (the previous implementation).
+			expect(entry!.path)
+				.not.toBe(invalidPathBytes.toString('utf8'))
+			// Never masquerades as (i.e. is never string-equal to) a genuine,
+			// ordinary project path.
+			expect(entry!.path)
+				.not.toBe('.engineering/ef.yaml')
+		})
+
+		it('assigns distinct paths to two byte-distinct invalid paths that the previous lossy decode would have aliased onto the identical replacement-character string', async () => {
+			const dir = initRepo()
+			const blobOidA = hashObjectFromStdin(dir, Buffer.from('content-a\n'))
+			const blobOidB = hashObjectFromStdin(dir, Buffer.from('content-b\n'))
+			// Both `0xFF` and `0xFE` are, standing alone, invalid UTF-8 lead
+			// bytes; `Buffer#toString('utf8')` replaces each with the identical
+			// single U+FFFD character, so the previous implementation's `path`
+			// for both entries below would have been the byte-identical string
+			// `'same-�name.txt'` -- silently aliasing two DIFFERENT Git
+			// blobs onto the same map key in any downstream consumer keyed by
+			// `path` (e.g. `application/snapshot.ts`'s `entryKinds`).
+			const pathA = Buffer.concat([Buffer.from('same-'), Buffer.from([0xFF]), Buffer.from('name.txt')])
+			const pathB = Buffer.concat([Buffer.from('same-'), Buffer.from([0xFE]), Buffer.from('name.txt')])
+			expect(pathA.toString('utf8'))
+				.toBe(pathB.toString('utf8'))
+			addRawIndexEntry(dir, '100644', blobOidA, pathA)
+			addRawIndexEntry(dir, '100644', blobOidB, pathB)
+			const treeOid = writeTreeOid(dir)
+			const commitOid = commitTreeOid(dir, treeOid, 'collision')
+
+			const result = await repo(dir)
+				.readTree(commitOid)
+			expect(result.kind)
+				.toBe('resolved')
+			if (result.kind !== 'resolved')
+				return
+
+			const invalidEntries = result.entries.filter(e => e.pathValid === false)
+			expect(invalidEntries)
+				.toHaveLength(2)
+			const paths = new Set(invalidEntries.map(e => e.path))
+			expect(paths.size)
+				.toBe(2)
+			const oidsByPath = new Map(invalidEntries.map(e => [e.path, e.oid]))
+			expect(new Set(oidsByPath.values()))
+				.toEqual(new Set([blobOidA, blobOidB]))
+		})
 	})
 
 	// -------------------------------------------------------------------------
@@ -829,6 +960,36 @@ describe('gitRepository', () => {
 				.diffTrees(before, '0'.repeat(40))
 			expect(result)
 				.toEqual({ kind: 'invalid-object' })
+		})
+
+		it('decodes an added path containing invalid UTF-8 bytes as a typed invalid-path entry, never a lossy replacement-character string (Finding 4)', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			const before = commitAll(dir, 'before')
+
+			const blobOid = hashObjectFromStdin(dir, Buffer.from('content\n'))
+			const invalidPathBytes = Buffer.concat([Buffer.from('bad-'), Buffer.from([0xFF, 0xFE]), Buffer.from('-name.txt')])
+			// The index already reflects `before`'s tree exactly (`commitAll`
+			// just committed it); adding one more raw-byte entry on top makes
+			// the next `write-tree` produce `before`'s tree plus this addition.
+			addRawIndexEntry(dir, '100644', blobOid, invalidPathBytes)
+			const afterTreeOid = writeTreeOid(dir)
+			const after = commitTreeOid(dir, afterTreeOid, 'invalid path added')
+
+			const result = await repo(dir)
+				.diffTrees(before, after)
+			expect(result.kind)
+				.toBe('resolved')
+			if (result.kind !== 'resolved')
+				return
+
+			const entry = result.entries.find(e => e.pathValid === false)
+			expect(entry)
+				.toMatchObject({ status: 'A' })
+			expect(entry!.pathBytes)
+				.toEqual(new Uint8Array(invalidPathBytes))
+			expect(entry!.path)
+				.not.toBe(invalidPathBytes.toString('utf8'))
 		})
 	})
 

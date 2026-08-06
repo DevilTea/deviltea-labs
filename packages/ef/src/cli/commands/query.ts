@@ -60,13 +60,25 @@ export async function runQueryCommand(request: QueryRequest, options: QueryComma
 	if (!resolved.ok)
 		return outcomeFor(projectResolutionFailureResult(request.kind), options.format, options.noColor)
 
-	const { root, config, git } = resolved.context
+	// `resolved.context.config` (project resolution's own, separate read of
+	// `.engineering/ef.yaml`) is deliberately never consulted below (Finding
+	// 3): an in-place rewrite landing between that read and
+	// `loadSnapshotFromWorkingTree`'s later, separate read of the same file
+	// would otherwise let history's integration ref derive from a DIFFERENT
+	// observation than the one the graph below was actually validated
+	// against -- e.g. history resolved against ref A while validation/query
+	// proceeds over a working-tree snapshot that itself declares ref B. Every
+	// config-dependent command semantic here derives exclusively from
+	// `loaded.snapshot.config.config`, the single, freshest observation the
+	// queried snapshot was itself built from.
+	const { root, git } = resolved.context
 
 	const loaded = await loadSnapshotFromWorkingTree(root)
 	if (!loaded.ok)
 		return outcomeFor(projectResolutionFailureResult(request.kind), options.format, options.noColor)
 
 	const validation = validateSnapshot(loaded.snapshot)
+	const config = loaded.snapshot.config.config
 
 	let history: QueryContext['history']
 	if (request.kind === 'history' && config) {

@@ -676,4 +676,114 @@ describe('applyInitPlan', () => {
 		expect(stillThere)
 			.toBe(leftoverMarker)
 	})
+
+	// FINDING 2 (P0): the exclusive claim proves ownership only at that one
+	// instant. Every step after it is pathname-based, so renaming the claimed
+	// `.engineering` directory outside the project and symlinking the
+	// original path back to it makes every subsequent write land outside,
+	// while byte/nonce verification alone can still pass and `applied: true`
+	// still be reported. `verifyClaimIntact` must catch this before every
+	// remaining write/read step.
+	describe('claimed-directory identity binding (Finding 2 regression)', () => {
+		function outsidePath(): string {
+			return path.join(os.tmpdir(), `ef-init-swap-outside-${Date.now()}-${Math.random()
+				.toString(36)
+				.slice(2)}`)
+		}
+
+		it('aborts without writing outside when the claim is swapped for a symlink immediately before marker creation', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const tmpPath = path.join(engineeringPath, '.tmp')
+			const outsideDir = outsidePath()
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				mkdir: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.mkdir(targetPath)
+					if (targetPath === tmpPath) {
+						// The reviewer's exact reproduction, timed to land the instant
+						// after `.tmp` exists, strictly before the marker would be
+						// written: rename the whole claimed directory outside the
+						// project, then symlink the original path back to it.
+						await fs.rename(engineeringPath, outsideDir)
+						await fs.symlink(outsideDir, engineeringPath, 'dir')
+					}
+				},
+			}
+
+			try {
+				const result = await applyInitPlan(plan, deps)
+
+				expect(result.applied)
+					.toBe(false)
+				expect(result.applied === false && result.outcome)
+					.toBe('incomplete')
+
+				// The marker -- and every planned file -- must never have been
+				// written outside: the swap is caught before `writeInitMarker` (and
+				// everything after it) is ever invoked.
+				expect(await fs.readdir(outsideDir))
+					.toEqual(['.tmp'])
+				expect(await fs.readdir(path.join(outsideDir, '.tmp')))
+					.toEqual([])
+
+				// Cleanup removed only the dangling symlink left at the claimed
+				// path; the relocated original directory was never touched.
+				await expect(fs.lstat(engineeringPath))
+					.rejects.toThrow()
+			}
+			finally {
+				await fs.rm(outsideDir, { recursive: true, force: true })
+			}
+		})
+
+		it('aborts without publishing any file outside when the claim is swapped for a symlink immediately before file publication', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const lastDir = plan.directories[plan.directories.length - 1]!
+			const lastDirPath = path.join(tempDir, lastDir)
+			const outsideDir = outsidePath()
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				mkdir: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.mkdir(targetPath)
+					if (targetPath === lastDirPath) {
+						// Timed to land the instant after every planned directory
+						// exists, strictly before the first file is published.
+						await fs.rename(engineeringPath, outsideDir)
+						await fs.symlink(outsideDir, engineeringPath, 'dir')
+					}
+				},
+			}
+
+			try {
+				const result = await applyInitPlan(plan, deps)
+
+				expect(result.applied)
+					.toBe(false)
+				expect(result.applied === false && result.outcome)
+					.toBe('incomplete')
+
+				// Every planned directory (created before the swap) and the marker
+				// (written before the swap) are present outside -- but no planned
+				// file is: the swap is caught before the first `createExclusive`
+				// call.
+				const expectedOutsideEntries = [...plan.directories.map(d => d.replace('.engineering/', '')), '.tmp'].sort()
+				expect((await fs.readdir(outsideDir)).sort())
+					.toEqual(expectedOutsideEntries)
+				for (const file of plan.files) {
+					await expect(fs.stat(path.join(outsideDir, file.path.replace('.engineering/', ''))))
+						.rejects.toThrow()
+				}
+
+				await expect(fs.lstat(engineeringPath))
+					.rejects.toThrow()
+			}
+			finally {
+				await fs.rm(outsideDir, { recursive: true, force: true })
+			}
+		})
+	})
 })

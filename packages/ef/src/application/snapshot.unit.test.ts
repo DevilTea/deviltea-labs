@@ -1,6 +1,7 @@
 import type { GitRepository } from '../git/repository'
 import type { ReadRegularFileNoFollowResult } from '../platform/fs-facts'
 import type { SnapshotFsDeps } from './snapshot'
+import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -8,6 +9,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
 import { createGitRepository } from '../git/repository'
+import { readRegularFileNoFollow, walkDirectory } from '../platform/fs-facts'
 import { loadSnapshotFromCommit, loadSnapshotFromWorkingTree } from './snapshot'
 
 const CONFIG_YAML = `schema: ef/config@1
@@ -336,6 +338,56 @@ describe('loadSnapshotFromWorkingTree', () => {
 		expect(result.snapshot.layoutDiagnostics.some(d => d.code === 'EF-FS-003' && d.path === '.engineering/PROJECT.md'))
 			.toBe(true)
 	})
+
+	// Wiring regression (`readObservedFile` -> `deps.readRegularFileNoFollow`):
+	// `containmentRoot` must actually reach the real `platform/fs-facts.ts`
+	// primitive from `loadSnapshotFromWorkingTree`'s default dependency wiring,
+	// not merely be accepted by `SnapshotFsDeps`'s type. Uses the exact
+	// move-out-then-symlink-back reproduction from `fs-facts.unit.test.ts`'s own
+	// `containmentRoot` tests: an ancestor directory (`.engineering/req`) is
+	// renamed out of the project and the original path symlinked back to that
+	// exact (relocated) directory. The Artifact file's own `dev`/`ino` never
+	// changes, so identity binding on the file alone (`walkEntry.identity`)
+	// cannot catch this -- only ancestor re-verification can, and only if
+	// `containmentRoot` is actually threaded through.
+	it('reports read-error (not a silent success) when an Artifact\'s ancestor directory is renamed out and symlinked back to itself between the walk and the read', async () => {
+		await writeMinimalProject(tempDir)
+		await fs.mkdir(path.join(tempDir, '.engineering', 'req'), { recursive: true })
+		await fs.writeFile(path.join(tempDir, '.engineering', 'req', 'REQ-001.md'), '---\nschema: ef/req@1\n---\n')
+
+		// Capture exactly what a real walk observes (identity included) BEFORE
+		// the ancestor swap, mirroring what `loadSnapshotFromWorkingTree`'s own
+		// `walkDirectory` call would have captured had the race not yet happened.
+		const walked = await walkDirectory(path.join(tempDir, '.engineering'))
+
+		const outsideReq = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-snapshot-outside-req-')))
+		try {
+			await fs.rm(outsideReq, { recursive: true, force: true })
+			await fs.rename(path.join(tempDir, '.engineering', 'req'), outsideReq)
+			await fs.symlink(outsideReq, path.join(tempDir, '.engineering', 'req'), 'dir')
+
+			const deps: SnapshotFsDeps = {
+				isDirectory: async () => true,
+				isSymlink: async () => false,
+				walkDirectory: async () => walked,
+				// The REAL primitive, not a fake: this is what proves
+				// `containmentRoot` is actually wired end to end, rather than
+				// merely accepted by the `SnapshotFsDeps` type.
+				readRegularFileNoFollow,
+			}
+
+			const result = await loadSnapshotFromWorkingTree(tempDir, deps)
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('read-error')
+			expect(result.ok === false && result.message)
+				.toContain('req/REQ-001.md')
+		}
+		finally {
+			await fs.rm(outsideReq, { recursive: true, force: true })
+		}
+	})
 })
 
 describe('loadSnapshotFromCommit', () => {
@@ -645,6 +697,114 @@ describe('loadSnapshotFromCommit', () => {
 			.toBe('other')
 		expect(result.snapshot.layoutDiagnostics.some(d => d.code === 'EF-FS-003' && d.path === '.engineering/req/REQ-001.md'))
 			.toBe(true)
+	})
+
+	// ---- Finding 5: `ls-tree` reports a symlink (mode 120000) as `type:
+	// 'blob'`, identical to an ordinary file -----------------------------------
+
+	it('does not read a symlinked (mode 120000) ef.yaml\'s blob as configuration, even though the tree entry reports type "blob"', async () => {
+		let readBlobCalled = false
+		const repo = fakeGitRepository({
+			readTree: async () => ({
+				kind: 'resolved',
+				entries: [
+					{ path: '.engineering', mode: '040000', oid: 'tree-oid', type: 'tree' },
+					// A symlink at the exact config path: `type: 'blob'` (exactly
+					// like an ordinary file), but `mode: '120000'`. Its blob content
+					// is a symlink TARGET, never the file's own content -- reading
+					// it as configuration would decode whatever text an attacker
+					// chose as the target.
+					{ path: '.engineering/ef.yaml', mode: '120000', oid: 'symlink-target-oid', type: 'blob' },
+				],
+			}),
+			readBlob: async () => {
+				readBlobCalled = true
+				// If this were read as ordinary config content, it would decode as
+				// syntactically valid configuration -- exactly the outcome Finding
+				// 5 guards against.
+				return { kind: 'resolved', bytes: Buffer.from(CONFIG_YAML) }
+			},
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(true)
+		if (!result.ok)
+			return
+		expect(result.snapshot.entryKinds.get('.engineering/ef.yaml'))
+			.toBe('symlink')
+		expect(result.snapshot.configBytes)
+			.toBeUndefined()
+		expect(result.snapshot.config.config)
+			.toBeNull()
+		expect(readBlobCalled)
+			.toBe(false)
+	})
+
+	// ---- Finding 4: invalid UTF-8 tree-entry path bytes -----------------------
+
+	it('reports EF-FS-006 for a tree entry beneath .engineering whose raw path bytes are not valid UTF-8, without decoding it as a lossy string', async () => {
+		const invalidPathBytes = Buffer.concat([Buffer.from('.engineering/bad-'), Buffer.from([0xFF]), Buffer.from('-name.txt')])
+		const repo = fakeGitRepository({
+			readTree: async () => ({
+				kind: 'resolved',
+				entries: [
+					{ path: '.engineering', mode: '040000', oid: 'tree-oid', type: 'tree' },
+					{
+						// A hand-built double never needs a meaningful `path` for an
+						// invalid entry: the real decoder's placeholder is opaque, so
+						// any distinct string models it faithfully here.
+						path: ' invalid-path-placeholder',
+						pathBytes: new Uint8Array(invalidPathBytes),
+						pathValid: false,
+						mode: '100644',
+						oid: 'blob-oid',
+						type: 'blob',
+					},
+				],
+			}),
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(true)
+		if (!result.ok)
+			return
+		expect(result.snapshot.layoutDiagnostics.some(d => d.code === 'EF-FS-006'))
+			.toBe(true)
+		// Never materialized as an Artifact, control file, or any other keyed
+		// entity using a lossy or placeholder string.
+		expect(result.snapshot.artifacts)
+			.toEqual([])
+	})
+
+	it('silently ignores (no diagnostic) an invalid-UTF-8 path entry that is not beneath .engineering', async () => {
+		const invalidPathBytes = Buffer.concat([Buffer.from('outside-bad-'), Buffer.from([0xFF]), Buffer.from('-name.txt')])
+		const repo = fakeGitRepository({
+			readTree: async () => ({
+				kind: 'resolved',
+				entries: [
+					{ path: '.engineering', mode: '040000', oid: 'tree-oid', type: 'tree' },
+					{ path: '.engineering/ef.yaml', mode: '100644', oid: 'config-oid', type: 'blob' },
+					{
+						path: ' invalid-path-placeholder',
+						pathBytes: new Uint8Array(invalidPathBytes),
+						pathValid: false,
+						mode: '100644',
+						oid: 'unrelated-blob-oid',
+						type: 'blob',
+					},
+				],
+			}),
+			readBlob: async () => ({ kind: 'resolved', bytes: Buffer.from(CONFIG_YAML) }),
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(true)
+		if (!result.ok)
+			return
+		expect(result.snapshot.layoutDiagnostics.some(d => d.code === 'EF-FS-006'))
+			.toBe(false)
+		expect(result.snapshot.config.config)
+			.not.toBeNull()
 	})
 
 	it('rethrows a non-GitUnavailableError raised while materializing the commit tree', async () => {

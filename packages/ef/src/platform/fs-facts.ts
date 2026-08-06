@@ -53,8 +53,81 @@ function identityOf(stats: Stats): FileIdentity {
 	return { dev: stats.dev, ino: stats.ino }
 }
 
-function identityMatches(a: FileIdentity, b: FileIdentity): boolean {
+/** `true` when two {@link FileIdentity} observations denote the identical filesystem entry (same device, same inode). */
+export function sameFileIdentity(a: FileIdentity, b: FileIdentity): boolean {
 	return a.dev === b.dev && a.ino === b.ino
+}
+
+/**
+ * `lstat`-derived identity of `target` if and only if it is, right now, a
+ * real, non-symlink directory; `undefined` for anything else (missing, a
+ * symlink -- even one that resolves to a directory --, a file, or any other
+ * entry kind). The shared building block for every ancestor-identity
+ * containment check in this module and its callers ({@link
+ * readRegularFileNoFollow}'s `containmentRoot`; `application/init.ts`'s
+ * claimed-`.engineering`-directory re-verification; `application/artifact-create.ts`'s
+ * managed directory chain re-verification).
+ */
+export async function directoryIdentity(target: string): Promise<FileIdentity | undefined> {
+	const stats = await tryLstat(target)
+	if (stats === undefined || !stats.isDirectory())
+		return undefined
+	return identityOf(stats)
+}
+
+/**
+ * Absolute paths of every directory strictly between `root` and `target`
+ * (i.e. every path component of `target` relative to `root`, excluding
+ * `target`'s own final component), nearest-`root` first. `undefined` when
+ * `target` is not lexically contained beneath `root` at all -- a caller
+ * error this function refuses to paper over by guessing.
+ */
+function ancestorDirectoriesBetween(root: string, target: string): string[] | undefined {
+	const relative = path.relative(root, target)
+	if (relative === '' || relative === '.' || relative.startsWith('..') || path.isAbsolute(relative))
+		return undefined
+
+	const segments = relative.split('/')
+		.filter(segment => segment.length > 0)
+	segments.pop() // the final component (`target` itself) is not an ancestor
+
+	const dirs: string[] = []
+	let current = root
+	for (const segment of segments) {
+		current = path.join(current, segment)
+		dirs.push(current)
+	}
+	return dirs
+}
+
+/** PRE-verification (see {@link readRegularFileNoFollow}): every ancestor between `root` and `target` must currently be a real, non-symlink directory; their identities are captured for the later POST-verification. `undefined` on any failure. */
+async function captureAncestorIdentities(root: string, target: string): Promise<FileIdentity[] | undefined> {
+	const dirs = ancestorDirectoriesBetween(root, target)
+	if (dirs === undefined)
+		return undefined
+
+	const identities: FileIdentity[] = []
+	for (const dir of dirs) {
+		const identity = await directoryIdentity(dir)
+		if (identity === undefined)
+			return undefined
+		identities.push(identity)
+	}
+	return identities
+}
+
+/** POST-verification (see {@link readRegularFileNoFollow}): every ancestor between `root` and `target` must still be a real, non-symlink directory with the identical identity `expected` captured earlier. */
+async function ancestorIdentitiesStillMatch(root: string, target: string, expected: readonly FileIdentity[]): Promise<boolean> {
+	const dirs = ancestorDirectoriesBetween(root, target)
+	if (dirs === undefined || dirs.length !== expected.length)
+		return false
+
+	for (const [index, dir] of dirs.entries()) {
+		const identity = await directoryIdentity(dir)
+		if (identity === undefined || !sameFileIdentity(identity, expected[index]!))
+			return false
+	}
+	return true
 }
 
 export interface WalkEntry {
@@ -157,23 +230,64 @@ const NO_FOLLOW_READ_FLAGS: number | string
  * open, not only a symlink swap, is refused as `identity-mismatch` rather
  * than silently returning a different file's bytes under the expected name.
  *
- * Binding to a caller-supplied `expectedIdentity` is also what makes
- * re-verifying every ancestor directory component unnecessary for a caller
- * reading a file it walked earlier: an ancestor swapped for a symlink
- * between the walk and this read can only change what the final open
- * resolves to. If the opened file's identity still matches the one the
- * caller originally observed, it IS that exact file regardless of the path
- * taken to reach it; if it does not match (or the open fails outright), that
- * is exactly what the checks below catch.
+ * Binding to a caller-supplied `expectedIdentity` alone is NOT sufficient to
+ * guard against an ancestor directory swapped for a symlink: moving the
+ * directory that contains `target` out of the project and symlinking the
+ * original path back to that exact (relocated) directory changes nothing
+ * about `target`'s own `dev`/`ino` -- it is still, quite literally, the
+ * identical inode -- so `expectedIdentity` alone still matches even though
+ * the path used to reach it now runs through a forbidden ancestor symlink.
+ * Node exposes no `openat`-style, file-descriptor-relative primitive to walk
+ * a path while binding every component to an already-opened directory
+ * handle, so this cannot be closed by a single race-free syscall sequence;
+ * `containmentRoot`, when supplied, is the strongest available mitigation:
+ * every path component between `containmentRoot` and `target` is treated as
+ * an ancestor that must be, and remain, a real, non-symlink directory,
+ * verified both before and after the read:
+ *
+ * 1. PRE-verification -- every ancestor from `containmentRoot` down to
+ *    `target`'s parent is `lstat`'d; each must be a non-symlink directory,
+ *    and its `dev`/`ino` is captured.
+ * 2. `target` itself is opened `O_NOFOLLOW` and `fstat`'d exactly as
+ *    described above.
+ * 3. POST-verification -- every ancestor is re-`lstat`'d; each must still be
+ *    a non-symlink directory with the SAME captured `dev`/`ino` as step 1.
+ *
+ * Any PRE- or POST-verification mismatch is refused as `identity-mismatch`,
+ * even when step 2 already read the bytes successfully. This precisely
+ * catches: symlinking an ancestor path back to the very directory that was
+ * moved out of it (refused by PRE-verification: the ancestor is a symlink,
+ * not a directory, at the moment of the call) and a swap that is restored to
+ * a genuinely DIFFERENT directory before POST-verification runs (refused
+ * because that different directory's `dev`/`ino` no longer matches step 1's
+ * capture). The one race this cannot close is an attacker who swaps an
+ * ancestor out and fully restores the SAME original directory to the SAME
+ * path strictly between one of the checks above and the single operation it
+ * guards -- in that narrow window every check still observes the genuine,
+ * unchanged ancestor and target, so the bytes ultimately returned are still
+ * the originally-observed inode's bytes; nothing else is ever exposed.
+ *
+ * `containmentRoot` is opt-in and fully backward compatible: omitting it
+ * preserves the exact prior behavior (identity binding via `expectedIdentity`
+ * alone, no ancestor verification), for a caller that has already verified
+ * containment some other way or for which an ancestor swap is not part of
+ * its threat model.
  */
-export async function readRegularFileNoFollow(target: string, expectedIdentity?: FileIdentity): Promise<ReadRegularFileNoFollowResult> {
+export async function readRegularFileNoFollow(target: string, expectedIdentity?: FileIdentity, containmentRoot?: string): Promise<ReadRegularFileNoFollowResult> {
+	let ancestorIdentities: FileIdentity[] | undefined
+	if (containmentRoot !== undefined) {
+		ancestorIdentities = await captureAncestorIdentities(containmentRoot, target)
+		if (ancestorIdentities === undefined)
+			return { kind: 'identity-mismatch' }
+	}
+
 	const observed = await tryLstat(target)
 	if (observed === undefined)
 		return { kind: 'not-found' }
 	if (!observed.isFile())
 		return { kind: 'not-a-regular-file' }
 	const observedIdentity = identityOf(observed)
-	if (expectedIdentity !== undefined && !identityMatches(observedIdentity, expectedIdentity))
+	if (expectedIdentity !== undefined && !sameFileIdentity(observedIdentity, expectedIdentity))
 		return { kind: 'identity-mismatch' }
 
 	let handle
@@ -191,13 +305,20 @@ export async function readRegularFileNoFollow(target: string, expectedIdentity?:
 		throw error
 	}
 
+	let result: ReadRegularFileNoFollowResult
 	try {
 		const opened = await handle.stat()
-		if (!opened.isFile() || !identityMatches(identityOf(opened), observedIdentity))
-			return { kind: 'identity-mismatch' }
-		return { kind: 'ok', bytes: await handle.readFile() }
+		if (!opened.isFile() || !sameFileIdentity(identityOf(opened), observedIdentity))
+			result = { kind: 'identity-mismatch' }
+		else
+			result = { kind: 'ok', bytes: await handle.readFile() }
 	}
 	finally {
 		await handle.close()
 	}
+
+	if (containmentRoot !== undefined && !(await ancestorIdentitiesStillMatch(containmentRoot, target, ancestorIdentities!)))
+		return { kind: 'identity-mismatch' }
+
+	return result
 }

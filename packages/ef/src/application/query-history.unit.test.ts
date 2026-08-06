@@ -1,5 +1,6 @@
 import type { GitRepository } from '../git/repository'
 import type { SnapshotArtifactRecord } from './snapshot-validation'
+import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -926,62 +927,401 @@ describe('computeHistory: bootstrap boundary never reached (11-filesystem-and-co
 	})
 })
 
-describe('computeHistory: invalid ef.yaml blob preceding the real bootstrap (11-filesystem-and-config.md)', () => {
-	it('ignores a stale/invalid ef.yaml blob as ordinary pre-EF content and reports clean history from the real bootstrap', async () => {
+describe('computeHistory: invalid ef.yaml blob preceding the real bootstrap (11-filesystem-and-config.md, Finding 10)', () => {
+	it('fails with untrusted-data (never skips forward to a later valid bootstrap) when the first commit to carry .engineering/ef.yaml is invalid', async () => {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-invalid-preboot-config-')))
 		try {
 			git(dir, ['init', '-q', '-b', 'main'])
 
 			// A stale/invalid `ef.yaml`-shaped blob (missing the required
-			// 'schemas' field, EF-FS-001 error) that never became an
-			// authoritative EF state -- e.g. an abandoned early draft of the
-			// configuration. A candidate ef.yaml blob that fails to decode must
-			// be ignored as ordinary pre-EF repository content, not mistaken for
-			// the bootstrap boundary and not failed as untrusted-data, as long
-			// as a later commit does establish a genuine valid bootstrap.
+			// 'schemas' field, EF-FS-001 error). Per the adjudicated
+			// bootstrap-boundary design (EF-VAL-009's contract: any historical
+			// `ef.yaml` path asserts an EF state), the FIRST commit whose tree
+			// contains `.engineering/ef.yaml` AT ALL claims the boundary --
+			// the walk must never look past it hoping a later commit is "more
+			// valid". Since this claimed boundary's config fails to decode,
+			// the whole query must fail as untrusted-data, not silently treat
+			// this commit as ordinary pre-EF content and start history at the
+			// later, genuinely valid bootstrap instead.
 			const invalidConfigYaml = `schema: ef/config@1
 repository:
   integration_ref: refs/heads/main
 linked_repositories: []
 `
-			// REQ-001 already exists (unchanged going forward) at the
-			// pre-bootstrap commit too -- this is what makes the test
-			// discriminating: if the walk mistook this invalid-config commit for
-			// the bootstrap boundary (the pre-fix defect), REQ-001's first
-			// "appearance" -- and therefore the only reported commit -- would be
-			// `preBootstrapOid`, not `bootstrapOid`.
 			await writeFile(dir, '.engineering/ef.yaml', invalidConfigYaml)
 			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
 			const preBootstrapOid = commitAll(dir, 'invalid draft ef.yaml, never authoritative')
 
-			// Real bootstrap: a fully valid configuration, replacing the invalid
-			// one. REQ-001 itself is left byte-for-byte unchanged.
+			// A later commit with a fully valid configuration and PROJECT.md --
+			// a genuine bootstrap, but too late: the invalid commit above
+			// already claimed the boundary.
 			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
 			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
 			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
-			const bootstrapOid = commitAll(dir, 'real bootstrap with valid ef.yaml')
+			const bootstrapOid = commitAll(dir, 'later, otherwise-valid bootstrap')
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map())
-			expect(outcome.kind)
-				.toBe('complete')
-			if (outcome.kind !== 'complete')
-				return
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(preBootstrapOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
 
-			// The pre-bootstrap commit must never appear anywhere in the result:
-			// authoritative history begins at `bootstrapOid`, so REQ-001's first
-			// appearance in that authoritative sequence is `bootstrapOid` itself
-			// (its own commit re-adds `.engineering/req/REQ-001.md`, since the
-			// walk's `previousTreeMap`/`previousEnvelope` reset to empty at the
-			// true boundary), never the earlier, ignored `preBootstrapOid`.
-			expect(outcome.commits.map(c => c.oid))
-				.not.toContain(preBootstrapOid)
-			expect(outcome.commits.map(c => c.oid))
-				.toEqual([bootstrapOid])
-			expect(outcome.commits[0]!.changed_paths)
-				.toEqual(['.engineering/req/REQ-001.md'])
-			expect(outcome.effects)
-				.toEqual([])
+	it('fails with untrusted-data (never skips forward) when the first commit with a valid ef.yaml has no PROJECT.md at all', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-no-project-witness-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+
+			// The claimed boundary's `ef.yaml` decodes as a perfectly valid
+			// `ef/config@1` configuration, but the tree has no PROJECT.md at
+			// all -- failing the minimal bootstrap witness requirement
+			// (EF-VAL-009's contract: a decodable config alone does not prove
+			// this commit is a genuine bootstrap). This must fail as
+			// untrusted-data, never be silently treated as ordinary pre-EF
+			// content in favor of the later commit that does add PROJECT.md.
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			const noProjectOid = commitAll(dir, 'valid ef.yaml, but no PROJECT.md yet')
+
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
+			const laterOid = commitAll(dir, 'PROJECT.md added later')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, laterOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(noProjectOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('returns history-unavailable (never silently starts late) when the true boundary commit\'s ef.yaml blob transiently fails to read but a later commit\'s ef.yaml reads fine', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-transient-read-failure-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
+			const trueBoundaryOid = commitAll(dir, 'true bootstrap boundary')
+			const trueBoundaryEfYamlOid = git(dir, ['rev-parse', `${trueBoundaryOid}:.engineering/ef.yaml`])
+				.trim()
+
+			// A later commit whose ef.yaml content differs (still fully valid),
+			// so it has a DIFFERENT blob oid that reads successfully.
+			await writeFile(dir, '.engineering/ef.yaml', `${CONFIG_YAML}\n`)
+			const laterOid = commitAll(dir, 'later commit, also valid ef.yaml, different blob')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const wrapped = wrapGitRepository(repo, {
+				readBlob: async (oid: string) => {
+					// Simulate a transient read failure -- an execution/read
+					// error, never a proof of absence or invalidity -- on
+					// exactly the TRUE boundary commit's own ef.yaml blob.
+					if (oid === trueBoundaryEfYamlOid)
+						return { kind: 'error', message: 'simulated transient read failure' }
+					return repo.readBlob(oid)
+				},
+			})
+
+			const outcome = await computeHistory(wrapped, laterOid, 'REQ-001', 'requirement', new Map())
+			// MUST report the required history as unavailable -- MUST NOT
+			// silently fall through and treat the later, successfully-read
+			// commit as though history started there instead (a silent late
+			// start).
+			expect(outcome)
+				.toEqual({ kind: 'history-unavailable' })
+			expect(trueBoundaryEfYamlOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data (never skips forward) when the first commit with ef.yaml is a symlink-mode (120000) blob', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-symlink-ef-yaml-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+
+			// `.engineering/ef.yaml` is committed as a Git symlink-mode
+			// (`120000`) blob at the claimed boundary. `EF-VAL-009`'s own
+			// history-condition probe (`pathExistsInFirstParentHistory`) does
+			// not care about mode -- any path existence claims the boundary --
+			// but a symlink is not a regular file this walk may trust as the
+			// actual configuration content, so this must fail as
+			// untrusted-data rather than being silently skipped in favor of
+			// the later commit that replaces it with a real, valid bootstrap.
+			await fs.mkdir(path.join(dir, '.engineering'), { recursive: true })
+			await fs.symlink('nonexistent-target.yaml', path.join(dir, '.engineering', 'ef.yaml'))
+			const symlinkBoundaryOid = commitAll(dir, 'ef.yaml is a symlink-mode blob')
+
+			await fs.rm(path.join(dir, '.engineering', 'ef.yaml'))
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
+			const laterOid = commitAll(dir, 'later, real bootstrap replacing the symlink')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, laterOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(symlinkBoundaryOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: Resource descriptor validation for aggregate attribution (06-resources.md, Finding 11)', () => {
+	it('fails with untrusted-data when the target declares a local Resource location beneath ANOTHER Artifact\'s owner directory (EF-RES-014)', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-res-wrong-owner-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// REQ-001 declares a Resource location that is syntactically a
+			// perfectly valid local path, but sits beneath ANOTHER Artifact's
+			// (REQ-999's) canonical owner directory -- EF-RES-014, error
+			// severity. Without running the domain Resource-descriptor
+			// validation, this walk would attribute REQ-999's own Resource
+			// path OID changes to REQ-001's aggregate.
+			const reqWithWrongOwnerResource = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-001
+title: Title of REQ-001
+status: active
+summary: Summary of REQ-001.
+tags: []
+relations: []
+resources:
+  - type: reference
+    location: .engineering/resources/REQ-999/notes.md
+    role: reference
+    media_type: text/markdown
+    normative: false
+    description: Declared under another Artifact's owner directory.
+---
+
+## Requirement
+
+Body text for REQ-001.
+`
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqWithWrongOwnerResource)
+			const commitOid = commitAll(dir, 'req-001 declares a resource under REQ-999\'s owner directory')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when the tree entry at a declared local Resource location is a directory, not a regular blob', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-res-non-regular-directory-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// REQ-001 declares its Resource at
+			// `.engineering/resources/REQ-001/notes.md`, but the tree entry
+			// actually sitting at that exact path is a DIRECTORY (it contains
+			// a file inside it), not the ordinary file the descriptor claims.
+			// Without a regular-blob check, this directory's tree entry would
+			// still be silently compared as though it were the Resource's
+			// real content.
+			await writeFile(dir, '.engineering/resources/REQ-001/notes.md/inner.txt', 'inner\n')
+			await writeFile(dir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE)
+			const commitOid = commitAll(dir, 'req-001 resource location is a directory, not a regular file')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when the tree entry at a declared local Resource location is a symlink-mode (120000) blob', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-res-non-regular-symlink-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			await fs.mkdir(path.join(dir, '.engineering/resources/REQ-001'), { recursive: true })
+			await fs.symlink('nonexistent-target.md', path.join(dir, '.engineering/resources/REQ-001/notes.md'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE)
+			const commitOid = commitAll(dir, 'req-001 resource location is a symlink-mode blob, not a regular file')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: emitted CHG summary projection-fidelity (10-query-and-trace.md, Finding 12)', () => {
+	it('fails with untrusted-data when the completing CHG\'s own effect relation has an invalid extension field (EF-REL-015), even though the (type, target) fact stays valid', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-relation-extension-loss-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001's completing 'introduces' relation targeting REQ-001 --
+			// exactly the pair this walk reads and would emit as the effect
+			// FACT -- also declares a non-JSON-compatible extension field
+			// (`.nan`, a non-finite YAML float, EF-REL-015). The FACT
+			// (`introduces`, `REQ-001`) is unaffected by this and would still
+			// pass the r5 FACT-trust gate; but `buildArtifactSummary` projects
+			// this relation's extensions verbatim into the emitted CHG
+			// summary, where a non-finite number would silently serialize to
+			// `null` -- so the query must still fail because the EMITTED
+			// SUMMARY cannot be represented faithfully.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001\n    x-acme-note: .nan'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const completingOid = commitAll(dir, 'chg-001 completing relation has an invalid extension field')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when the completing CHG declares a malformed Resource entry (EF-RES-001) that would decode to defaults in the emitted summary', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-malformed-resource-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 completes and correctly introduces REQ-001, but its own
+			// `resources` array declares an entry missing the required 'role'
+			// field (EF-RES-001) -- `domain/resources.ts`'s validation is
+			// never otherwise run over a CHG's own Resources, so this would
+			// silently decode to an empty-string default in the projected
+			// summary instead of being recognized as malformed.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', `---
+schema: ef/change@1
+type: change
+id: CHG-001
+title: Title of CHG-001
+status: completed
+summary: Summary of CHG-001.
+tags: []
+relations:
+  - type: introduces
+    target: REQ-001
+resources:
+  - type: reference
+    location: .engineering/resources/CHG-001/notes.md
+    media_type: text/markdown
+    normative: false
+    description: Missing the required 'role' field.
+---
+
+## Rationale
+
+Rationale text.
+
+## Sources
+
+Sources text.
+
+## Changes
+
+- Did something.
+
+## Verification
+
+Result: passed
+
+- Verified.
+`)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const completingOid = commitAll(dir, 'chg-001 declares a malformed resource entry')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when the completing CHG\'s raw bytes contain invalid UTF-8 in its body', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-invalid-utf8-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 completes and correctly introduces REQ-001, but its raw
+			// bytes contain an invalid UTF-8 byte (0xFF, never a valid UTF-8
+			// lead byte) inside the Markdown body -- the frontmatter itself
+			// decodes cleanly, so `envelopeAt` alone would accept this blob,
+			// but the best-effort decode already replaced that byte with
+			// U+FFFD, which the emitted CHG summary would silently embed in
+			// place of content the file never actually declared.
+			const chgText = chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001')
+			const bodyMarkerIndex = chgText.indexOf('## Rationale')
+			expect(bodyMarkerIndex)
+				.toBeGreaterThan(0)
+			const chgBytes = Buffer.concat([
+				Buffer.from(chgText.slice(0, bodyMarkerIndex), 'utf8'),
+				Buffer.from([0xFF]),
+				Buffer.from(chgText.slice(bodyMarkerIndex), 'utf8'),
+			])
+			await fs.mkdir(path.join(dir, '.engineering/chg'), { recursive: true })
+			await fs.writeFile(path.join(dir, '.engineering/chg/CHG-001.md'), chgBytes)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const completingOid = commitAll(dir, 'chg-001 has invalid UTF-8 in its body')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
 			await fs.rm(dir, { recursive: true, force: true })

@@ -217,12 +217,37 @@ function edgeTrustGlobalFailure(context: QueryContext, kind: QueryKind): QueryRe
  * (10-query-and-trace.md), so passing an empty `consumedSourceIds` for that
  * case (as every caller below does) correctly never gates: no Artifact's
  * outgoing array was read at all.
+ *
+ * `typeSet` is the exact set of relation types THIS traversal actually reads
+ * (Finding 9): a source's loss only gates when it is untyped/conservative
+ * (`edgeLossUntypedArtifactIds`, or a semantic-loss diagnostic this module
+ * defensively could not attribute a type to -- neither is expected to arise
+ * without a typed counterpart in practice) or when its recorded lossy
+ * relation type(s) actually intersect `typeSet`. A known-invalid entry of a
+ * type this traversal never reads (a bad `references` entry on a source
+ * whose traversal is restricted to `derived-from`, for example) can never
+ * have been read or returned by this specific traversal, so it must not
+ * block it.
  */
-function edgeTrustLocalFailure(context: QueryContext, kind: QueryKind, consumedSourceIds: ReadonlySet<string>): QueryResult | undefined {
-	const { edgeLossArtifactIds, semanticEdgeLossArtifactIds } = context.validation
+function edgeTrustLocalFailure(context: QueryContext, kind: QueryKind, consumedSourceIds: ReadonlySet<string>, typeSet: ReadonlySet<string>): QueryResult | undefined {
+	const { edgeLossUntypedArtifactIds, edgeLossRelationTypesBySourceId, semanticEdgeLossArtifactIds, semanticEdgeLossRelationTypesBySourceId } = context.validation
 	for (const id of consumedSourceIds) {
-		if (edgeLossArtifactIds.has(id) || semanticEdgeLossArtifactIds.has(id))
-			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- whose own declared relations this traversal consulted -- has a relations entry that could not be completely sanitized or was semantically invalid, so this graph would not be trustworthy.`)
+		if (edgeLossUntypedArtifactIds.has(id))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- whose own declared relations this traversal consulted -- has a relations entry that could not be completely sanitized, so this graph would not be trustworthy.`)
+
+		const typedEdgeLoss = edgeLossRelationTypesBySourceId.get(id)
+		if (typedEdgeLoss && [...typedEdgeLoss].some(type => typeSet.has(type)))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- whose own declared relations this traversal consulted -- has a relations entry of a type this traversal reads that could not be completely sanitized, so this graph would not be trustworthy.`)
+
+		if (semanticEdgeLossArtifactIds.has(id)) {
+			const typedSemanticLoss = semanticEdgeLossRelationTypesBySourceId.get(id)
+			// Every `semanticEdgeLossArtifactIds` cause is typed in practice
+			// (`snapshot-validation.ts`'s field doc); this untyped fallback stays
+			// conservative defensively rather than silently narrowing a fact this
+			// module cannot actually attribute a type to.
+			if (!typedSemanticLoss || [...typedSemanticLoss].some(type => typeSet.has(type)))
+				return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- whose own declared relations this traversal consulted -- has a semantically invalid relation of a type this traversal reads, so this graph would not be trustworthy.`)
+		}
 	}
 	return undefined
 }
@@ -245,39 +270,50 @@ function projectionLossNodeFailure(context: QueryContext, kind: QueryKind, nodeI
 	return undefined
 }
 
+/** The only relation type `resolve-current`'s traversal ever reads or returns (05-supersession.md "Current-resolution algorithm"), used to scope `edgeTrustLocalFailure`'s per-type intersection (Finding 9) to exactly that one type. */
+const SUPERSEDED_BY_TYPE_SET: ReadonlySet<string> = new Set(['superseded-by'])
+
 /**
- * Finding 6: `resolve-current`'s own algorithm (`domain/supersession.ts`)
- * follows `superseded-by` edges and branches on `status`, but never checks
- * source/target type compatibility itself, so this gates the two facts it
- * silently trusts: `statusInvalidArtifactIds` for every visited node (an
- * unrecognized-or-inapplicable status can otherwise be silently treated as a
- * legitimate `active`/`draft`/`retired` leaf) and
- * `supersessionCrossTypeArtifactIds` for every Artifact whose own
- * `superseded-by` entries were actually traversed (a cross-type replacement,
- * `EF-SUP-003`, can otherwise be silently followed as though it were a
- * genuine supersession). Also folds in the same edge-trust facts
- * `edgeTrustLocalFailure` checks, scoped to exactly the traversed sources
- * (`result.edges`' `source` side) -- resolve-current's traversal is always
- * outgoing-only. Shared between `resolve-current` and `impact`'s
- * `resolve_current` option, which runs the identical algorithm per root.
+ * `resolve-current`'s own algorithm (`domain/supersession.ts`) follows
+ * `superseded-by` edges and branches on `status`, but never checks
+ * source/target type compatibility, replacement-set completeness, or cycle
+ * validity itself, so this gates every fact it silently trusts:
+ *
+ * - `statusInvalidArtifactIds` for every visited node (an
+ *   unrecognized-or-inapplicable status can otherwise be silently treated as
+ *   a legitimate `active`/`draft`/`retired` leaf).
+ * - `supersessionFactInvalidArtifactIds` for every visited node (Finding 6:
+ *   `EF-SUP-001`/`002`/`003`/`005` -- an empty replacement set, an illegal
+ *   `superseded-by` declaration on a non-superseded node, a cross-type
+ *   replacement, or a supersession cycle can each be reached WITHOUT
+ *   following any edge that reveals it: an `EF-SUP-001` source resolves to an
+ *   empty set exactly as though it were a legitimately retired leaf
+ *   (05-supersession "Retired replacement leaves"), and an `EF-SUP-002`
+ *   source is never even read past its `active`/`draft`/`retired` status
+ *   branch -- so both checks apply to every node `result.nodeIds` actually
+ *   visited, INCLUDING the exact input ID with zero edges, not only the
+ *   source side of a followed edge).
+ * - The same edge-trust facts `edgeTrustLocalFailure` checks (Finding 9),
+ *   scoped to exactly the traversed sources (`result.edges`' `source` side)
+ *   and to the one relation type resolve-current's traversal ever reads
+ *   (`SUPERSEDED_BY_TYPE_SET`) -- resolve-current's traversal is always
+ *   outgoing-only.
+ *
+ * Shared between `resolve-current` and `impact`'s `resolve_current` option,
+ * which runs the identical algorithm per root.
  */
 function resolveCurrentTrustFailure(context: QueryContext, kind: QueryKind, result: { nodeIds: readonly string[], edges: readonly RelationEdgeData[] }): QueryResult | undefined {
-	const { statusInvalidArtifactIds, supersessionCrossTypeArtifactIds, edgeLossArtifactIds, semanticEdgeLossArtifactIds } = context.validation
+	const { statusInvalidArtifactIds, supersessionFactInvalidArtifactIds } = context.validation
 
 	for (const id of result.nodeIds) {
 		if (statusInvalidArtifactIds.has(id))
 			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- part of this current-resolution result -- has an invalid lifecycle status, so this result would not be trustworthy.`)
+		if (supersessionFactInvalidArtifactIds.has(id))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- part of this current-resolution result -- declares an invalid supersession fact (no direct replacement, an illegal 'superseded-by' declaration, a cross-type replacement, or a supersession cycle), so this result would not be trustworthy.`)
 	}
 
 	const consumedSourceIds = new Set(result.edges.map(edge => edge.source))
-	for (const source of consumedSourceIds) {
-		if (supersessionCrossTypeArtifactIds.has(source))
-			return failure(kind, 'EF-QRY-013', `Artifact '${source}' -- part of this current-resolution result -- declares a 'superseded-by' replacement of a different Artifact type, so this result would not be trustworthy.`)
-		if (edgeLossArtifactIds.has(source) || semanticEdgeLossArtifactIds.has(source))
-			return failure(kind, 'EF-QRY-013', `Artifact '${source}' -- whose own declared relations this current-resolution result consulted -- has a relations entry that could not be completely sanitized or was semantically invalid, so this result would not be trustworthy.`)
-	}
-
-	return undefined
+	return edgeTrustLocalFailure(context, kind, consumedSourceIds, SUPERSEDED_BY_TYPE_SET)
 }
 
 const DIRECTIONS: ReadonlySet<string> = new Set(['outgoing', 'incoming', 'both'])
@@ -430,9 +466,29 @@ function matchesListFilters(record: SnapshotArtifactRecord, request: ListQueryRe
 	return true
 }
 
-/** Resource fields `list`'s own filter options actually read (Finding 9). */
-const LIST_RESOURCE_FILTER_FIELDS: ReadonlySet<ResourceFieldName> = new Set(['type', 'role', 'normative'])
-/** Resource fields full-text search actually reads (`query-search.ts`'s `buildSurfaces`; Finding 9). */
+/**
+ * Exactly which of `list`'s three named Resource filter fields (`type`,
+ * `role`, `normative`) THIS request actually supplies (sixth-round Finding
+ * 8): a fixed union of all three -- what a prior round used unconditionally
+ * -- would let a malformed `normative` field gate a request that only
+ * supplies `resource_type` (or vice versa), even though such a request never
+ * reads `normative` at all. Each of the three fields decodes independently
+ * (`domain/resources.ts#validateResourceDescriptors`), so only the fields
+ * THIS request's own options actually name may participate in its
+ * `resourceFieldLossById` intersection.
+ */
+function requestedResourceFilterFields(request: Pick<ListQueryRequest, 'resourceType' | 'resourceRole' | 'resourceNormative'>): ReadonlySet<ResourceFieldName> {
+	const fields = new Set<ResourceFieldName>()
+	if (request.resourceType !== undefined)
+		fields.add('type')
+	if (request.resourceRole !== undefined)
+		fields.add('role')
+	if (request.resourceNormative !== undefined)
+		fields.add('normative')
+	return fields
+}
+
+/** Resource fields full-text search actually reads (`query-search.ts`'s `buildSurfaces`; Finding 9): unlike `list`'s per-request field set above, EVERY search request reads both fields unconditionally, regardless of the terms requested, so this fixed set is not a Finding 8 concern. */
 const SEARCH_RESOURCE_SURFACE_FIELDS: ReadonlySet<ResourceFieldName> = new Set(['location', 'description'])
 
 /**
@@ -571,8 +627,12 @@ function listMembershipRiskArtifactIds(validation: SnapshotValidationResult, req
 		for (const id of validation.edgeLossArtifactIds) candidates.add(id)
 	}
 	if (hasResourceFilter) {
+		// Finding 8: built from exactly the resource filter options THIS
+		// request supplies, not a fixed union of every field `list` could ever
+		// filter on.
+		const consumedResourceFields = requestedResourceFilterFields(request)
 		for (const id of validation.resourceFieldLossById.keys()) {
-			if (hasRelevantResourceFieldLoss(validation, id, LIST_RESOURCE_FILTER_FIELDS))
+			if (hasRelevantResourceFieldLoss(validation, id, consumedResourceFields))
 				candidates.add(id)
 		}
 	}
@@ -731,7 +791,7 @@ function handleRelations(context: QueryContext, request: RelationsQueryRequest):
 	// (which also includes every neighbor ID, whose own arrays are never
 	// read here).
 	if (direction === 'outgoing') {
-		const untrustworthyRelationData = edgeTrustLocalFailure(context, 'relations', new Set([request.id]))
+		const untrustworthyRelationData = edgeTrustLocalFailure(context, 'relations', new Set([request.id]), typeSet)
 		if (untrustworthyRelationData)
 			return untrustworthyRelationData
 	}
@@ -805,7 +865,7 @@ function handleTrace(context: QueryContext, request: TraceQueryRequest): QueryRe
 		const consumedSourceIds = new Set([...result.depths]
 			.filter(([, depth]) => depth < request.maxDepth)
 			.map(([id]) => id))
-		const untrustworthyTraceRelationData = edgeTrustLocalFailure(context, 'trace', consumedSourceIds)
+		const untrustworthyTraceRelationData = edgeTrustLocalFailure(context, 'trace', consumedSourceIds, typeSet)
 		if (untrustworthyTraceRelationData)
 			return untrustworthyTraceRelationData
 	}

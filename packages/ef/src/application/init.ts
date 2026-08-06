@@ -32,6 +32,7 @@ import type { ParsedFrontmatterDocument } from '../parsing/frontmatter'
 import type { ExtractedSections, ParseBodyResult } from '../parsing/markdown'
 import type { ClaimDirectoryResult } from '../platform/claim-directory'
 import type { CreateExclusiveResult, ReadInitMarkerResult } from '../platform/exclusive-file'
+import type { FileIdentity } from '../platform/fs-facts'
 import type { ProjectSnapshot, SnapshotArtifactFile, SnapshotEntryKind } from './snapshot'
 import { mkdir as fsMkdir, rm as fsRm, unlink as fsUnlink } from 'node:fs/promises'
 import path from 'pathe'
@@ -41,7 +42,7 @@ import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatt
 import { extractSections, parseBody } from '../parsing/markdown'
 import { claimDirectory } from '../platform/claim-directory'
 import { createExclusive, readInitMarker, writeInitMarker } from '../platform/exclusive-file'
-import { isDirectory, readFileBytes } from '../platform/fs-facts'
+import { directoryIdentity, isDirectory, readFileBytes, sameFileIdentity } from '../platform/fs-facts'
 import { generateNonce } from '../platform/nonce'
 import { isSameLocation } from '../platform/path-identity'
 import { decodeConfig, isValidIntegrationRef } from '../repository/config'
@@ -370,6 +371,8 @@ export interface ApplyInitPlanDeps {
 	unlink: (path: string) => Promise<void>
 	removeTree: (path: string) => Promise<void>
 	generateNonce: () => string
+	/** `lstat`-derived identity of `path` iff it is right now a real, non-symlink directory; `undefined` otherwise. Used to bind every step after the claim to the exact directory instance claimed (see `verifyClaimIntact` in `applyInitPlan`). */
+	directoryIdentity: (path: string) => Promise<FileIdentity | undefined>
 }
 
 /** Real filesystem access, composed from `platform/*` primitives. */
@@ -390,6 +393,7 @@ export const defaultApplyInitPlanDeps: ApplyInitPlanDeps = {
 		await fsRm(target, { recursive: true, force: true })
 	},
 	generateNonce,
+	directoryIdentity,
 }
 
 export type ApplyInitPlanResult
@@ -411,9 +415,36 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * Perform the exact 13-cli-contract.md "Initialization claim-and-complete
  * protocol" for an already-validated `plan`. Never re-validates the plan's
  * content and never runs project discovery while the marker exists.
+ *
+ * FINDING (P0): the exclusive claim below proves ownership only at that one
+ * instant. Every step after it -- `.tmp`/marker creation, each planned
+ * directory and file write, the materialization re-read, and the final
+ * marker removal -- is pathname-based. Moving the claimed `.engineering`
+ * directory outside the project and symlinking the original path back to it
+ * would otherwise make every subsequent write land outside, with byte/nonce
+ * verification still passing (the symlink target genuinely contains
+ * whatever this invocation itself just wrote there) and `applied: true`
+ * still being reported. `verifyClaimIntact` below binds every step to the
+ * `lstat` identity of `plan.targetRoot` and the claimed `engineeringPath`
+ * captured immediately after the claim succeeds, and is checked immediately
+ * before every subsequent write or read; any mismatch aborts without
+ * attempting that step. Node exposes no `openat`-style,
+ * file-descriptor-relative primitive to bind every step to an already-opened
+ * directory handle, so this cannot be made fully race-free: the narrow,
+ * documented residual window is an attacker who swaps `engineeringPath` out
+ * and fully restores the SAME original directory to the SAME path strictly
+ * between one `verifyClaimIntact` check and the single operation it guards
+ * -- in that window the guarded operation still acts on the genuine claimed
+ * directory, so nothing else is ever exposed; the only possible outcome is a
+ * spurious abort of an otherwise-legitimate run, never a write to the wrong
+ * location.
  */
 export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = defaultApplyInitPlanDeps): Promise<ApplyInitPlanResult> {
 	const engineeringPath = path.join(plan.targetRoot, '.engineering')
+
+	const targetRootIdentity = await deps.directoryIdentity(plan.targetRoot)
+	if (targetRootIdentity === undefined)
+		return { applied: false, outcome: 'incomplete', message: `'${plan.targetRoot}' could not be verified as a directory.` }
 
 	const claim = await deps.claimDirectory(engineeringPath)
 	if (claim.outcome === 'already-exists')
@@ -422,8 +453,33 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		return { applied: false, outcome: 'incomplete', message: `Failed to claim '${engineeringPath}': ${claim.error.message}` }
 
 	// From here on, ownership of `engineeringPath` is proven by the successful
-	// exclusive claim above; once the marker is written, cleanup must also
-	// compare its nonce before removing anything (13-cli-contract.md).
+	// exclusive claim above -- but only of the exact directory instance that
+	// claim created, not of whatever later resolves to this path. Capture its
+	// identity now; once the marker is written, cleanup must also compare its
+	// nonce before removing anything (13-cli-contract.md).
+	const claimedIdentity = await deps.directoryIdentity(engineeringPath)
+	if (claimedIdentity === undefined) {
+		await deps.removeTree(engineeringPath)
+		return { applied: false, outcome: 'incomplete', message: `'${engineeringPath}' could not be verified as a directory immediately after being claimed.` }
+	}
+
+	/**
+	 * `true` iff `plan.targetRoot` and `engineeringPath` are both still real,
+	 * non-symlink directories with the identical identity captured above. See
+	 * the residual-risk note on `applyInitPlan` itself.
+	 */
+	async function verifyClaimIntact(): Promise<boolean> {
+		const currentRoot = await deps.directoryIdentity(plan.targetRoot)
+		if (currentRoot === undefined || !sameFileIdentity(currentRoot, targetRootIdentity!))
+			return false
+		const currentClaim = await deps.directoryIdentity(engineeringPath)
+		if (currentClaim === undefined || !sameFileIdentity(currentClaim, claimedIdentity!))
+			return false
+		return true
+	}
+
+	const claimIntactFailureMessage = `'${engineeringPath}' no longer denotes the directory this invocation claimed.`
+
 	const nonce = deps.generateNonce()
 	const tmpPath = path.join(engineeringPath, '.tmp')
 	const markerPath = path.join(tmpPath, 'init-state.json')
@@ -439,6 +495,9 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		return { applied: false, outcome: 'incomplete', message }
 	}
 
+	if (!(await verifyClaimIntact()))
+		return abort(claimIntactFailureMessage)
+
 	try {
 		await deps.mkdir(tmpPath)
 	}
@@ -446,12 +505,17 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		return abort(`Failed to create '${tmpPath}': ${(error as Error).message}`)
 	}
 
+	if (!(await verifyClaimIntact()))
+		return abort(claimIntactFailureMessage)
+
 	const markerResult = await deps.writeInitMarker(markerPath, nonce)
 	if (markerResult.outcome !== 'created')
 		return abort(`Failed to create the initialization marker at '${markerPath}'.`)
 	markerCreated = true
 
 	for (const dir of plan.directories) {
+		if (!(await verifyClaimIntact()))
+			return abort(claimIntactFailureMessage)
 		try {
 			await deps.mkdir(path.join(plan.targetRoot, dir))
 		}
@@ -461,10 +525,15 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	}
 
 	for (const file of plan.files) {
+		if (!(await verifyClaimIntact()))
+			return abort(claimIntactFailureMessage)
 		const result = await deps.createExclusive(path.join(plan.targetRoot, file.path), file.bytes)
 		if (result.outcome !== 'created')
 			return abort(`Failed to write '${file.path}'.`)
 	}
+
+	if (!(await verifyClaimIntact()))
+		return abort(claimIntactFailureMessage)
 
 	for (const dir of plan.directories) {
 		if (!(await deps.isDirectory(path.join(plan.targetRoot, dir))))
@@ -483,11 +552,30 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 			return abort(`File '${file.path}' was not materialized with the planned bytes.`)
 	}
 
+	if (!(await verifyClaimIntact()))
+		return abort(claimIntactFailureMessage)
+
 	const finalMarker = await deps.readInitMarker(markerPath)
 	if (finalMarker.outcome !== 'found' || finalMarker.marker.nonce !== nonce)
 		return abort('The initialization marker no longer contains the invocation\'s nonce.')
 
+	if (!(await verifyClaimIntact()))
+		return abort(claimIntactFailureMessage)
+
 	await deps.unlink(markerPath)
+
+	if (!(await verifyClaimIntact())) {
+		// The claim was swapped out from under us in the narrow window between
+		// the marker removal above and this final check. The marker -- this
+		// invocation's sole ownership proof once the claim itself is no longer
+		// verifiable -- is already gone, so cleanup cannot safely remove
+		// anything further here; report incomplete rather than misreport a
+		// successful application (13-cli-contract.md "the implementation MUST
+		// NOT misreport the published state as unapplied" applies symmetrically
+		// in the other direction: it also must not misreport an unproven state
+		// as applied).
+		return { applied: false, outcome: 'incomplete', message: claimIntactFailureMessage }
+	}
 
 	return { applied: true, outcome: 'applied', changes: plan.changes }
 }

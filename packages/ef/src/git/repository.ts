@@ -45,6 +45,82 @@ export type ObjectFormat = 'sha1' | 'sha256'
 
 const OID_HEX_LENGTH: Record<ObjectFormat, number> = { sha1: 40, sha256: 64 }
 
+/**
+ * Git blob file modes that denote an ordinary regular file (executable or
+ * not). Every other mode a tree entry can carry -- a symlink (`120000`) or a
+ * gitlink/submodule reference (`160000`, always reported as `type: 'commit'`,
+ * never `'blob'`) -- must never be treated as a readable regular-file
+ * candidate at a managed path (config, control file, or Artifact): `ls-tree`
+ * reports a symlink's mode as `120000` but its `type` as `blob` exactly like
+ * an ordinary file, so a `type`-only check silently accepts the symlink's
+ * TARGET TEXT as if it were the file's own content (Finding 5). Every probe
+ * that reads a managed file's bytes from a tree entry MUST additionally
+ * require `REGULAR_FILE_GIT_MODES.has(entry.mode)`.
+ */
+export const REGULAR_FILE_GIT_MODES: ReadonlySet<string> = new Set(['100644', '100755'])
+
+// ---------------------------------------------------------------------------
+// Git tree-entry path decoding (Finding 4)
+// ---------------------------------------------------------------------------
+
+const fatalUtf8Decoder = new TextDecoder('utf-8', { fatal: true })
+
+/**
+ * Marker prefix for a synthesized placeholder `path` string used only when a
+ * tree entry's raw path bytes are not valid UTF-8. Git permits arbitrary
+ * non-NUL path bytes; naively decoding with `Buffer#toString('utf8')` (the
+ * previous implementation) replaces every invalid byte sequence with the same
+ * U+FFFD replacement character, so two BYTE-DISTINCT paths can decode to the
+ * IDENTICAL string and alias -- silently overwriting one another in any
+ * downstream map keyed by `path` (`application/snapshot.ts`'s `entryKinds`/
+ * `blobEntries`), or letting a non-UTF-8 managed path masquerade as an
+ * ordinary-looking string. This marker begins with U+0000, a code point that
+ * can never appear inside a genuine decoded path: `-z` output is NUL-delimited,
+ * so the raw bytes handed to the decoder for any single path never contain a
+ * NUL byte, and no successful UTF-8 decode of them can therefore ever produce
+ * one either. Combined with a hex encoding of the exact raw bytes (an
+ * injective mapping -- distinct byte sequences always produce distinct hex),
+ * this placeholder can never collide with a genuine decoded path, and no two
+ * distinct invalid paths can ever collide with each other.
+ */
+const INVALID_PATH_MARKER_PREFIX = '\u0000ef-invalid-git-path-bytes:'
+
+function toHex(bytes: Uint8Array): string {
+	let out = ''
+	for (let i = 0; i < bytes.length; i++) {
+		out += bytes[i]!.toString(16)
+			.padStart(2, '0')
+	}
+	return out
+}
+
+interface DecodedGitPath {
+	path: string
+	pathBytes: Uint8Array
+	pathValid: boolean
+}
+
+/**
+ * Decode one tree-entry path's raw bytes with a FATAL UTF-8 decoder rather
+ * than the lossy `Buffer#toString('utf8')` this replaced (Finding 4). On
+ * success, `path` is an exact, lossless decoding and `pathValid` is `true`.
+ * On failure, `path` is a collision-free placeholder (see
+ * {@link INVALID_PATH_MARKER_PREFIX}) -- never a lossy replacement-character
+ * string -- and `pathValid` is `false`; `pathBytes` always carries the exact
+ * original bytes, which a caller that must classify a raw path by a
+ * byte-level prefix test (e.g. "is this beneath `.engineering`") MUST use
+ * instead of `path` once `pathValid` is `false`.
+ */
+function decodeGitPath(rawPathBytes: Buffer): DecodedGitPath {
+	const pathBytes = Uint8Array.from(rawPathBytes)
+	try {
+		return { path: fatalUtf8Decoder.decode(pathBytes), pathBytes, pathValid: true }
+	}
+	catch {
+		return { path: `${INVALID_PATH_MARKER_PREFIX}${toHex(pathBytes)}`, pathBytes, pathValid: false }
+	}
+}
+
 // ---------------------------------------------------------------------------
 // findWorktreeRoot
 // ---------------------------------------------------------------------------
@@ -151,7 +227,36 @@ export type FirstParentResult
 // ---------------------------------------------------------------------------
 
 export interface GitTreeEntry {
+	/**
+	 * An exact, lossless UTF-8 decoding of the entry's raw path bytes when
+	 * `pathValid` is `true` (the overwhelming common case). When `pathValid`
+	 * is `false`, this is instead a synthesized, collision-free placeholder --
+	 * NEVER a lossy replacement-character decoding -- so it remains safe to
+	 * use as an opaque map key without two distinct raw paths ever aliasing,
+	 * but it is not a meaningful rendering of the real path: never compare it
+	 * against a canonical project-relative path string (Finding 4).
+	 */
 	path: string
+	/**
+	 * The exact raw bytes `path` was decoded (or, when `pathValid` is
+	 * `false`, attempted to decode) from. A caller that must classify a raw
+	 * path by a byte-level prefix test -- e.g. "is this beneath
+	 * `.engineering`" -- when `pathValid` is `false` MUST compare against
+	 * these bytes; `path` itself is not usable for that in the invalid case.
+	 * Optional (like `pathValid`) so a hand-built test double may omit it; a
+	 * caller reading it should treat an absent value as `path` re-encoded to
+	 * UTF-8 (safe, since a hand-built double never sets `pathValid: false`).
+	 */
+	pathBytes?: Uint8Array
+	/**
+	 * `false` only when this entry's raw path bytes are not valid UTF-8
+	 * (Finding 4: Git permits arbitrary non-NUL path bytes, so this is a
+	 * possible, if rare, real condition -- not merely a defensive check).
+	 * Optional so a hand-built test double that never exercises this case may
+	 * omit it entirely; every value other than exactly `false` (including
+	 * `undefined`) means `path` is trustworthy.
+	 */
+	pathValid?: boolean
 	mode: string
 	oid: string
 	/**
@@ -163,7 +268,10 @@ export interface GitTreeEntry {
 	 * into the same bucket as `blob` -- doing so would treat a gitlink as a
 	 * readable file candidate that then has no corresponding blob to read
 	 * (`application/snapshot.ts`'s `entryKindOf` gives it its own `'other'`
-	 * kind for exactly this reason).
+	 * kind for exactly this reason). Note also that `blob` alone does not
+	 * imply a readable REGULAR file: a symlink (mode `120000`) is also
+	 * reported as `type: 'blob'` (Finding 5) -- callers reading a managed
+	 * file's bytes must additionally check `REGULAR_FILE_GIT_MODES.has(mode)`.
 	 */
 	type: 'blob' | 'tree' | 'commit'
 }
@@ -189,8 +297,11 @@ export type ReadTreeResult
  * decoding the whole buffer to a string first) keeps a path's bytes intact
  * even when it contains a byte sequence that would otherwise need to be
  * decoded relative to a different boundary; `-z` guarantees Git never quotes
- * or escapes the path, so decoding each field independently as UTF-8 is
- * exact.
+ * or escapes the path. The path field is then decoded with a FATAL UTF-8
+ * decoder (Finding 4) rather than the lossy `Buffer#toString('utf8')` this
+ * replaced: Git permits arbitrary non-NUL path bytes, and the previous
+ * lossy decode let two byte-distinct paths alias onto the identical
+ * replacement-character string.
  */
 function parseLsTreeZ(buffer: Buffer): GitTreeEntry[] {
 	const entries: GitTreeEntry[] = []
@@ -203,10 +314,9 @@ function parseLsTreeZ(buffer: Buffer): GitTreeEntry[] {
 			const tabIndex = record.indexOf(0x09)
 			const meta = record.subarray(0, tabIndex)
 				.toString('utf8')
-			const path = record.subarray(tabIndex + 1)
-				.toString('utf8')
+			const { path, pathBytes, pathValid } = decodeGitPath(record.subarray(tabIndex + 1))
 			const [mode, type, oid] = meta.split(' ')
-			entries.push({ path, mode: mode ?? '', oid: oid ?? '', type: (type ?? 'blob') as GitTreeEntry['type'] })
+			entries.push({ path, pathBytes, pathValid, mode: mode ?? '', oid: oid ?? '', type: (type ?? 'blob') as GitTreeEntry['type'] })
 		}
 		start = i + 1
 	}
@@ -282,7 +392,12 @@ export type PathHistoryResult
 
 export interface TreeDiffEntry {
 	status: 'A' | 'M' | 'D'
+	/** Same lossless-decode-or-collision-free-placeholder contract as {@link GitTreeEntry.path} (Finding 4). */
 	path: string
+	/** Same contract as {@link GitTreeEntry.pathBytes}. */
+	pathBytes?: Uint8Array
+	/** Same contract as {@link GitTreeEntry.pathValid}. */
+	pathValid?: boolean
 }
 
 export type GitTreeDiff = readonly TreeDiffEntry[]
@@ -298,24 +413,26 @@ export type DiffTreesResult
  * status is a single letter with no similarity score or second path. Any
  * letter besides `A`/`D` (for example Git's `T` type-change status) is
  * reported as `M`: EF's transaction model only distinguishes introduced,
- * removed, and otherwise-changed content for a target's aggregate state.
+ * removed, and otherwise-changed content for a target's aggregate state. The
+ * path field is decoded with the same fatal-UTF-8 (Finding 4) contract as
+ * `parseLsTreeZ`; the status field is always exactly one ASCII letter, so it
+ * is decoded with an ordinary (never-failing) UTF-8 decode.
  */
 function parseNameStatusZ(buffer: Buffer): TreeDiffEntry[] {
-	const fields: string[] = []
+	const fieldBytes: Buffer[] = []
 	let start = 0
 	for (let i = 0; i < buffer.length; i++) {
 		if (buffer[i] !== 0x00)
 			continue
-		fields.push(buffer.subarray(start, i)
-			.toString('utf8'))
+		fieldBytes.push(buffer.subarray(start, i))
 		start = i + 1
 	}
 	const entries: TreeDiffEntry[] = []
-	for (let i = 0; i + 1 < fields.length; i += 2) {
-		const rawStatus = fields[i]!
-		const path = fields[i + 1]!
+	for (let i = 0; i + 1 < fieldBytes.length; i += 2) {
+		const rawStatus = fieldBytes[i]!.toString('utf8')
+		const { path, pathBytes, pathValid } = decodeGitPath(fieldBytes[i + 1]!)
 		const status: TreeDiffEntry['status'] = rawStatus === 'A' ? 'A' : rawStatus === 'D' ? 'D' : 'M'
-		entries.push({ status, path })
+		entries.push({ status, path, pathBytes, pathValid })
 	}
 	return entries
 }
