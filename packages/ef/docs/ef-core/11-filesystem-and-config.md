@@ -116,6 +116,29 @@ directory MAY therefore be absent while it contains no authoritative files.
 Tools create it when needed, and validation MUST NOT require placeholder files
 solely to preserve an empty directory.
 
+### Artifact discovery scope
+
+Validation and query operations parse as Artifact files exactly:
+
+- `.engineering/PROJECT.md`; and
+- every regular file matching `*.md` directly inside `.engineering/prd/`,
+  `.engineering/req/`, `.engineering/adr/`, `.engineering/pol/`, and
+  `.engineering/chg/`.
+
+No other path is parsed as an Artifact. A file outside `.engineering` is an
+ordinary repository file and is never interpreted as an Artifact, even when its
+name or frontmatter resembles one. Within `.engineering`, any entry that is not
+an Artifact file under this scope, a Core control file (`ef.yaml`,
+`.gitignore`), a managed Resource path under `.engineering/resources/`, or a
+conventional runtime path (`.cache/`, `.generated/`, `.tmp/`, `.lock`) violates
+the canonical layout and is reported with `EF-FS-003`. Unowned files inside the
+managed Resource root remain owned by `EF-RES-015`.
+
+An Artifact whose envelope is valid but whose file sits inside the wrong
+canonical type directory is an identity finding (`EF-ID-014`) rather than a
+layout finding, because the file is recognizably an Artifact in a
+type-incompatible location.
+
 ## Workspace Forms
 
 ### Single repository
@@ -501,6 +524,11 @@ Authoritative text files MUST use:
 - no byte-order mark; and
 - one final newline.
 
+The authoritative text files subject to these rules are `.engineering/ef.yaml`,
+`.engineering/.gitignore`, and every Artifact file. Local Resource files are
+owned opaque bytes: they are preserved and served exactly as stored and are not
+subject to Core text-normalization findings.
+
 All managed paths use Unicode NFC, `/` in serialized form, and exact filesystem
 case. Path comparison and bytewise ordering operate on the UTF-8 encoding of
 the serialized NFC form. A filesystem entry whose name has a different Unicode
@@ -561,6 +589,36 @@ validation, querying, or ordinary reads.
 An implementation that cannot read a schema required by the current project
 reports an incomplete operation; it MUST NOT silently rewrite or partially
 interpret the file.
+
+## Validation
+
+Filesystem, configuration, workspace, and text-representation validation uses
+the `EF-FS-*` namespace owned by this specification.
+
+A discovered and readable configuration that violates the schema rules above is
+a domain finding (`EF-FS-001`) under the [Validation and Integrity](09-validation.md) exit contract. A
+configuration that cannot be obtained or interpreted sufficiently to establish
+the requested command contract remains an incomplete operation rather than an
+`EF-FS-*` finding.
+
+The filesystem and configuration diagnostic codes are:
+
+| Code | Severity | Condition |
+|---|---|---|
+| `EF-FS-001` | error | Configuration violates the `ef/config@1` schema |
+| `EF-FS-002` | warning | Configuration fields or descriptors are not canonically ordered |
+| `EF-FS-003` | error | Entry inside `.engineering` violates the canonical layout |
+| `EF-FS-004` | error | Forbidden symlink at a managed path |
+| `EF-FS-005` | error | Authoritative text file violates UTF-8, LF, BOM, or final-newline rules |
+| `EF-FS-006` | error | Managed path violates Unicode NFC or exact-case requirements |
+| `EF-FS-007` | error | Required linked repository is missing |
+| `EF-FS-008` | error | Present linked repository is not an independent Git worktree at its configured root |
+
+`EF-FS-007` and `EF-FS-008` are emitted only by workspace validation.
+`EF-FS-004` applies to configured linked-repository paths only during workspace
+validation or discovery association, per the symlink policy above. Wrong-type
+canonical Artifact placement uses `EF-ID-014`; unowned managed Resource files
+use `EF-RES-015`; Resource-path normalization violations use `EF-RES-007`.
 
 ## Deferred
 

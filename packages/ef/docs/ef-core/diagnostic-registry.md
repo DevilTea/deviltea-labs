@@ -58,6 +58,14 @@ change. Deprecated codes remain listed permanently rather than being reused.
 | `EF-ENV-011` | warning | YAML envelope representation | fails only under strict or warnings-as-errors policy | [01-artifact-envelope.md](01-artifact-envelope.md) | Non-canonical field or extension ordering |
 | `EF-ENV-012` | error | YAML envelope representation | defined by the owning command and validation-completeness contract | [01-artifact-envelope.md](01-artifact-envelope.md) | Invalid or duplicate tag |
 | `EF-ENV-013` | warning | YAML envelope representation | fails only under strict or warnings-as-errors policy | [01-artifact-envelope.md](01-artifact-envelope.md) | Non-canonical tag ordering |
+| `EF-FS-001` | error | Filesystem, configuration, and workspace | defined by the owning command and validation-completeness contract | [11-filesystem-and-config.md](11-filesystem-and-config.md) | Configuration violates the `ef/config@1` schema |
+| `EF-FS-002` | warning | Filesystem, configuration, and workspace | fails only under strict or warnings-as-errors policy | [11-filesystem-and-config.md](11-filesystem-and-config.md) | Configuration fields or descriptors are not canonically ordered |
+| `EF-FS-003` | error | Filesystem, configuration, and workspace | defined by the owning command and validation-completeness contract | [11-filesystem-and-config.md](11-filesystem-and-config.md) | Entry inside `.engineering` violates the canonical layout |
+| `EF-FS-004` | error | Filesystem, configuration, and workspace | defined by the owning command and validation-completeness contract | [11-filesystem-and-config.md](11-filesystem-and-config.md) | Forbidden symlink at a managed path |
+| `EF-FS-005` | error | Filesystem, configuration, and workspace | defined by the owning command and validation-completeness contract | [11-filesystem-and-config.md](11-filesystem-and-config.md) | Authoritative text file violates UTF-8, LF, BOM, or final-newline rules |
+| `EF-FS-006` | error | Filesystem, configuration, and workspace | defined by the owning command and validation-completeness contract | [11-filesystem-and-config.md](11-filesystem-and-config.md) | Managed path violates Unicode NFC or exact-case requirements |
+| `EF-FS-007` | error | Filesystem, configuration, and workspace | defined by the owning command and validation-completeness contract | [11-filesystem-and-config.md](11-filesystem-and-config.md) | Required linked repository is missing |
+| `EF-FS-008` | error | Filesystem, configuration, and workspace | defined by the owning command and validation-completeness contract | [11-filesystem-and-config.md](11-filesystem-and-config.md) | Present linked repository is not an independent Git worktree at its configured root |
 | `EF-ID-001` | error | Artifact identity and canonical path | defined by the owning command and validation-completeness contract | [02-identity.md](02-identity.md) | Missing or malformed Artifact ID |
 | `EF-ID-002` | error | Artifact identity and canonical path | defined by the owning command and validation-completeness contract | [02-identity.md](02-identity.md) | ID prefix does not match Artifact type |
 | `EF-ID-003` | error | Artifact identity and canonical path | defined by the owning command and validation-completeness contract | [02-identity.md](02-identity.md) | Non-canonical or zero numeric component |
@@ -71,6 +79,7 @@ change. Deprecated codes remain listed permanently rather than being reused.
 | `EF-ID-011` | error | Artifact identity and canonical path | defined by the owning command and validation-completeness contract | [02-identity.md](02-identity.md) | Unsupported or customized core prefix |
 | `EF-ID-012` | error | Artifact identity and canonical path | defined by the owning command and validation-completeness contract | [02-identity.md](02-identity.md) | Provisional branch collision blocks integration |
 | `EF-ID-013` | error | Artifact identity and canonical path | defined by the owning command and validation-completeness contract | [02-identity.md](02-identity.md) | ID replacement did not update all structured references atomically |
+| `EF-ID-014` | error | Artifact identity and canonical path | defined by the owning command and validation-completeness contract | [02-identity.md](02-identity.md) | Artifact file is outside its type's canonical directory |
 | `EF-LIFE-001` | error | Lifecycle and whole-Artifact immutability | defined by the owning command and validation-completeness contract | [03-lifecycle.md](03-lifecycle.md) | Unknown lifecycle status |
 | `EF-LIFE-002` | error | Lifecycle and whole-Artifact immutability | defined by the owning command and validation-completeness contract | [03-lifecycle.md](03-lifecycle.md) | Status is not allowed for the Artifact type |
 | `EF-LIFE-003` | error | Lifecycle and whole-Artifact immutability | defined by the owning command and validation-completeness contract | [03-lifecycle.md](03-lifecycle.md) | Illegal lifecycle transition or prohibited first authoritative status |
@@ -114,6 +123,7 @@ change. Deprecated codes remain listed permanently rather than being reused.
 | `EF-RES-011` | error | Resource representation and ownership | defined by the owning command and validation-completeness contract | [06-resources.md](06-resources.md) | Resource role and normative value are incompatible |
 | `EF-RES-012` | info | Resource representation and ownership | unchanged | [06-resources.md](06-resources.md) | Optional Resource type-specific validation reported malformed content |
 | `EF-RES-013` | error | Resource representation and ownership | defined by the owning command and validation-completeness contract | [06-resources.md](06-resources.md) | Frozen Resource descriptor or local content was modified or removed |
+| `EF-RES-014` | error | Resource representation and ownership | defined by the owning command and validation-completeness contract | [06-resources.md](06-resources.md) | Local Resource location is not beneath its owner's managed Resource directory |
 | `EF-RES-015` | error | Resource representation and ownership | defined by the owning command and validation-completeness contract | [06-resources.md](06-resources.md) | Unowned file exists inside an EF-managed Resource root |
 | `EF-RES-016` | warning | Resource representation and ownership | fails only under strict or warnings-as-errors policy | [06-resources.md](06-resources.md) | Resource descriptors or fields are not canonically ordered |
 | `EF-RES-017` | warning | Resource representation and ownership | fails only under strict or warnings-as-errors policy | [06-resources.md](06-resources.md) | External Resource uses insecure HTTP rather than HTTPS |
@@ -143,11 +153,12 @@ change. Deprecated codes remain listed permanently rather than being reused.
 - **EF-BODY:** `EF-BODY-013`
 - **EF-CHG:** `EF-CHG-009`, `EF-CHG-011`, `EF-CHG-013`, `EF-CHG-014`, `EF-CHG-015`, `EF-CHG-016`
 - **EF-ENV:** None
+- **EF-FS:** None
 - **EF-ID:** None
 - **EF-LIFE:** `EF-LIFE-005`, `EF-LIFE-006`, `EF-LIFE-007`, `EF-LIFE-008`
 - **EF-QRY:** None
 - **EF-REL:** `EF-REL-009`, `EF-REL-010`, `EF-REL-011`, `EF-REL-012`, `EF-REL-013`, `EF-REL-014`, `EF-REL-016`
-- **EF-RES:** `EF-RES-014`
+- **EF-RES:** None
 - **EF-SUP:** `EF-SUP-006`, `EF-SUP-008`, `EF-SUP-009`, `EF-SUP-010`, `EF-SUP-011`, `EF-SUP-012`
 - **EF-VAL:** `EF-VAL-003`
 

@@ -396,6 +396,7 @@ The identity diagnostic codes are:
 | `EF-ID-011` | error | Unsupported or customized core prefix |
 | `EF-ID-012` | error | Provisional branch collision blocks integration |
 | `EF-ID-013` | error | ID replacement did not update all structured references atomically |
+| `EF-ID-014` | error | Artifact file is outside its type's canonical directory |
 
 Tools SHOULD report all files participating in a duplicate and SHOULD identify
 whether an authoritative issued Artifact or only provisional candidates are
