@@ -22,6 +22,7 @@
 
 import type { Diagnostic } from '../domain/diagnostics'
 import type { ArtifactType, Envelope } from '../domain/model'
+import type { FileIdentity } from '../platform/fs-facts'
 import type { SymlinkFact } from '../repository/symlinks'
 import type { ProjectSnapshot } from './snapshot'
 import { mkdir as fsMkdir, unlink as fsUnlink } from 'node:fs/promises'
@@ -33,7 +34,7 @@ import { validateStatus } from '../domain/lifecycle'
 import { CANONICAL_DIR_BY_TYPE, ID_PREFIX_BY_TYPE, SCHEMA_BY_TYPE } from '../domain/model'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
 import { extractSections, parseBody } from '../parsing/markdown'
-import { isDirectory, isRegularFile, isSymlink, readFileBytes } from '../platform/fs-facts'
+import { directoryIdentity, isDirectory, isRegularFile, isSymlink, readFileBytes, sameFileIdentity } from '../platform/fs-facts'
 import { publishViaHardLink, writeTempFileComplete } from '../platform/hard-link-publish'
 import { generateNonce } from '../platform/nonce'
 import { checkManagedSymlinks } from '../repository/symlinks'
@@ -283,6 +284,8 @@ export interface ApplyCreatePlanDeps {
 	generateNonce: () => string
 	/** Ensure the canonical type directory exists (11-filesystem-and-config.md: "Tools create it when needed" for a directory Git did not preserve). */
 	ensureDirectory: (path: string) => Promise<void>
+	/** `lstat`-derived identity of `path` iff it is right now a real, non-symlink directory; `undefined` otherwise. Used to bind successive managed-directory-chain re-verifications together (see `verifyManagedDirectoryChain`). */
+	directoryIdentity: (path: string) => Promise<FileIdentity | undefined>
 }
 
 /** Real filesystem access, composed from `platform/*` primitives. */
@@ -300,6 +303,7 @@ export const defaultApplyCreatePlanDeps: ApplyCreatePlanDeps = {
 	ensureDirectory: async (target) => {
 		await fsMkdir(target, { recursive: true })
 	},
+	directoryIdentity,
 }
 
 export type ApplyCreatePlanResult
@@ -323,25 +327,82 @@ async function targetExists(deps: ApplyCreatePlanDeps, targetPath: string): Prom
 	return (await deps.isRegularFile(targetPath)) || (await deps.isDirectory(targetPath)) || (await deps.isSymlink(targetPath))
 }
 
+/** `lstat` identity of `.engineering` and, when distinct, the type's canonical directory, captured by one `verifyManagedDirectoryChain` call for a later call to bind against. The type directory may not exist yet (before `ensureDirectory` creates it), so it has no identity to capture until it does. */
+export interface ManagedDirectoryChainIdentity {
+	engineering?: FileIdentity
+	typeDir?: FileIdentity
+}
+
+export type VerifyManagedDirectoryChainResult
+	= | { ok: true, identity: ManagedDirectoryChainIdentity }
+		| { ok: false }
+
 /**
- * Live, uncached `lstat` (via `deps.isSymlink`) of `.engineering` and the
- * type's canonical directory -- the same two-component managed chain
- * `managedDirectoryChainDiagnostics` checks from the snapshot at plan time,
- * re-verified against the real filesystem immediately before the temporary
+ * Re-verify one component of the managed directory chain: it must not be a
+ * symlink (as before), AND, if `previousIdentity` is supplied (a prior
+ * capture from an earlier checkpoint in this same `applyCreatePlan`
+ * invocation), it must still be a real directory with that IDENTICAL
+ * `dev`/`ino` identity. A component with no `previousIdentity` yet (the
+ * first checkpoint, or a component that did not exist as a directory at the
+ * previous checkpoint) is not rejected merely for currently being absent or
+ * not-yet-a-directory -- that is the ordinary, legitimate "not created yet"
+ * case `ensureDirectory` handles.
+ */
+async function verifyChainComponent(deps: ApplyCreatePlanDeps, componentPath: string, previousIdentity: FileIdentity | undefined): Promise<{ ok: true, identity: FileIdentity | undefined } | { ok: false }> {
+	if (await deps.isSymlink(componentPath))
+		return { ok: false }
+	const identity = await deps.directoryIdentity(componentPath)
+	if (previousIdentity !== undefined && (identity === undefined || !sameFileIdentity(identity, previousIdentity)))
+		return { ok: false }
+	return { ok: true, identity }
+}
+
+/**
+ * Live, uncached re-verification of the two-component managed chain
+ * (`.engineering`, the type's canonical directory) that
+ * `managedDirectoryChainDiagnostics` checks from the snapshot at plan time --
+ * re-checked against the real filesystem immediately before the temporary
  * write and again immediately before hard-link publication
  * (13-cli-contract.md "verify again that allocation and the canonical target
  * remain valid"). A snapshot taken at plan time cannot detect a chain
- * component replaced with a symlink afterward; only a fresh `lstat` at each
- * checkpoint can.
+ * component replaced afterward; only a fresh `lstat` at each checkpoint can.
+ *
+ * FINDING (same class as init.ts/fs-facts.ts): a symlink check alone, run
+ * fresh and independently at each checkpoint, does not catch a component
+ * that is swapped for a *different real directory* (no symlink ever
+ * involved) and left that way, or swapped out to a symlink and back to a
+ * different real directory strictly between two checkpoints -- at the
+ * moment either later checkpoint runs, `isSymlink` truthfully reports
+ * "false" throughout, so the chain looked "clean" at every individual check
+ * even though it never denoted the SAME directory the whole time. Threading
+ * `previous` through successive calls closes this: each checkpoint after the
+ * first also compares identity against what the immediately preceding
+ * checkpoint captured, so a component swapped for any other directory
+ * instance -- symlinked or not -- between two checkpoints is caught.
+ *
+ * As with every `lstat`-based check in the absence of an `openat`-style
+ * primitive (which Node does not expose), the narrow residual race is a
+ * component swapped out and fully restored to the exact SAME directory
+ * instance strictly between one checkpoint and the operation it guards; in
+ * that window the guarded operation still acts on the genuine, previously
+ * verified directory.
  */
-async function managedDirectoryChainSymlinked(deps: ApplyCreatePlanDeps, projectRoot: string, targetPath: string): Promise<boolean> {
+async function verifyManagedDirectoryChain(deps: ApplyCreatePlanDeps, projectRoot: string, targetPath: string, previous: ManagedDirectoryChainIdentity | undefined): Promise<VerifyManagedDirectoryChainResult> {
 	const engineeringPath = path.join(projectRoot, '.engineering')
 	const typeDirPath = path.dirname(targetPath)
-	if (await deps.isSymlink(engineeringPath))
-		return true
-	if (typeDirPath !== engineeringPath && await deps.isSymlink(typeDirPath))
-		return true
-	return false
+
+	const engineeringResult = await verifyChainComponent(deps, engineeringPath, previous?.engineering)
+	if (!engineeringResult.ok)
+		return { ok: false }
+
+	if (typeDirPath === engineeringPath)
+		return { ok: true, identity: { engineering: engineeringResult.identity } }
+
+	const typeDirResult = await verifyChainComponent(deps, typeDirPath, previous?.typeDir)
+	if (!typeDirResult.ok)
+		return { ok: false }
+
+	return { ok: true, identity: { engineering: engineeringResult.identity, typeDir: typeDirResult.identity } }
 }
 
 async function safeUnlink(deps: ApplyCreatePlanDeps, tempPath: string): Promise<void> {
@@ -370,8 +431,9 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	// only after it ran would be too late whenever `.engineering` itself is a
 	// symlink and the type directory does not yet exist beneath its target --
 	// `mkdir -p` would silently create it outside the project first.
-	if (await managedDirectoryChainSymlinked(deps, projectRoot, targetPath))
-		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink.` }
+	let chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, undefined)
+	if (!chainCheck.ok)
+		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
 
 	try {
 		await deps.ensureDirectory(path.dirname(targetPath))
@@ -380,11 +442,15 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		return { applied: false, outcome: 'incomplete', message: `Failed to ensure the canonical directory for '${plan.path}': ${(error as Error).message}` }
 	}
 
-	// Re-verify again immediately before the temporary write: a symlink
-	// substituted into the chain during/after `ensureDirectory` itself must
-	// still be caught before any file content is written through it.
-	if (await managedDirectoryChainSymlinked(deps, projectRoot, targetPath))
-		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink.` }
+	// Re-verify again immediately before the temporary write: a symlink or a
+	// different-directory swap substituted into the chain during/after
+	// `ensureDirectory` itself must still be caught before any file content
+	// is written through it. Bound to the identity `chainCheck` above just
+	// captured, not merely a fresh symlink check, so a component silently
+	// replaced with a *different* real directory is caught too.
+	chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, chainCheck.identity)
+	if (!chainCheck.ok)
+		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
 
 	const tempPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.tmp-${deps.generateNonce()}`)
 
@@ -410,12 +476,14 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
 	}
 
-	// Re-verify again immediately before hard-link publication: a symlink
-	// substituted into the chain during the temporary write itself must still
-	// be caught before the canonical target is created through it.
-	if (await managedDirectoryChainSymlinked(deps, projectRoot, targetPath)) {
+	// Re-verify again immediately before hard-link publication: a symlink or
+	// a different-directory swap substituted into the chain during the
+	// temporary write itself must still be caught before the canonical
+	// target is created through it.
+	chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, chainCheck.identity)
+	if (!chainCheck.ok) {
 		await safeUnlink(deps, tempPath)
-		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink.` }
+		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
 	}
 
 	const publishResult = await deps.publishViaHardLink(tempPath, targetPath)

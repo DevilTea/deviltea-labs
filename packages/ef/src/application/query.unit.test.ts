@@ -425,6 +425,161 @@ N/A.
 N/A.
 `
 
+/** A superseded requirement with NO direct replacement (`EF-SUP-001`), for sixth-round Finding 6's zero-edge resolve-current regression. */
+const REQ_SUP_NO_REPLACEMENT = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-960
+title: Superseded With No Replacement
+status: superseded
+summary: A superseded requirement with no direct replacement, for Finding 6's EF-SUP-001 zero-edge regression.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Exercises EF-SUP-001: a superseded Artifact with no direct replacement.
+
+## Rationale
+
+Finding 6 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+/** An ACTIVE requirement illegally declaring 'superseded-by' (\`EF-SUP-002\`), for sixth-round Finding 6's zero-edge resolve-current regression. */
+const REQ_SUP_ILLEGAL_DECLARE = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-961
+title: Active Illegally Declaring Superseded-By
+status: active
+summary: An active requirement that illegally declares a 'superseded-by' relation, for Finding 6's EF-SUP-002 zero-edge regression.
+tags: []
+relations:
+  - type: superseded-by
+    target: REQ-001
+resources: []
+---
+
+## Requirement
+
+Exercises EF-SUP-002: a non-superseded Artifact declaring 'superseded-by'.
+
+## Rationale
+
+Finding 6 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+/** A superseded requirement whose replacement set duplicates the same target twice (\`EF-REL-006\` on a 'superseded-by' entry), for seventh-round Finding 7's resolve-current regression. */
+const REQ_SUP_DUP_REPLACEMENT = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-962
+title: Superseded With Duplicate Replacement Edge
+status: superseded
+summary: A superseded requirement whose replacement set duplicates the same target twice, for Finding 7's EF-REL-006 resolve-current regression.
+tags: []
+relations:
+  - type: superseded-by
+    target: REQ-001
+  - type: superseded-by
+    target: REQ-001
+resources: []
+---
+
+## Requirement
+
+Exercises EF-REL-006 (duplicate relation) on a 'superseded-by' entry.
+
+## Rationale
+
+Finding 7 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+/** A requirement whose relations array declares the same ('derived-from', PRD-001) pair twice (\`EF-REL-006\`), for Finding 7's direct-relations/trace/impact regressions. */
+const REQ_DUP_RELATION = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-963
+title: Duplicate Relation Entry
+status: active
+summary: A requirement whose relations array declares the same (type, target) pair twice, for Finding 7's EF-REL-006 regression.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-001
+  - type: derived-from
+    target: PRD-001
+resources: []
+---
+
+## Requirement
+
+Exercises EF-REL-006 (duplicate relation).
+
+## Rationale
+
+Finding 7 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+/**
+ * A requirement with a clean 'derived-from' edge and a semantically invalid
+ * 'governed-by' edge (\`EF-REL-004\`: a 'governed-by' target must be a policy,
+ * not another requirement), for Finding 9's per-(source,type) edge-loss
+ * regression: a traversal restricted to 'derived-from' must be unaffected by
+ * loss confined to 'governed-by'. Deliberately semantic (not shape/vocabulary)
+ * loss: \`semanticEdgeLossArtifactIds\` is NOT folded into
+ * \`projectionLossArtifactIds\` (unlike \`edgeLossArtifactIds\`), so embedding
+ * REQ-964 itself as an output node does not ALSO trigger the separate,
+ * type-agnostic Finding 4 projection gate -- isolating this round's per-type
+ * edge-TRUST narrowing from that orthogonal concern.
+ */
+const REQ_MIXED_TYPE_LOSS = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-964
+title: Mixed Type Relation Loss
+status: active
+summary: A requirement with a clean 'derived-from' edge and a semantically invalid 'governed-by' edge, for Finding 9's per-type edge-loss regression.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-001
+  - type: governed-by
+    target: REQ-001
+resources: []
+---
+
+## Requirement
+
+Exercises Finding 9: an EF-REL-004 (semantically invalid 'governed-by' target) confined to 'governed-by' must not gate an outgoing traversal restricted to 'derived-from'.
+
+## Rationale
+
+Finding 9 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
 async function writeFile(root: string, relativePath: string, content: string): Promise<void> {
 	const fullPath = path.join(root, relativePath)
 	await fs.mkdir(path.dirname(fullPath), { recursive: true })
@@ -495,6 +650,8 @@ function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRe
 		chgEffects: [],
 		graphTrustworthy: true,
 		edgeLossArtifactIds: new Set(),
+		edgeLossUntypedArtifactIds: new Set(),
+		edgeLossRelationTypesBySourceId: new Map(),
 		relationExtensionLossArtifactIds: new Set(),
 		resourceLossArtifactIds: new Set(),
 		tagLossArtifactIds: new Set(),
@@ -504,8 +661,10 @@ function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRe
 		byteDecodingLossArtifactIds: new Set(),
 		projectionLossArtifactIds: new Set(),
 		semanticEdgeLossArtifactIds: new Set(),
+		semanticEdgeLossRelationTypesBySourceId: new Map(),
 		statusInvalidArtifactIds: new Set(),
 		supersessionCrossTypeArtifactIds: new Set(),
+		supersessionFactInvalidArtifactIds: new Set(),
 		resourceFieldLossById: new Map(),
 	}
 	return { snapshot, validation }
@@ -1625,6 +1784,176 @@ Finding 9 regression fixture.
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-013')
 		})
+
+		// Sixth-round Finding 8: the consumed-field set a `resourceType`/
+		// `resourceRole`/`resourceNormative` filter checks against must be built
+		// from the options THIS request actually supplies, not a fixed union of
+		// every field `list` could ever filter on -- otherwise a malformed field
+		// this request never reads (e.g. `role`/`normative` for a
+		// `resource_type`-only request) would falsely gate it. Each fixture
+		// below deliberately declares a valid (non-loss-affected), non-matching
+		// value for the field the test's own filter actually reads, so the
+		// Artifact is never returned on the page at all -- isolating this
+		// round's PRE-pagination membership-risk fix (Finding 8) from the
+		// separate, legitimate per-RETURNED-Artifact completeness gate (Finding
+		// A), which fires for a completely different, orthogonal reason
+		// whenever a malformed Artifact IS actually returned.
+		async function writeMalformedRoleResource(): Promise<void> {
+			await writeFile(tempDir, '.engineering/req/REQ-972.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-972
+title: Malformed Role Field
+status: active
+summary: A requirement whose Resource 'role' field is malformed, for Finding 8's cross-field non-interference regression.
+tags: []
+relations: []
+resources:
+  - type: json-schema
+    location: .engineering/resources/REQ-972/notes.md
+    role: 123
+    media_type: text/markdown
+    normative: false
+    description: Notes.
+---
+
+## Requirement
+
+Exercises EF-RES-001 confined to the 'role' field.
+
+## Rationale
+
+Finding 8 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+			await writeFile(tempDir, '.engineering/resources/REQ-972/notes.md', '# Notes\n')
+		}
+
+		async function writeMalformedNormativeResource(): Promise<void> {
+			await writeFile(tempDir, '.engineering/req/REQ-970.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-970
+title: Malformed Normative Field
+status: active
+summary: A requirement whose Resource 'normative' field is malformed, for Finding 8's cross-field non-interference regression.
+tags: []
+relations: []
+resources:
+  - type: json-schema
+    location: .engineering/resources/REQ-970/notes.md
+    role: explanation
+    media_type: text/markdown
+    normative: "yes"
+    description: Notes.
+---
+
+## Requirement
+
+Exercises EF-RES-001 confined to the 'normative' field.
+
+## Rationale
+
+Finding 8 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+			await writeFile(tempDir, '.engineering/resources/REQ-970/notes.md', '# Notes\n')
+		}
+
+		async function writeMalformedTypeResource(): Promise<void> {
+			await writeFile(tempDir, '.engineering/req/REQ-971.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-971
+title: Malformed Type Field
+status: active
+summary: A requirement whose Resource 'type' field is malformed, for Finding 8's cross-field non-interference regression.
+tags: []
+relations: []
+resources:
+  - type: 123
+    location: .engineering/resources/REQ-971/notes.md
+    role: explanation
+    media_type: text/markdown
+    normative: false
+    description: Notes.
+---
+
+## Requirement
+
+Exercises EF-RES-001 confined to the 'type' field.
+
+## Rationale
+
+Finding 8 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+			await writeFile(tempDir, '.engineering/resources/REQ-971/notes.md', '# Notes\n')
+		}
+
+		it('a resource_type-only filter is unaffected by EF-RES-001 confined to \'role\'/\'normative\' elsewhere', async () => {
+			// REQ-972/REQ-970 both declare a valid, non-matching Resource 'type'
+			// (`json-schema`, not the requested `reference`), so neither is ever
+			// returned -- isolating the pre-pagination membership-risk check.
+			await writeMalformedRoleResource()
+			await writeMalformedNormativeResource()
+			const withLoss = await reloadContext()
+			expect([...(withLoss.validation.resourceFieldLossById.get('REQ-972') ?? [])])
+				.toEqual(['role'])
+			expect([...(withLoss.validation.resourceFieldLossById.get('REQ-970') ?? [])])
+				.toEqual(['normative'])
+
+			const result = await executeQuery(withLoss, { kind: 'list', resourceType: 'reference' })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.artifacts.map(a => a.id))
+				.not.toEqual(expect.arrayContaining(['REQ-970', 'REQ-972']))
+		})
+
+		it('a resource_role-only filter is unaffected by EF-RES-001 confined to \'type\'/\'normative\' elsewhere', async () => {
+			// REQ-971/REQ-970 both declare a valid, non-matching Resource 'role'
+			// (`explanation`, not the requested `reference`).
+			await writeMalformedTypeResource()
+			await writeMalformedNormativeResource()
+			const withLoss = await reloadContext()
+			expect([...(withLoss.validation.resourceFieldLossById.get('REQ-971') ?? [])])
+				.toEqual(['type'])
+			expect([...(withLoss.validation.resourceFieldLossById.get('REQ-970') ?? [])])
+				.toEqual(['normative'])
+
+			const result = await executeQuery(withLoss, { kind: 'list', resourceRole: 'reference' })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.artifacts.map(a => a.id))
+				.not.toEqual(expect.arrayContaining(['REQ-970', 'REQ-971']))
+		})
+
+		it('a resource_normative-only filter is unaffected by EF-RES-001 confined to \'type\'/\'role\' elsewhere', async () => {
+			// REQ-971/REQ-972 both declare a valid, non-matching Resource
+			// 'normative' (`false`, not the requested `true`).
+			await writeMalformedTypeResource()
+			await writeMalformedRoleResource()
+			const withLoss = await reloadContext()
+			expect([...(withLoss.validation.resourceFieldLossById.get('REQ-971') ?? [])])
+				.toEqual(['type'])
+			expect([...(withLoss.validation.resourceFieldLossById.get('REQ-972') ?? [])])
+				.toEqual(['role'])
+
+			const result = await executeQuery(withLoss, { kind: 'list', resourceNormative: true })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.artifacts.map(a => a.id))
+				.not.toEqual(expect.arrayContaining(['REQ-971', 'REQ-972']))
+		})
 	})
 
 	describe('search', () => {
@@ -1777,6 +2106,51 @@ Finding 9 regression fixture.
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-007')
 		})
+
+		// Seventh-round Finding 7: EF-REL-006 (duplicate relation) is now tracked
+		// in `edgeLossArtifactIds`, so an outgoing-only query that consults the
+		// affected Artifact's own array is gated the same way any other
+		// edge-loss cause already was.
+		it('eF-QRY-013 for an outgoing query whose own relations array declares a duplicate (type, target) pair (EF-REL-006)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-963.md', REQ_DUP_RELATION)
+			const badContext = await reloadContext()
+			expect([...badContext.validation.edgeLossArtifactIds])
+				.toContain('REQ-963')
+
+			const result = await executeQuery(badContext, { kind: 'relations', id: 'REQ-963', direction: 'outgoing' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		// Sixth-round Finding 9: a duplicate-relation loss (EF-REL-006) confined
+		// to 'governed-by' must not gate an outgoing query restricted to
+		// 'derived-from' -- that semantically invalid edge can never be read or
+		// returned by this specific traversal.
+		it('a semantic edge loss (EF-REL-004) confined to \'governed-by\' does NOT gate an outgoing query restricted to \'derived-from\'', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-964.md', REQ_MIXED_TYPE_LOSS)
+			const mixedContext = await reloadContext()
+			expect([...(mixedContext.validation.semanticEdgeLossRelationTypesBySourceId.get('REQ-964') ?? [])])
+				.toEqual(['governed-by'])
+
+			const result = await executeQuery(mixedContext, { kind: 'relations', id: 'REQ-964', direction: 'outgoing', types: ['derived-from'] })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.edges)
+				.toEqual([{ source: 'REQ-964', type: 'derived-from', target: 'PRD-001' }])
+		})
+
+		it('the SAME semantic edge loss (EF-REL-004) DOES gate an outgoing query restricted to \'governed-by\' (the exact affected type)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-964.md', REQ_MIXED_TYPE_LOSS)
+			const mixedContext = await reloadContext()
+
+			const result = await executeQuery(mixedContext, { kind: 'relations', id: 'REQ-964', direction: 'outgoing', types: ['governed-by'] })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
 	})
 
 	describe('trace', () => {
@@ -1855,6 +2229,42 @@ Finding 9 regression fixture.
 				.toBe(false)
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-007')
+		})
+
+		// Seventh-round Finding 7: same EF-REL-006 edge-trust gating as
+		// `relations`' outgoing case.
+		it('eF-QRY-013 for an outgoing trace whose root declares a duplicate (type, target) pair (EF-REL-006)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-963.md', REQ_DUP_RELATION)
+			const badContext = await reloadContext()
+
+			const result = await executeQuery(badContext, { kind: 'trace', roots: ['REQ-963'], types: ['derived-from'], direction: 'outgoing', maxDepth: 1 })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		// Sixth-round Finding 9: same per-(source,type) narrowing as `relations`.
+		it('a semantic edge loss (EF-REL-004) confined to \'governed-by\' does NOT gate an outgoing trace restricted to \'derived-from\'', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-964.md', REQ_MIXED_TYPE_LOSS)
+			const mixedContext = await reloadContext()
+
+			const result = await executeQuery(mixedContext, { kind: 'trace', roots: ['REQ-964'], types: ['derived-from'], direction: 'outgoing', maxDepth: 1 })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.edges)
+				.toEqual([{ source: 'REQ-964', type: 'derived-from', target: 'PRD-001' }])
+		})
+
+		it('the SAME semantic edge loss (EF-REL-004) DOES gate an outgoing trace restricted to \'governed-by\' (the exact affected type)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-964.md', REQ_MIXED_TYPE_LOSS)
+			const mixedContext = await reloadContext()
+
+			const result = await executeQuery(mixedContext, { kind: 'trace', roots: ['REQ-964'], types: ['governed-by'], direction: 'outgoing', maxDepth: 1 })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
 		})
 	})
 
@@ -1960,6 +2370,48 @@ Finding 9 regression fixture.
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-007')
 		})
+
+		// Sixth-round Finding 6: `impact`'s `resolve_current` option runs the
+		// identical per-root current-resolution algorithm `resolve-current`
+		// does, and must gate on the same zero-edge-reachable invalid
+		// supersession facts.
+		it('eF-QRY-013 when resolve_current reaches a superseded root with no direct replacement (EF-SUP-001), even with zero resolution edges', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-960.md', REQ_SUP_NO_REPLACEMENT)
+			const badContext = await reloadContext()
+
+			const result = await executeQuery(badContext, { kind: 'impact', roots: ['REQ-960'], maxDepth: 1, resolveCurrent: true })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('eF-QRY-013 when resolve_current reaches an active root illegally declaring \'superseded-by\' (EF-SUP-002), even though it resolves to itself with zero edges', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-961.md', REQ_SUP_ILLEGAL_DECLARE)
+			const badContext = await reloadContext()
+
+			const result = await executeQuery(badContext, { kind: 'impact', roots: ['REQ-961'], maxDepth: 1, resolveCurrent: true })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		// Seventh-round Finding 7: impact's traversal direction is always
+		// incoming, so it stays gated by the project-wide `edgeLossArtifactIds`
+		// check regardless of where in the project the duplicate relation lives.
+		it('eF-QRY-013 project-wide when ANY Artifact has a duplicate relation entry (EF-REL-006), even for an unrelated impact root', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-963.md', REQ_DUP_RELATION)
+			const badContext = await reloadContext()
+			expect([...badContext.validation.edgeLossArtifactIds])
+				.toContain('REQ-963')
+
+			const result = await executeQuery(badContext, { kind: 'impact', roots: ['REQ-001'], maxDepth: 1 })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
 	})
 
 	describe('resolve-current', () => {
@@ -2011,6 +2463,67 @@ Finding 9 regression fixture.
 			const result = await executeQuery(ghostContext, { kind: 'resolve-current', id: 'REQ-902' })
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-008')
+		})
+
+		// Sixth-round Finding 6: a superseded Artifact with NO direct replacement
+		// (EF-SUP-001) resolves via `domain/supersession.ts#resolveCurrent` to
+		// `currentIds: []` with zero edges -- exactly the same shape as a
+		// legitimate "retired replacement leaf" (05-supersession "Retired
+		// replacement leaves"). Because the prior gate only inspected
+		// `result.edges`' own `source` side, a ZERO-edge resolution never
+		// populated `consumedSourceIds` at all, so this invalid supersession
+		// fact silently escaped every trust check.
+		it('eF-QRY-013 for a superseded input with no direct replacement (EF-SUP-001), even though the resolution itself has zero edges', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-960.md', REQ_SUP_NO_REPLACEMENT)
+			const badContext = await reloadContext()
+			expect([...badContext.validation.supersessionFactInvalidArtifactIds])
+				.toContain('REQ-960')
+
+			const result = await executeQuery(badContext, { kind: 'resolve-current', id: 'REQ-960' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		// Sixth-round Finding 6: an ACTIVE Artifact illegally declaring
+		// 'superseded-by' (EF-SUP-002) resolves to itself: `resolveCurrent`
+		// branches on `status === 'active'` and never reads the (illegal)
+		// `superseded-by` array at all, so no edge is ever produced and the
+		// prior `consumedSourceIds`-only gate could never see this fact either
+		// -- even though the INPUT itself is the affected Artifact.
+		it('eF-QRY-013 for an active input illegally declaring \'superseded-by\' (EF-SUP-002), even though it resolves to itself with zero edges', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-961.md', REQ_SUP_ILLEGAL_DECLARE)
+			const badContext = await reloadContext()
+			expect([...badContext.validation.supersessionFactInvalidArtifactIds])
+				.toContain('REQ-961')
+
+			const result = await executeQuery(badContext, { kind: 'resolve-current', id: 'REQ-961' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		// Seventh-round Finding 7: EF-REL-006 (duplicate relation) confined to a
+		// 'superseded-by' entry is now tracked in `edgeLossArtifactIds`, so the
+		// existing consumed-source edge-trust check gates the source once its
+		// outgoing array is actually traversed.
+		it('eF-QRY-013 when resolve-current traverses a superseded source whose replacement set duplicates the same target twice (EF-REL-006)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-962.md', REQ_SUP_DUP_REPLACEMENT)
+			const badContext = await reloadContext()
+			expect([...badContext.validation.edgeLossArtifactIds])
+				.toContain('REQ-962')
+
+			const result = await executeQuery(badContext, { kind: 'resolve-current', id: 'REQ-962' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
 		})
 	})
 

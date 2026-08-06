@@ -600,6 +600,44 @@ describe('applyCreatePlan', () => {
 		}
 	})
 
+	it('rejects when the type directory is replaced with a DIFFERENT real directory, no symlink involved, between checkpoints (Finding 2b regression)', async () => {
+		// Same class as the fs-facts.ts / init.ts findings: a pure `isSymlink`
+		// check, run fresh and independently at each checkpoint, cannot
+		// distinguish the untouched original directory from a directory
+		// substituted with a *different* real directory at the identical path
+		// -- no symlink is ever present at the moment either check runs.
+		// Identity (`dev`/`ino`) binding across checkpoints is required to
+		// catch it.
+		const plan = computePlanOrThrow()
+		const reqDirPath = path.join(tempDir, '.engineering/req')
+		const backupPath = path.join(tempDir, '.engineering/req-original-backup')
+		await fs.mkdir(reqDirPath, { recursive: true })
+
+		const deps = {
+			...defaultApplyCreatePlanDeps,
+			ensureDirectory: async (target: string) => {
+				await defaultApplyCreatePlanDeps.ensureDirectory(target)
+				if (target === reqDirPath) {
+					await fs.rename(reqDirPath, backupPath)
+					await fs.mkdir(reqDirPath)
+				}
+			},
+		}
+
+		const result = await applyCreatePlan(plan, tempDir, deps)
+		expect(result.applied)
+			.toBe(false)
+		expect(result.applied === false && result.outcome)
+			.toBe('rejected')
+
+		// Nothing was published into the substituted directory, and the
+		// original (backed-up) directory was never touched either.
+		expect(await fs.readdir(reqDirPath))
+			.toEqual([])
+		expect(await fs.readdir(backupPath))
+			.toEqual([])
+	})
+
 	it('produces a draft file that validates as a draft under full snapshot validation', async () => {
 		const engineeringDir = path.join(tempDir, '.engineering')
 		await fs.mkdir(engineeringDir, { recursive: true })

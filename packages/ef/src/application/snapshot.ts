@@ -30,6 +30,7 @@ import type {
 import type { FileIdentity, ReadRegularFileNoFollowResult, WalkEntry } from '../platform/fs-facts'
 import type { DecodeConfigResult } from '../repository/config'
 import path from 'pathe'
+import { severityOf } from '../domain/diagnostic-codes'
 import { decodeEnvelope } from '../domain/envelope'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
 import { extractSections, parseBody } from '../parsing/markdown'
@@ -41,6 +42,9 @@ const ENGINEERING_DIR = '.engineering'
 const CONFIG_PATH = '.engineering/ef.yaml'
 const GITIGNORE_PATH = '.engineering/.gitignore'
 const RESOURCE_ROOT_PREFIX = '.engineering/resources/'
+/** UTF-8 bytes of {@link ENGINEERING_DIR}, for byte-level (not string) prefix tests against a tree entry's raw path bytes (Finding 4: needed when `path` itself is an invalid-path placeholder, not a real decoded string). */
+const ENGINEERING_DIR_BYTES = new TextEncoder()
+	.encode(ENGINEERING_DIR)
 
 // ---------------------------------------------------------------------------
 // Shape
@@ -160,7 +164,7 @@ export interface SnapshotFsDeps {
 	isDirectory: (target: string) => Promise<boolean>
 	isSymlink: (target: string) => Promise<boolean>
 	walkDirectory: (root: string) => Promise<WalkEntry[]>
-	readRegularFileNoFollow: (target: string, expectedIdentity?: FileIdentity) => Promise<ReadRegularFileNoFollowResult>
+	readRegularFileNoFollow: (target: string, expectedIdentity?: FileIdentity, containmentRoot?: string) => Promise<ReadRegularFileNoFollowResult>
 }
 
 /** Real filesystem access via `platform/fs-facts.ts`. */
@@ -169,7 +173,15 @@ export const defaultSnapshotFsDeps: SnapshotFsDeps = { isDirectory, isSymlink, w
 /**
  * Read one file this load already observed via `walkDirectory` (`walkEntry`),
  * binding the read to that exact `lstat` observation
- * (`walkEntry.identity`) through `deps.readRegularFileNoFollow`.
+ * (`walkEntry.identity`) through `deps.readRegularFileNoFollow`, and, via
+ * `containmentRoot`, ancestor-verifying every directory between it and
+ * `absoluteTarget` both before and after the read -- identity binding on the
+ * target file alone cannot catch one of its ancestor directories (e.g.
+ * `.engineering` itself, or `.engineering/req`) being moved out of the
+ * project and symlinked back to that exact (relocated) directory, which
+ * leaves the target file's own `dev`/`ino` unchanged even though it is now
+ * reached through a forbidden ancestor symlink (see
+ * `platform/fs-facts.ts`'s `readRegularFileNoFollow` doc).
  *
  * `walkEntry === undefined` means the walk never observed anything at this
  * path at all: a genuine, ordinary absence (e.g. no `.engineering/ef.yaml`),
@@ -185,7 +197,7 @@ export const defaultSnapshotFsDeps: SnapshotFsDeps = { isDirectory, isSymlink, w
  * `snapshot.artifacts`/`configBytes`/`gitignoreBytes` without ever setting
  * `hasUndecodedArtifact` or any other incomplete marker downstream).
  */
-async function readObservedFile(deps: SnapshotFsDeps, absoluteTarget: string, engineeringRelativePath: string, walkEntry: WalkEntry | undefined): Promise<Uint8Array | undefined> {
+async function readObservedFile(deps: SnapshotFsDeps, absoluteTarget: string, engineeringRelativePath: string, walkEntry: WalkEntry | undefined, containmentRoot: string): Promise<Uint8Array | undefined> {
 	if (walkEntry === undefined)
 		return undefined
 
@@ -193,7 +205,7 @@ async function readObservedFile(deps: SnapshotFsDeps, absoluteTarget: string, en
 		throw new Error(`'${ENGINEERING_DIR}/${engineeringRelativePath}' was observed as a non-regular-file entry during this load and cannot be read as a file.`)
 	}
 
-	const result = await deps.readRegularFileNoFollow(absoluteTarget, walkEntry.identity)
+	const result = await deps.readRegularFileNoFollow(absoluteTarget, walkEntry.identity, containmentRoot)
 	if (result.kind === 'ok')
 		return result.bytes
 
@@ -231,6 +243,7 @@ export async function loadSnapshotFromWorkingTree(projectRoot: string, deps: Sna
 			path.join(projectRoot, ENGINEERING_DIR, engineeringRelativePath),
 			engineeringRelativePath,
 			walkEntryByRelativePath.get(engineeringRelativePath),
+			projectRoot,
 		)
 
 		const configBytes = await readObserved('ef.yaml')
@@ -331,16 +344,57 @@ async function readBlobOrThrow(git: GitRepository, entry: GitTreeEntry | undefin
 		return result.bytes
 	// `result.kind` is `missing` or `not-a-blob`: the tree listing already
 	// proved `entry` exists as a blob-type entry (only entries added to
-	// `blobEntries` -- i.e. `entry.type === 'blob'` -- ever reach this
-	// function), so a follow-up read reporting it missing or not a blob is
-	// repository/read corruption on an object already known to exist, never
-	// the file's genuine absence. Silently returning `undefined` here would
-	// drop the config, control file, or Artifact from the materialized
-	// snapshot without a trace -- an omitted Artifact is then invisible to
-	// `hasUndecodedArtifact`, letting validation/query look complete over an
-	// incomplete snapshot.
+	// `blobEntries` -- i.e. entries `entryKindOf` classifies as `'file'` --
+	// ever reach this function), so a follow-up read reporting it missing or
+	// not a blob is repository/read corruption on an object already known to
+	// exist, never the file's genuine absence. Silently returning `undefined`
+	// here would drop the config, control file, or Artifact from the
+	// materialized snapshot without a trace -- an omitted Artifact is then
+	// invisible to `hasUndecodedArtifact`, letting validation/query look
+	// complete over an incomplete snapshot.
 	const detail = result.kind === 'not-a-blob' ? `not a blob (actual type '${result.actualType}')` : 'missing'
 	throw new GitReadError(`'${entry.path}' was listed in the tree as blob '${entry.oid}' but reading it reported it ${detail}.`)
+}
+
+/** Byte-level (not string) test for whether raw tree-entry path bytes lie at or beneath `.engineering`. Required whenever `pathValid` is `false` (Finding 4): the entry's `path` is then a synthesized placeholder, not a real decoded string, so `.startsWith('.engineering/')` would never match it even for an entry whose actual raw bytes genuinely are beneath `.engineering`. */
+function pathBytesUnderEngineering(pathBytes: Uint8Array): boolean {
+	if (pathBytes.length < ENGINEERING_DIR_BYTES.length)
+		return false
+	for (let i = 0; i < ENGINEERING_DIR_BYTES.length; i++) {
+		if (pathBytes[i] !== ENGINEERING_DIR_BYTES[i])
+			return false
+	}
+	return pathBytes.length === ENGINEERING_DIR_BYTES.length || pathBytes[ENGINEERING_DIR_BYTES.length] === 0x2F /* '/' */
+}
+
+function toHexString(bytes: Uint8Array): string {
+	let out = ''
+	for (let i = 0; i < bytes.length; i++) {
+		out += bytes[i]!.toString(16)
+			.padStart(2, '0')
+	}
+	return out
+}
+
+/**
+ * Finding 4: a Git tree entry whose raw path bytes are not valid UTF-8, found
+ * beneath `.engineering`, is a domain finding rather than a silent
+ * materialization gap -- 11-filesystem-and-config.md requires every managed
+ * path to be valid, NFC-normalized Unicode text, and a non-UTF-8 byte
+ * sequence fails even the more basic "is this Unicode text at all" bar
+ * `EF-FS-006` ("Managed path violates Unicode NFC or exact-case
+ * requirements") already covers. This is reported on its own, without ever
+ * decoding the entry's bytes lossily (with U+FFFD substitutes) to synthesize
+ * a displayable path string, which could alias a different, genuinely valid
+ * managed path onto the identical string.
+ */
+function invalidGitPathDiagnostic(pathBytes: Uint8Array): Diagnostic {
+	return {
+		code: 'EF-FS-006',
+		severity: severityOf('EF-FS-006'),
+		message: `A path beneath '${ENGINEERING_DIR}' in the materialized commit tree is not valid UTF-8 and cannot be represented as Unicode text (raw path bytes: 0x${toHexString(pathBytes)}).`,
+		related: [],
+	}
 }
 
 /**
@@ -365,14 +419,50 @@ export async function loadSnapshotFromCommit(git: GitRepository, commitOid: stri
 			return { ok: false, reason: 'read-error', message: `Commit '${commitOid}' tree could not be read: ${treeResult.message}` }
 		}
 
-		const engineeringEntries = treeResult.entries.filter(entry => entry.path === ENGINEERING_DIR || entry.path.startsWith(`${ENGINEERING_DIR}/`))
+		// Finding 4: an entry with `pathValid === false` has a `path` that is a
+		// synthesized, collision-free placeholder, never a real decoded string
+		// -- it can never equal `ENGINEERING_DIR` or start with
+		// `${ENGINEERING_DIR}/` (by construction, `application/../git/
+		// repository.ts`'s marker prefix cannot appear in any genuine decoded
+		// path), so the ordinary string-based filter below correctly excludes
+		// it from `engineeringEntries` on its own. Whether that invalid path
+		// actually lay beneath `.engineering`, though, can only be answered by
+		// inspecting its RAW BYTES (never its placeholder `path`) -- checked
+		// here, separately, to still surface it as a domain finding instead of
+		// silently discarding it as though it were an ordinary, irrelevant,
+		// outside-`.engineering` path.
+		const invalidPathDiagnostics: Diagnostic[] = []
+		const engineeringEntries: GitTreeEntry[] = []
+		for (const entry of treeResult.entries) {
+			if (entry.pathValid === false) {
+				const pathBytes = entry.pathBytes ?? new TextEncoder()
+					.encode(entry.path)
+				if (pathBytesUnderEngineering(pathBytes))
+					invalidPathDiagnostics.push(invalidGitPathDiagnostic(pathBytes))
+				continue
+			}
+			if (entry.path === ENGINEERING_DIR || entry.path.startsWith(`${ENGINEERING_DIR}/`))
+				engineeringEntries.push(entry)
+		}
 
 		const entryKinds = new Map<string, SnapshotEntryKind>()
 		const blobEntries = new Map<string, GitTreeEntry>()
 		for (const entry of engineeringEntries) {
 			const kind = entryKindOf(entry)
 			entryKinds.set(entry.path, kind)
-			if (entry.type === 'blob')
+			// Finding 5: `ls-tree` reports a symlink (mode `120000`) as
+			// `type: 'blob'` exactly like an ordinary file, so filtering on
+			// `entry.type === 'blob'` alone (the previous implementation) let a
+			// symlinked `.engineering/ef.yaml` (or any other managed file)
+			// reach `readBlobOrThrow` below, which would then read the
+			// SYMLINK'S TARGET TEXT and decode it as the file's own content.
+			// `entryKindOf` already classifies a `120000` entry as `'symlink'`
+			// (never `'file'`), so gating on `kind === 'file'` here excludes it;
+			// `entryKinds` above still records it as `'symlink'` regardless, so
+			// `checkManagedSymlinks`'s `EF-FS-004` finding (over
+			// `FIXED_MANAGED_PATHS`, which includes `.engineering/ef.yaml`) is
+			// unaffected by this exclusion.
+			if (kind === 'file')
 				blobEntries.set(entry.path, entry)
 		}
 
@@ -388,7 +478,8 @@ export async function loadSnapshotFromCommit(git: GitRepository, commitOid: stri
 				}
 			})
 
-		const { artifactFiles, diagnostics: layoutDiagnostics } = listArtifactFiles(walkEntries)
+		const { artifactFiles, diagnostics: canonicalLayoutDiagnostics } = listArtifactFiles(walkEntries)
+		const layoutDiagnostics = [...canonicalLayoutDiagnostics, ...invalidPathDiagnostics]
 
 		const configBytes = await readBlobOrThrow(git, blobEntries.get(CONFIG_PATH))
 		const config = configBytes !== undefined ? decodeConfig(decodeUtf8(configBytes), CONFIG_PATH) : { config: null, diagnostics: [] }

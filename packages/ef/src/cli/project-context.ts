@@ -25,6 +25,21 @@ import { discoverProject } from '../repository/discovery'
 
 export interface ProjectContext {
 	root: string
+	/**
+	 * Configuration decoded from discovery's OWN, separate read of
+	 * `.engineering/ef.yaml` (performed to decide discovery outcomes:
+	 * incomplete-initialization, working-directory association, and so on).
+	 * This is deliberately NOT a general-purpose config accessor for command
+	 * semantics (Finding 3, "single observation"): `.engineering/ef.yaml` can
+	 * be rewritten in place between this read and any later, separate read a
+	 * command performs (e.g. `loadSnapshotFromWorkingTree`'s own), so a
+	 * command that mixed this value with a later snapshot's config could
+	 * derive different semantics (an integration ref, a linked-repositories
+	 * list) from two different observations of the same file. A command that
+	 * also loads a `ProjectSnapshot` MUST derive every config-dependent
+	 * semantic from that snapshot's own `config.config` instead, never from
+	 * this field (see `query.ts`/`validate.ts`'s snapshot-scope handling).
+	 */
 	config: Config | null
 	git: GitRepository
 }

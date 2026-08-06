@@ -191,4 +191,87 @@ describe('readRegularFileNoFollow', () => {
 		expect(result)
 			.toEqual({ kind: 'identity-mismatch' })
 	})
+
+	// FINDING 1 (P0): replacing an ancestor directory with a symlink need not
+	// change the final file's own `dev`/`ino` -- moving the observed directory
+	// out of the project and symlinking the original path back to that exact
+	// (relocated) directory reaches the identical inode by a forbidden path.
+	// `expectedIdentity` alone is fooled by this; a `containmentRoot` must
+	// catch it via ancestor re-verification.
+	describe('containmentRoot (ancestor-verified reads)', () => {
+		// Real POSIX reproduction (not mocked): rename the ancestor directory
+		// out, symlink the original path back to it, then read.
+		it('refuses a read reached through an ancestor renamed out and symlinked back to itself, even though expectedIdentity alone still matches', async () => {
+			const projectRoot = path.join(tempRoot, 'project')
+			fs.mkdirSync(path.join(projectRoot, 'req'), { recursive: true })
+			const filePath = path.join(projectRoot, 'req', 'REQ-001.md')
+			fs.writeFileSync(filePath, 'original content')
+			const stats = fs.lstatSync(filePath)
+			const identity = { dev: stats.dev, ino: stats.ino }
+
+			// The reviewer's exact reproduction: rename the observed `req`
+			// directory outside the project root, then symlink the original
+			// `req` path back to it.
+			const outsideReq = path.join(tempRoot, 'outside-req')
+			fs.renameSync(path.join(projectRoot, 'req'), outsideReq)
+			fs.symlinkSync(outsideReq, path.join(projectRoot, 'req'), 'dir')
+
+			// Without a containment root, `lstat`, `open(O_NOFOLLOW)`, and
+			// `fstat` all see the SAME original `dev`/`ino` -- the read is
+			// (wrongly) accepted.
+			const unguarded = await readRegularFileNoFollow(filePath, identity)
+			expect(unguarded.kind)
+				.toBe('ok')
+
+			// With a containment root, PRE-verification `lstat`s the `req`
+			// ancestor, finds a symlink rather than a directory, and refuses
+			// before ever attempting to open the file.
+			const guarded = await readRegularFileNoFollow(filePath, identity, projectRoot)
+			expect(guarded)
+				.toEqual({ kind: 'identity-mismatch' })
+		})
+
+		it('refuses a read when an ancestor is replaced with a symlink to an entirely different directory', async () => {
+			const projectRoot = path.join(tempRoot, 'project2')
+			fs.mkdirSync(path.join(projectRoot, 'req'), { recursive: true })
+			const filePath = path.join(projectRoot, 'req', 'REQ-001.md')
+			fs.writeFileSync(filePath, 'original content')
+			const stats = fs.lstatSync(filePath)
+			const identity = { dev: stats.dev, ino: stats.ino }
+
+			const otherDir = path.join(tempRoot, 'other-dir')
+			fs.mkdirSync(otherDir)
+			fs.writeFileSync(path.join(otherDir, 'REQ-001.md'), 'different content, different inode')
+
+			fs.rmSync(path.join(projectRoot, 'req'), { recursive: true, force: true })
+			fs.symlinkSync(otherDir, path.join(projectRoot, 'req'), 'dir')
+
+			// The existing identity-binding protection alone already catches a
+			// swap to a genuinely different file (different `dev`/`ino`).
+			const identityOnly = await readRegularFileNoFollow(filePath, identity)
+			expect(identityOnly)
+				.toEqual({ kind: 'identity-mismatch' })
+
+			// With a containment root, the same swap is refused even earlier,
+			// at PRE-verification, before any open is attempted.
+			const guarded = await readRegularFileNoFollow(filePath, identity, projectRoot)
+			expect(guarded)
+				.toEqual({ kind: 'identity-mismatch' })
+		})
+
+		it('succeeds normally through an intact ancestor chain when a containment root is supplied', async () => {
+			const projectRoot = path.join(tempRoot, 'project3')
+			fs.mkdirSync(path.join(projectRoot, 'req'), { recursive: true })
+			const filePath = path.join(projectRoot, 'req', 'REQ-001.md')
+			fs.writeFileSync(filePath, 'content')
+			const stats = fs.lstatSync(filePath)
+
+			const result = await readRegularFileNoFollow(filePath, { dev: stats.dev, ino: stats.ino }, projectRoot)
+			expect(result.kind)
+				.toBe('ok')
+			expect(result.kind === 'ok' && Buffer.from(result.bytes)
+				.toString('utf8'))
+				.toBe('content')
+		})
+	})
 })

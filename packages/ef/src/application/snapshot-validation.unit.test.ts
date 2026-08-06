@@ -1081,6 +1081,267 @@ Objective text.
 		})
 	})
 
+	describe('sixth-round Finding 6: supersessionFactInvalidArtifactIds (per-artifact supersession-fact validity)', () => {
+		it('eF-SUP-001 (superseded with no direct replacement) tracks the Artifact in supersessionFactInvalidArtifactIds', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				status: 'superseded',
+				relations: '[]',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-SUP-001')
+			expect([...result.supersessionFactInvalidArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.projectionLossArtifactIds.size)
+				.toBe(0)
+		})
+
+		it('eF-SUP-002 (non-superseded Artifact illegally declares superseded-by) tracks the Artifact in supersessionFactInvalidArtifactIds', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', requirementMd({ id: 'REQ-002' }))
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				status: 'active',
+				relations: '\n  - type: superseded-by\n    target: REQ-002\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-SUP-002')
+			expect([...result.supersessionFactInvalidArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+
+		it('eF-SUP-005 (supersession cycle) tracks EVERY cycle participant in supersessionFactInvalidArtifactIds', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				status: 'superseded',
+				relations: '\n  - type: superseded-by\n    target: REQ-002\n',
+			}))
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', requirementMd({
+				id: 'REQ-002',
+				status: 'superseded',
+				relations: '\n  - type: superseded-by\n    target: REQ-001\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-SUP-005')
+			expect([...result.supersessionFactInvalidArtifactIds].sort())
+				.toEqual(['REQ-001', 'REQ-002'])
+		})
+
+		it('eF-SUP-003 (cross-type replacement) ALSO tracks the SOURCE Artifact in the broader supersessionFactInvalidArtifactIds, alongside the existing narrower supersessionCrossTypeArtifactIds', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/pol/POL-001.md', `---
+schema: ef/policy@1
+type: policy
+id: POL-001
+title: Policy One
+status: active
+summary: An active policy used as an illegal cross-type replacement target.
+tags: []
+relations: []
+resources: []
+---
+
+## Policy Statement
+
+Statement text.
+
+## Rationale
+
+Rationale text.
+`)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				status: 'superseded',
+				relations: '\n  - type: superseded-by\n    target: POL-001\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-SUP-003')
+			expect([...result.supersessionCrossTypeArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.supersessionFactInvalidArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+	})
+
+	describe('sixth-round Finding 7/9: EF-REL-006 (duplicate relation) edge-trust tracking', () => {
+		it('eF-REL-006 (duplicate relation entry) tracks the Artifact in edgeLossArtifactIds, typed to the duplicated relation type, without corrupting its raw projection', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: derived-from\n    target: PROJECT\n  - type: derived-from\n    target: PROJECT\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-006')
+			expect([...result.edgeLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.edgeLossUntypedArtifactIds.size)
+				.toBe(0)
+			expect([...(result.edgeLossRelationTypesBySourceId.get('REQ-001') ?? [])])
+				.toEqual(['derived-from'])
+			// Folded into `projectionLossArtifactIds` too, consistent with every
+			// other `edgeLossArtifactIds` cause (`EF-REL-001`/`002`/`005`
+			// already do the same, per this file's earlier tests).
+			expect([...result.projectionLossArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+	})
+
+	describe('sixth-round Finding 9: per-source, per-type edge-loss attribution', () => {
+		it('eF-REL-001 (unknown relation type) is always untyped (edgeLossUntypedArtifactIds), never attributed a specific RelationType', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: not-a-known-type\n    target: PROJECT\n',
+			}))
+			const result = await load()
+			expect([...result.edgeLossUntypedArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.edgeLossRelationTypesBySourceId.has('REQ-001'))
+				.toBe(false)
+		})
+
+		it('eF-REL-002 (shape-invalid entry) is always untyped (edgeLossUntypedArtifactIds), never attributed a specific RelationType', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - not-a-mapping\n',
+			}))
+			const result = await load()
+			expect([...result.edgeLossUntypedArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.edgeLossRelationTypesBySourceId.has('REQ-001'))
+				.toBe(false)
+		})
+
+		it('eF-REL-005 (self-relation) is typed to the exact relation type declared, not untyped', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: references\n    target: REQ-001\n',
+			}))
+			const result = await load()
+			expect(result.edgeLossUntypedArtifactIds.size)
+				.toBe(0)
+			expect([...(result.edgeLossRelationTypesBySourceId.get('REQ-001') ?? [])])
+				.toEqual(['references'])
+		})
+
+		it('a duplicate top-level \'relations\' key (EF-ENV-005) is always untyped: no single entry index identifies which type is uncertain', async () => {
+			await writeMinimalProject(tempDir)
+			const duplicateRelationsMd = requirementMd({ id: 'REQ-001' })
+				.replace(
+					'relations: []\n',
+					'relations:\n  - type: references\n    target: PROJECT\nrelations:\n  - type: references\n    target: PROJECT\n',
+				)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateRelationsMd)
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ENV-005')
+			expect([...result.edgeLossUntypedArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.edgeLossRelationTypesBySourceId.has('REQ-001'))
+				.toBe(false)
+		})
+
+		it('eF-REL-004 (semantic incompatibility) records the specific relation type in semanticEdgeLossRelationTypesBySourceId', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001' }))
+			await writeFile(tempDir, '.engineering/adr/ADR-001.md', `---
+schema: ef/decision@1
+type: decision
+id: ADR-001
+title: Decision One
+status: active
+summary: A decision, whose 'derived-from' source type is incompatible.
+tags: []
+relations:
+  - type: derived-from
+    target: REQ-001
+resources: []
+---
+
+## Context
+
+Context text.
+
+## Decision
+
+Decision text.
+
+## Consequences
+
+Consequences text.
+`)
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-004')
+			expect([...(result.semanticEdgeLossRelationTypesBySourceId.get('ADR-001') ?? [])])
+				.toEqual(['derived-from'])
+		})
+
+		it('eF-REL-008 (derived-from cycle) records \'derived-from\' in semanticEdgeLossRelationTypesBySourceId for every cycle participant', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/prd/PRD-100.md', `---
+schema: ef/prd@1
+type: prd
+id: PRD-100
+title: PRD One
+status: active
+summary: First half of a derived-from cycle.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-200
+resources: []
+---
+
+## Vision
+
+Vision text.
+
+## Objectives
+
+Objective text.
+`)
+			await writeFile(tempDir, '.engineering/prd/PRD-200.md', `---
+schema: ef/prd@1
+type: prd
+id: PRD-200
+title: PRD Two
+status: active
+summary: Second half of a derived-from cycle.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-100
+resources: []
+---
+
+## Vision
+
+Vision text.
+
+## Objectives
+
+Objective text.
+`)
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-008')
+			expect([...(result.semanticEdgeLossRelationTypesBySourceId.get('PRD-100') ?? [])])
+				.toEqual(['derived-from'])
+			expect([...(result.semanticEdgeLossRelationTypesBySourceId.get('PRD-200') ?? [])])
+				.toEqual(['derived-from'])
+		})
+	})
+
 	describe('resource integrity', () => {
 		it('reports EF-RES-006 for a declared local Resource file that does not exist', async () => {
 			await writeMinimalProject(tempDir)

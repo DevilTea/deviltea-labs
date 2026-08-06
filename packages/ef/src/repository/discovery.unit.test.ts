@@ -199,6 +199,50 @@ describe('discoverProject (isolated, fake git)', () => {
 		})
 	})
 
+	// Wiring regression (`discoverProject` -> `readRegularFileNoFollow`'s
+	// `containmentRoot`): the exact move-out-then-symlink-back reproduction
+	// from `fs-facts.unit.test.ts`'s own `containmentRoot` tests, applied to
+	// `.engineering/.tmp` -- the one ancestor between `candidateRoot` and
+	// `initMarkerPath` that no other check in `discoverProject` independently
+	// verifies (unlike `.engineering` itself, which the earlier `isDirectory`
+	// call already covers). `.tmp` genuinely exists (as a real directory)
+	// before the swap, so `discoverProject`'s `pathExists(tmpPath)` gate --
+	// required because an ENTIRELY ABSENT `.tmp` must fall back to an
+	// unguarded read (see the comment above `tmpAncestorExists` in
+	// `discovery.ts`: otherwise the overwhelmingly common "no `.tmp` at all"
+	// case would be misreported as `identity-mismatch` instead of
+	// `not-found`) -- is satisfied here, so the init-marker read DOES receive
+	// `containmentRoot`. `.tmp` never actually contains `init-state.json`
+	// either before or after the swap, so without `containmentRoot` wired,
+	// `readRegularFileNoFollow` simply `lstat`s straight through the
+	// symlinked ancestor to a genuinely absent file and reports `not-found`
+	// -- silently ignoring that the ancestor itself is a forbidden symlink and
+	// letting the project resolve normally. With `containmentRoot` wired,
+	// PRE-verification `lstat`s `.engineering/.tmp`, finds a symlink rather
+	// than a directory, and refuses before ever checking whether
+	// `init-state.json` exists -- forcing `incomplete-initialization` instead.
+	it('treats a `.engineering/.tmp` ancestor renamed out and symlinked back to itself as incomplete initialization, even though no init-state.json exists through it', async () => {
+		const engineeringDir = path.join(tempDir, '.engineering')
+		await fs.mkdir(engineeringDir, { recursive: true })
+		await fs.writeFile(path.join(engineeringDir, 'ef.yaml'), SINGLE_REPO_YAML)
+		await fs.mkdir(path.join(engineeringDir, '.tmp'), { recursive: true })
+
+		const outsideTmp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-discovery-outside-tmp-')))
+		try {
+			await fs.rm(outsideTmp, { recursive: true, force: true })
+			await fs.rename(path.join(engineeringDir, '.tmp'), outsideTmp)
+			await fs.symlink(outsideTmp, path.join(engineeringDir, '.tmp'), 'dir')
+
+			const deps: DiscoverProjectDeps = { findWorktreeRoot: async () => foundAt(tempDir) }
+			const result = await discoverProject({ cwd: tempDir }, deps)
+			expect(result)
+				.toEqual({ kind: 'incomplete-initialization', root: tempDir })
+		}
+		finally {
+			await fs.rm(outsideTmp, { recursive: true, force: true })
+		}
+	})
+
 	it('propagates git-unavailable from the project-root worktree check', async () => {
 		const engineeringDir = path.join(tempDir, '.engineering')
 		await fs.mkdir(engineeringDir, { recursive: true })

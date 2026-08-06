@@ -39,6 +39,7 @@ import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
 import { summarizeValidation, validateSnapshot } from '../../application/snapshot-validation'
 import { validateTransition } from '../../application/transition-validation'
 import { severityOf } from '../../domain/diagnostic-codes'
+import { REGULAR_FILE_GIT_MODES } from '../../git/repository'
 import { decodeConfig } from '../../repository/config'
 import { validateWorkspace } from '../../repository/workspace'
 import { buildValidationResultJson } from '../envelopes'
@@ -102,10 +103,22 @@ function earlyFailure(options: ValidateCommandOptions, code: Parameters<typeof s
  * (09-validation.md "An inaccessible ref ... makes the operation incomplete
  * rather than eligible by assumption" applies equally to the read that
  * establishes which ref to probe).
+ *
+ * Finding 5: `untrusted` covers a tree entry existing at exactly
+ * `.engineering/ef.yaml` whose Git mode/type is not an ordinary regular file
+ * -- a symlink (`120000`, reported by `ls-tree` as `type: 'blob'` exactly
+ * like an ordinary file), a gitlink/submodule (`160000`, `type: 'commit'`),
+ * or a tree (a directory literally named `ef.yaml`). None of these is a
+ * genuine absence (something IS committed at that exact path) and none is
+ * safe to read as configuration bytes (a symlink's "content" is its target
+ * TEXT, which could name an attacker-chosen `integration_ref` without ever
+ * being the project's real configuration). This is distinct from both
+ * `found` and `absent` so a caller cannot silently fall back to either.
  */
 type ConfigPeekOutcome
 	= | { kind: 'found', config: Config }
 		| { kind: 'absent' }
+		| { kind: 'untrusted', mode: string }
 		| { kind: 'error', message: string }
 
 async function peekConfigAt(git: GitRepository, commitOid: string): Promise<ConfigPeekOutcome> {
@@ -119,9 +132,15 @@ async function peekConfigAt(git: GitRepository, commitOid: string): Promise<Conf
 		return { kind: 'error', message: tree.message }
 	if (tree.kind !== 'resolved')
 		return { kind: 'absent' }
-	const entry = tree.entries.find(e => e.path === '.engineering/ef.yaml' && e.type === 'blob')
+	// Matched by path alone (not also `type === 'blob'`, Finding 5): a tree
+	// (directory) or gitlink entry at this exact path must be classified as
+	// `untrusted` below, not silently treated as `absent` merely because it
+	// fails a `type === 'blob'` filter.
+	const entry = tree.entries.find(e => e.path === '.engineering/ef.yaml')
 	if (!entry)
 		return { kind: 'absent' }
+	if (entry.type !== 'blob' || !REGULAR_FILE_GIT_MODES.has(entry.mode))
+		return { kind: 'untrusted', mode: entry.mode }
 	const blob = await git.readBlob(entry.oid)
 	// Same reasoning as the tree read above: a blob already proven to exist
 	// as a tree entry whose content read then fails unexpectedly must not be
@@ -170,7 +189,6 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	// ---- exception) ----------------------------------------------------------
 
 	let root: string
-	let config: Config | null
 	let git: GitRepository
 
 	if (options.scope !== 'snapshot' && options.project !== undefined) {
@@ -187,7 +205,6 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 		}
 		root = resolved.context.root
 		git = resolved.context.git
-		config = null
 	}
 	else {
 		const resolved = await resolveProject({ cwd: deps.cwd, explicitProject: options.project }, deps.executor)
@@ -198,8 +215,17 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 			return earlyFailure(options, code, resolved.message)
 		}
 		root = resolved.context.root
-		config = resolved.context.config
 		git = resolved.context.git
+		// `resolved.context.config` is discovery's OWN, separate read of
+		// `.engineering/ef.yaml` and is deliberately never consulted for
+		// scope: 'snapshot' semantics below (Finding 3): an in-place rewrite
+		// landing between that read and `loadSnapshotFromWorkingTree`'s later,
+		// separate read of the same file would otherwise let the ref summary
+		// and `--workspace` checks derive from a DIFFERENT observation than
+		// the one the snapshot itself was validated against. `snapshot` scope
+		// instead derives every config-dependent semantic exclusively from
+		// `loaded.snapshot.config.config` below -- the single, freshest
+		// observation the validated snapshot itself was built from.
 	}
 
 	// ---- Scope-specific validation ------------------------------------------
@@ -214,6 +240,12 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 		const validation = validateSnapshot(loaded.snapshot)
 		let diagnostics = validation.diagnostics
 		let complete = validation.complete
+
+		// Single observation (Finding 3): both the ref summary below and the
+		// `--workspace` linked-repositories check derive from the SAME config
+		// this snapshot was itself validated against -- never from project
+		// resolution's separate, earlier discovery read.
+		const config = loaded.snapshot.config.config
 
 		if (options.workspace) {
 			const linked = config?.linkedRepositories ?? []
@@ -239,6 +271,9 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 			const baselinePeek = await peekConfigAt(git, baselineResolved.oid)
 			if (baselinePeek.kind === 'error')
 				return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading the trusted baseline's configuration: ${baselinePeek.message}`)
+			if (baselinePeek.kind === 'untrusted') {
+				return earlyFailure(options, 'EF-VAL-006', `The trusted baseline's '.engineering/ef.yaml' is not a regular file (Git mode '${baselinePeek.mode}') and cannot be used to establish operation-start ref state.`)
+			}
 			if (baselinePeek.kind === 'found')
 				operationStartRefOid = await resolveRefOidOrNull(git, baselinePeek.config.repository.integrationRef)
 		}
@@ -256,8 +291,17 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 
 		if (options.workspace && result.proposedOid) {
 			const proposedPeek = await peekConfigAt(git, result.proposedOid)
-			if (proposedPeek.kind === 'error') {
-				diagnostics = [...diagnostics, { code: 'EF-VAL-006', severity: severityOf('EF-VAL-006'), message: `Git is unavailable while reading the proposed commit's configuration for workspace validation: ${proposedPeek.message}`, related: [] }]
+			if (proposedPeek.kind === 'error' || proposedPeek.kind === 'untrusted') {
+				// Finding 5: `untrusted` (a non-regular-file `ef.yaml`, e.g. a
+				// symlink) is folded in here alongside `error` -- NOT into the
+				// `else` branch's `proposedPeek.kind === 'found' ? ... : []`,
+				// which would silently treat it exactly like a genuine `absent`
+				// and proceed with an empty linked-repositories list computed
+				// from an untrustworthy observation.
+				const detail = proposedPeek.kind === 'error'
+					? proposedPeek.message
+					: `'.engineering/ef.yaml' is not a regular file (Git mode '${proposedPeek.mode}')`
+				diagnostics = [...diagnostics, { code: 'EF-VAL-006', severity: severityOf('EF-VAL-006'), message: `Git is unavailable while reading the proposed commit's configuration for workspace validation: ${detail}`, related: [] }]
 				complete = false
 			}
 			else {
@@ -292,6 +336,9 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 		const proposedPeek = await peekConfigAt(git, proposedResolved.oid)
 		if (proposedPeek.kind === 'error')
 			return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading the proposed bootstrap commit's configuration: ${proposedPeek.message}`)
+		if (proposedPeek.kind === 'untrusted') {
+			return earlyFailure(options, 'EF-VAL-006', `The proposed bootstrap commit's '.engineering/ef.yaml' is not a regular file (Git mode '${proposedPeek.mode}') and cannot be used to establish operation-start ref state.`)
+		}
 		if (proposedPeek.kind === 'found') {
 			proposedConfig = proposedPeek.config
 			operationStartRefState = await resolveRefStateOrUnresolved(git, proposedPeek.config.repository.integrationRef)

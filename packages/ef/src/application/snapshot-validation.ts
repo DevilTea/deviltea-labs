@@ -36,6 +36,7 @@ import { severityOf } from '../domain/diagnostic-codes'
 import { aggregateDiagnostics } from '../domain/diagnostics'
 import { validateFilename, validateGraphIdentity, validateIdSyntax } from '../domain/identity'
 import { validateStatus } from '../domain/lifecycle'
+import { RELATION_TYPES } from '../domain/model'
 import { validateRelationEntries, validateRelationGraph } from '../domain/relations'
 import {
 	findOrphanResourceFiles,
@@ -120,16 +121,23 @@ export interface SnapshotValidationResult {
 	 * sanitized it into the subset this module indexes the graph from, in a
 	 * way that can make a graph edge `(source, type, target)` missing:
 	 * `EF-REL-001` (unknown relation type), `EF-REL-002` (shape-invalid
-	 * entry), or `EF-REL-005` (self-relation). Every graph-traversal query
-	 * kind (`relations`, `trace`, `impact`, `resolve-current`) walks
+	 * entry), or `EF-REL-005` (self-relation) -- OR that leaves a
+	 * graph-integrity-invalid DUPLICATE `(type, target)` pair present in that
+	 * subset instead of removing it: `EF-REL-006` (sixth-round Finding 7;
+	 * `validateRelationEntries` reports the duplicate but does not exclude
+	 * either occurrence from its returned `entries`, so this Artifact's own
+	 * outgoing edge set is not reliably what it declares even though nothing
+	 * was actually discarded). Every graph-traversal query kind (`relations`,
+	 * `trace`, `impact`, `resolve-current`) walks
 	 * `incomingRelations`/`byId[].relations`/`chgEffects`, all built from that
-	 * sanitized subset across the whole project, so a discarded entry on any
-	 * Artifact -- not only the one a given traversal starts from -- could be
-	 * a missing edge that traversal should have seen (Finding A,
-	 * 10-query-and-trace.md "Invalid Graph and Partial Results": "MUST NOT
-	 * return a partial graph ... that an Agent could mistake for complete
-	 * context"). The query layer (Finding C) scopes exactly how far this
-	 * reaches per traversal instead of always gating project-wide.
+	 * sanitized subset across the whole project, so a discarded OR duplicated
+	 * entry on any Artifact -- not only the one a given traversal starts from
+	 * -- could be a missing or corrupted edge that traversal should not have
+	 * silently trusted (Finding A, 10-query-and-trace.md "Invalid Graph and
+	 * Partial Results": "MUST NOT return a partial graph ... that an Agent
+	 * could mistake for complete context"). The query layer (Finding C)
+	 * scopes exactly how far this reaches per traversal instead of always
+	 * gating project-wide.
 	 *
 	 * `EF-REL-015` (invalid/non-JSON-compatible extension field) is
 	 * deliberately EXCLUDED from this set: it only ever discards extension
@@ -158,6 +166,30 @@ export interface SnapshotValidationResult {
 	 * (`EF-QRY-007`), not a sanitization discard.
 	 */
 	edgeLossArtifactIds: ReadonlySet<string>
+	/**
+	 * Subset of `edgeLossArtifactIds` whose loss could NOT be attributed to
+	 * one specific relation type (sixth-round Finding 9): `EF-REL-001`
+	 * (unknown vocabulary) and `EF-REL-002` (shape-invalid, possibly missing
+	 * `type` entirely) always land here, and a duplicated `relations` key
+	 * (`EF-ENV-005`) does too, since no single entry's index identifies which
+	 * type(s) are actually uncertain. A source in this set must gate an
+	 * outgoing-only traversal regardless of the traversal's own selected
+	 * relation type set -- the conservative behavior every artifact-scoped
+	 * edge-trust check already applied before this round. Contrast with
+	 * `edgeLossRelationTypesBySourceId`.
+	 */
+	edgeLossUntypedArtifactIds: ReadonlySet<string>
+	/**
+	 * Per-source relation types a TYPED `edgeLossArtifactIds` cause
+	 * (`EF-REL-005`/`006`) actually identified (sixth-round Finding 9): an
+	 * outgoing-only traversal restricted to a type set that does not
+	 * intersect this source's recorded types here (and the source is absent
+	 * from `edgeLossUntypedArtifactIds`) could never have read or returned
+	 * the lossy entry, so it must not be gated by it. A source with NO typed
+	 * loss recorded is simply absent from this map, even if it IS present in
+	 * `edgeLossArtifactIds`/`edgeLossUntypedArtifactIds`.
+	 */
+	edgeLossRelationTypesBySourceId: ReadonlyMap<string, ReadonlySet<RelationType>>
 	/**
 	 * Artifact IDs whose raw `relations` array had an entry with a valid
 	 * `type`/`target` pair but an invalid or non-JSON-compatible extension
@@ -303,6 +335,17 @@ export interface SnapshotValidationResult {
 	 */
 	semanticEdgeLossArtifactIds: ReadonlySet<string>
 	/**
+	 * Per-source relation types a `semanticEdgeLossArtifactIds` diagnostic
+	 * identified (sixth-round Finding 9): `EF-REL-004` always names the exact
+	 * relation type that is source/target-incompatible; `EF-REL-008` is
+	 * always `derived-from` (the only type its cycle check applies to). Every
+	 * entry in `semanticEdgeLossArtifactIds` has a corresponding entry here --
+	 * unlike `edgeLossRelationTypesBySourceId`, there is no untyped case for
+	 * this bucket -- so an outgoing-only traversal can always narrow this
+	 * check to exactly the types it actually reads.
+	 */
+	semanticEdgeLossRelationTypesBySourceId: ReadonlyMap<string, ReadonlySet<RelationType>>
+	/**
 	 * Artifact IDs whose decoded `status` failed `validateStatus`
 	 * (03-lifecycle.md): `EF-LIFE-001` (not a member of the status vocabulary)
 	 * or `EF-LIFE-002` (a known status not allowed for this Artifact's type).
@@ -337,6 +380,41 @@ export interface SnapshotValidationResult {
 	 * option) (sixth-round Finding 6).
 	 */
 	supersessionCrossTypeArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs (by their own declared `id`) with an invalid per-artifact
+	 * supersession fact, keyed from `EF-SUP-001`/`002`/`003`/`005`
+	 * (05-supersession.md, sixth-round Finding 6) -- a strict superset of
+	 * `supersessionCrossTypeArtifactIds` (kept separately above for its own,
+	 * narrower cross-type-specific tests/consumers):
+	 *
+	 * - `EF-SUP-001`: a `superseded` Artifact with no direct replacement.
+	 *   `domain/supersession.ts#resolveCurrent`'s own traversal treats this
+	 *   exactly like a legitimate empty resolution (`currentIds: []`, zero
+	 *   edges) -- indistinguishable from "correctly retired with no
+	 *   replacement" (05-supersession "Retired replacement leaves") without
+	 *   this fact.
+	 * - `EF-SUP-002`: a non-`superseded` Artifact illegally declaring
+	 *   `superseded-by`. `resolveCurrent` never reads a node's
+	 *   `superseded-by` array once its status is `active`/`draft`/`retired`,
+	 *   so this fact can never surface as a traversed edge -- only as the
+	 *   INPUT (or an intermediate node) itself, resolved as though the
+	 *   illegal declaration did not exist.
+	 * - `EF-SUP-003`: cross-type replacement (also in
+	 *   `supersessionCrossTypeArtifactIds`).
+	 * - `EF-SUP-005`: every participant of a direct or indirect supersession
+	 *   cycle (the diagnostic's own `artifactId` plus every `related` entry).
+	 *
+	 * Both zero-edge cases above (`EF-SUP-001`/`002`) mean a traversal can
+	 * reach an invalid supersession fact WITHOUT following any
+	 * `superseded-by` edge at all -- including when the AFFECTED Artifact is
+	 * the exact input ID. The query layer therefore checks this set against
+	 * EVERY node current resolution actually visits (`nodeIds`), not only the
+	 * source side of a followed edge, unlike `edgeLossArtifactIds`'s
+	 * consumed-source scoping. NOT folded into `projectionLossArtifactIds`
+	 * (every declared fact here is faithfully reflected, not lost); consumed
+	 * by `resolve-current` (and `impact`'s `resolve_current` option).
+	 */
+	supersessionFactInvalidArtifactIds: ReadonlySet<string>
 	/**
 	 * Artifact IDs whose raw `resources` array had at least one `EF-RES-001`
 	 * finding, reduced to exactly WHICH named Resource fields were affected
@@ -387,11 +465,29 @@ function withoutRedundantArrayEntryShapeFindings(diagnostics: readonly Diagnosti
 /**
  * `validateRelationEntries` (04-relations.md) codes that exclude an entry
  * from the sanitized subset in a way that can make a graph edge
- * `(source, type, target)` missing: see
- * `SnapshotValidationResult.edgeLossArtifactIds` for the full reasoning
- * (Finding A/C).
+ * `(source, type, target)` missing (`EF-REL-001`/`002`/`005`; see
+ * `SnapshotValidationResult.edgeLossArtifactIds` for the full reasoning,
+ * Finding A/C), OR that leave a graph-integrity-invalid DUPLICATE
+ * `(type, target)` pair present in the sanitized subset instead of removing
+ * it (`EF-REL-006`, sixth-round Finding 7): either way, a graph-traversal
+ * query kind that would otherwise walk this Artifact's outgoing array as
+ * though it were completely and correctly sanitized must not do so silently.
  */
-const EDGE_LOSS_RELATION_CODES = new Set<string>(['EF-REL-001', 'EF-REL-002', 'EF-REL-005'])
+const EDGE_LOSS_RELATION_CODES = new Set<string>(['EF-REL-001', 'EF-REL-002', 'EF-REL-005', 'EF-REL-006'])
+
+/**
+ * `EF-REL-001` (unknown relation type) and `EF-REL-002` (shape-invalid entry)
+ * can never identify a specific relation type this Artifact's outgoing edge
+ * set actually lost (sixth-round Finding 9): an unrecognized vocabulary value
+ * is by definition not a `RelationType` to intersect against a query's
+ * selected type set, and a shape-invalid entry may be missing its `type`
+ * field entirely. Both are always treated as untyped/conservative for
+ * `edgeLossUntypedArtifactIds` regardless of what `rawRelationEntryType`
+ * could otherwise resolve.
+ */
+const FORCED_UNTYPED_EDGE_LOSS_CODES = new Set<string>(['EF-REL-001', 'EF-REL-002'])
+
+const KNOWN_RELATION_TYPE_SET: ReadonlySet<string> = new Set(RELATION_TYPES)
 
 function relationEntriesHaveEdgeLoss(diagnostics: readonly Diagnostic[]): boolean {
 	return diagnostics.some(d => EDGE_LOSS_RELATION_CODES.has(d.code))
@@ -399,6 +495,74 @@ function relationEntriesHaveEdgeLoss(diagnostics: readonly Diagnostic[]): boolea
 
 function relationEntriesHaveExtensionLoss(diagnostics: readonly Diagnostic[]): boolean {
 	return diagnostics.some(d => d.code === 'EF-REL-015')
+}
+
+/** Extracts the numeric `relations[N]` array index a diagnostic's `field` names, or `undefined` when `field` does not name one at all. */
+function relationEntryIndexFromField(field: string | undefined): number | undefined {
+	if (field === undefined)
+		return undefined
+	const match = /^relations\[(\d+)\]/.exec(field)
+	return match ? Number(match[1]) : undefined
+}
+
+/**
+ * The known `RelationType` the RAW entry at `rawRelations[index]` itself
+ * declares, or `undefined` when `index` is out of range, the entry is not a
+ * mapping, or its `type` field is not a recognized EF Core relation type
+ * (sixth-round Finding 9: an entry whose vocabulary is itself unrecognized
+ * cannot be intersected against a query's selected type set, so it falls
+ * back to untyped/conservative instead).
+ */
+function rawRelationEntryType(rawRelations: readonly unknown[], index: number | undefined): RelationType | undefined {
+	if (index === undefined)
+		return undefined
+	const raw = rawRelations[index]
+	if (typeof raw !== 'object' || raw === null || Array.isArray(raw))
+		return undefined
+	const type = (raw as Record<string, unknown>).type
+	return typeof type === 'string' && KNOWN_RELATION_TYPE_SET.has(type) ? (type as RelationType) : undefined
+}
+
+/**
+ * Classifies one `EDGE_LOSS_RELATION_CODES` diagnostic into `untyped` or
+ * `typed` (sixth-round Finding 9): `EF-REL-001`/`002` always fall to
+ * `untyped` (`FORCED_UNTYPED_EDGE_LOSS_CODES`); `EF-REL-005`/`006` are typed
+ * whenever the raw entry's own `type` field resolves to a known
+ * `RelationType` (`rawRelationEntryType`), falling back to `untyped` only in
+ * the defensive case where it does not (a shape that should not arise in
+ * practice, since both codes already require a valid `type` field to have
+ * been reached).
+ */
+function recordEdgeLossType(untyped: Set<string>, typed: Map<string, Set<RelationType>>, artifactId: string, code: string, rawRelations: readonly unknown[], field: string | undefined): void {
+	if (!FORCED_UNTYPED_EDGE_LOSS_CODES.has(code)) {
+		const type = rawRelationEntryType(rawRelations, relationEntryIndexFromField(field))
+		if (type) {
+			const set = typed.get(artifactId) ?? new Set<RelationType>()
+			set.add(type)
+			typed.set(artifactId, set)
+			return
+		}
+	}
+	untyped.add(artifactId)
+}
+
+/**
+ * The exact `RelationType` an `EF-REL-004`/`EF-REL-008` semantic-edge-loss
+ * diagnostic identifies (sixth-round Finding 9): `EF-REL-008` is always
+ * `derived-from` (the only relation type its cycle check ever applies to);
+ * `EF-REL-004`'s `field` names the exact index within `relationById`'s
+ * already-typed, sanitized entry array whose `type` this diagnostic's own
+ * SOURCE Artifact declares.
+ */
+function semanticEdgeLossType(diagnostic: Diagnostic, relationById: ReadonlyMap<string, RelationGraphArtifact>): RelationType | undefined {
+	if (diagnostic.code === 'EF-REL-008')
+		return 'derived-from'
+	if (diagnostic.code !== 'EF-REL-004' || diagnostic.artifactId === undefined)
+		return undefined
+	const index = relationEntryIndexFromField(diagnostic.field)
+	if (index === undefined)
+		return undefined
+	return relationById.get(diagnostic.artifactId)?.relations[index]?.type
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +783,8 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	// field's doc on `SnapshotValidationResult` for what is discarded/coerced
 	// and why it matters to query trustworthiness.
 	const edgeLossArtifactIds = new Set<string>()
+	const edgeLossUntypedArtifactIds = new Set<string>()
+	const edgeLossRelationTypesBySourceId = new Map<string, Set<RelationType>>()
 	const relationExtensionLossArtifactIds = new Set<string>()
 	const resourceLossArtifactIds = new Set<string>()
 	const tagLossArtifactIds = new Set<string>()
@@ -628,8 +794,10 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	const envelopeStructuralLossArtifactIds = new Set<string>()
 	const byteDecodingLossArtifactIds = new Set<string>()
 	const semanticEdgeLossArtifactIds = new Set<string>()
+	const semanticEdgeLossRelationTypesBySourceId = new Map<string, Set<RelationType>>()
 	const statusInvalidArtifactIds = new Set<string>()
 	const supersessionCrossTypeArtifactIds = new Set<string>()
+	const supersessionFactInvalidArtifactIds = new Set<string>()
 	const resourceFieldLossById = new Map<string, Set<ResourceFieldName>>()
 	const extensionValueLossArtifactIds = new Set<string>()
 
@@ -697,9 +865,13 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		// Artifact's own outgoing edge set is uncertain -- fold into
 		// `edgeLossArtifactIds`'s doc, gated the same direction-aware way as
 		// any other edge-loss cause instead of blocking `graphTrustworthy`
-		// project-wide.
-		if (duplicateKeyDiagnostics.some(d => duplicateKeyFieldNames(d.field, 'relations')))
+		// project-wide. No single entry index identifies which relation
+		// type(s) are actually uncertain, so this is always untyped/
+		// conservative (Finding 9), unlike a single lossy entry.
+		if (duplicateKeyDiagnostics.some(d => duplicateKeyFieldNames(d.field, 'relations'))) {
 			edgeLossArtifactIds.add(envelope.id)
+			edgeLossUntypedArtifactIds.add(envelope.id)
+		}
 		// `status`: only this Artifact's own lifecycle-status fact is
 		// uncertain -- fold into `statusInvalidArtifactIds`'s doc, consumed
 		// only by `impact`/`resolve-current`.
@@ -715,6 +887,12 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		diagnostics.push(...relationResult.diagnostics)
 		if (relationEntriesHaveEdgeLoss(relationResult.diagnostics))
 			edgeLossArtifactIds.add(envelope.id)
+		// Finding 9: attribute each edge-loss diagnostic to the specific
+		// relation type it identifies, when it identifies one at all.
+		for (const d of relationResult.diagnostics) {
+			if (EDGE_LOSS_RELATION_CODES.has(d.code))
+				recordEdgeLossType(edgeLossUntypedArtifactIds, edgeLossRelationTypesBySourceId, envelope.id, d.code, rawRelations, d.field)
+		}
 		if (relationEntriesHaveExtensionLoss(relationResult.diagnostics))
 			relationExtensionLossArtifactIds.add(envelope.id)
 
@@ -800,8 +978,16 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	// carry the SOURCE Artifact's own `artifactId`, which is exactly the fact
 	// a traversal that walks this edge as trustworthy is missing.
 	for (const d of relationGraphDiagnostics) {
-		if ((d.code === 'EF-REL-004' || d.code === 'EF-REL-008') && d.artifactId !== undefined)
+		if ((d.code === 'EF-REL-004' || d.code === 'EF-REL-008') && d.artifactId !== undefined) {
 			semanticEdgeLossArtifactIds.add(d.artifactId)
+			// Finding 9: both codes always identify one specific relation type.
+			const type = semanticEdgeLossType(d, relationById)
+			if (type) {
+				const set = semanticEdgeLossRelationTypesBySourceId.get(d.artifactId) ?? new Set<RelationType>()
+				set.add(type)
+				semanticEdgeLossRelationTypesBySourceId.set(d.artifactId, set)
+			}
+		}
 	}
 
 	const supersessionFacts: SupersessionGraphFact[] = resolvedOutcomes
@@ -819,9 +1005,27 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	// Finding 6: `EF-SUP-003` (cross-type replacement) carries the SOURCE
 	// Artifact's own `artifactId` -- `resolveCurrent`'s own traversal never
 	// checks type compatibility, so this fact must be supplied here instead.
+	// `EF-SUP-001`/`002`/`005` are folded into the broader
+	// `supersessionFactInvalidArtifactIds` alongside it (sixth-round Finding
+	// 6): `resolveCurrent`'s own traversal can reach an invalid supersession
+	// fact -- an empty replacement set, an illegal declaration on a
+	// non-superseded node, or a cycle -- without ever following an edge that
+	// reveals it (see that field's doc for the zero-edge reasoning).
 	for (const d of supersessionGraphDiagnostics) {
-		if (d.code === 'EF-SUP-003' && d.artifactId !== undefined)
+		if (d.code === 'EF-SUP-003' && d.artifactId !== undefined) {
 			supersessionCrossTypeArtifactIds.add(d.artifactId)
+			supersessionFactInvalidArtifactIds.add(d.artifactId)
+		}
+		if ((d.code === 'EF-SUP-001' || d.code === 'EF-SUP-002') && d.artifactId !== undefined)
+			supersessionFactInvalidArtifactIds.add(d.artifactId)
+		if (d.code === 'EF-SUP-005') {
+			if (d.artifactId !== undefined)
+				supersessionFactInvalidArtifactIds.add(d.artifactId)
+			for (const rel of d.related) {
+				if (rel.artifactId !== undefined)
+					supersessionFactInvalidArtifactIds.add(rel.artifactId)
+			}
+		}
 	}
 
 	const incomingRelations = new Map<string, IncomingRelationEdge[]>()
@@ -1032,6 +1236,8 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		chgEffects,
 		graphTrustworthy,
 		edgeLossArtifactIds,
+		edgeLossUntypedArtifactIds,
+		edgeLossRelationTypesBySourceId,
 		relationExtensionLossArtifactIds,
 		resourceLossArtifactIds,
 		tagLossArtifactIds,
@@ -1041,8 +1247,10 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		byteDecodingLossArtifactIds,
 		projectionLossArtifactIds,
 		semanticEdgeLossArtifactIds,
+		semanticEdgeLossRelationTypesBySourceId,
 		statusInvalidArtifactIds,
 		supersessionCrossTypeArtifactIds,
+		supersessionFactInvalidArtifactIds,
 		resourceFieldLossById,
 	}
 }
