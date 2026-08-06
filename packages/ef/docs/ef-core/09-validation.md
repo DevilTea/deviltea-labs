@@ -391,7 +391,7 @@ other participating locations:
   "artifact_id": "REQ-031",
   "related": [
     {
-      "path": "archive/REQ-031.md",
+      "path": ".engineering/req/REQ-044.md",
       "message": "Duplicate identity is also declared here."
     }
   ]
@@ -412,6 +412,7 @@ Namespaces own findings as follows:
 | Namespace | Primary responsibility |
 |---|---|
 | `EF-ENV-*` | Serialized envelope and frontmatter representation |
+| `EF-FS-*` | Filesystem layout, configuration, workspace association, and text representation |
 | `EF-ID-*` | Identity, canonical Artifact path, uniqueness, and singleton rules |
 | `EF-LIFE-*` | Status applicability and transition, whole-Artifact freeze, and Artifact deletion |
 | `EF-REL-*` | Relation entry representation, compatibility, targets, and non-supersession graph rules |

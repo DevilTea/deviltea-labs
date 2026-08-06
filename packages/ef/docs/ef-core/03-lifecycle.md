@@ -341,6 +341,14 @@ relations: []
 resources: []
 ---
 
+## Context
+
+## Decision
+
+## Alternatives
+
+## Consequences
+
 ## Lifecycle
 
 The proposal was closed because repository files remain the sole authoritative
@@ -348,7 +356,9 @@ source of truth.
 ```
 
 This Artifact never became active. EF does not need a distinct rejected or
-abandoned status to preserve the outcome.
+abandoned status to preserve the outcome. The required core headings remain
+present under the body schema; a draft retired before activation may leave
+their content incomplete.
 
 ### Completed CHG
 
@@ -364,6 +374,8 @@ tags: []
 relations:
   - type: introduces
     target: REQ-070
+  - type: modifies
+    target: REQ-031
 resources: []
 ---
 
@@ -378,6 +390,7 @@ Replace overlapping filtering requirements with one observable contract.
 ## Changes
 
 - Introduced REQ-070 as the consolidated filtering contract.
+- Superseded REQ-031 with REQ-070.
 
 ## Verification
 

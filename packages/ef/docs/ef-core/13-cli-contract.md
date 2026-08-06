@@ -412,6 +412,22 @@ On failure, stdout is empty, a diagnostic is written to stderr, and the stable
 exit code applies. Callers MUST NOT treat stderr as a stable machine envelope
 for this raw byte transport command.
 
+Failure classes map to the stable exit codes as follows:
+
+| Failure | Exit |
+|---|---:|
+| The supplied owner Artifact ID does not exist | `2` |
+| The owner exists but declares no descriptor with the exact `location` | `2` |
+| The `location` is declared by a different Artifact than the supplied owner | `2` |
+| The descriptor exists but its managed local file is missing or is not a regular file | `1` |
+| The managed path or its state violates repository integrity, such as a forbidden symlink | `1` |
+| The file exists but cannot be read due to an execution or permission failure | `2` |
+
+The first three are caller-supplied references that do not correspond to the
+repository state, consistent with the query-command missing-ID rule. A declared
+descriptor whose repository state is broken is a domain finding, consistent
+with [Validation and Integrity](09-validation.md).
+
 ## Context Composition
 
 EF Core v1 defines no separate `ef context` command. Explicit staged composition

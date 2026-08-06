@@ -554,6 +554,7 @@ The Resource diagnostic codes are:
 | `EF-RES-011` | error | Resource role and normative value are incompatible |
 | `EF-RES-012` | info | Optional Resource type-specific validation reported malformed content |
 | `EF-RES-013` | error | Frozen Resource descriptor or local content was modified or removed |
+| `EF-RES-014` | error | Local Resource location is not beneath its owner's managed Resource directory |
 | `EF-RES-015` | error | Unowned file exists inside an EF-managed Resource root |
 | `EF-RES-016` | warning | Resource descriptors or fields are not canonically ordered |
 | `EF-RES-017` | warning | External Resource uses insecure HTTP rather than HTTPS |
