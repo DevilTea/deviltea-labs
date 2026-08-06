@@ -950,18 +950,53 @@ describe('gitRepository', () => {
 				.toEqual({ kind: 'git-unavailable', message: 'no git' })
 		})
 
-		it('getFirstParent reports missing when the commit type check succeeds but the body fetch fails', async () => {
+		// FINDING (repository.ts getFirstParent): the type check just proved the
+		// commit exists; a non-zero, non-`git-unavailable` exit from the body
+		// fetch now is an execution/read error on an object already known to
+		// exist, never proof the commit itself is missing. Folding this into
+		// `missing` would let a caller treat a real read failure as though the
+		// commit does not exist.
+		it('getFirstParent reports error (not missing) when the commit type check succeeds but the body fetch fails', async () => {
 			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('commit'), okOutcome('', 1)]))
 				.getFirstParent('a'.repeat(40))
-			expect(result)
-				.toEqual({ kind: 'missing' })
+			expect(result.kind)
+				.toBe('error')
+			expect(result.kind === 'error' && result.message)
+				.toContain('cat-file -p')
 		})
 
-		it('readTree propagates git-unavailable', async () => {
+		it('readTree propagates git-unavailable from the existence check', async () => {
 			const result = await createGitRepository('/r', scriptedExecutor([unavailableOutcome('no git')]))
 				.readTree('a'.repeat(40))
 			expect(result)
 				.toEqual({ kind: 'git-unavailable', message: 'no git' })
+		})
+
+		it('readTree propagates git-unavailable from the ls-tree call', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('commit'), unavailableOutcome('no git')]))
+				.readTree('a'.repeat(40))
+			expect(result)
+				.toEqual({ kind: 'git-unavailable', message: 'no git' })
+		})
+
+		it('readTree reports missing when the existence check itself fails (exit 1)', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('', 1)]))
+				.readTree('a'.repeat(40))
+			expect(result)
+				.toEqual({ kind: 'missing' })
+		})
+
+		// FINDING (repository.ts readTree): `cat-file -t` already proved the
+		// commit exists; a non-zero, non-`git-unavailable` exit from `ls-tree`
+		// now is an execution/read error on an object already known to exist,
+		// never proof the commit itself is missing.
+		it('readTree reports error (not missing) when the existence check succeeds but ls-tree fails', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('commit'), okOutcome('', 128)]))
+				.readTree('a'.repeat(40))
+			expect(result.kind)
+				.toBe('error')
+			expect(result.kind === 'error' && result.message)
+				.toContain('ls-tree')
 		})
 
 		it('readBlob propagates git-unavailable from the cat-file type check', async () => {
@@ -978,11 +1013,17 @@ describe('gitRepository', () => {
 				.toEqual({ kind: 'git-unavailable', message: 'no git' })
 		})
 
-		it('readBlob reports missing when the blob type check succeeds but the content fetch fails', async () => {
+		// FINDING (repository.ts readBlob): the type check just proved the blob
+		// exists; a non-zero, non-`git-unavailable` exit from the content fetch
+		// now is an execution/read error on an object already known to exist,
+		// never proof the blob itself is missing.
+		it('readBlob reports error (not missing) when the blob type check succeeds but the content fetch fails', async () => {
 			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('blob'), okOutcome('', 1)]))
 				.readBlob('a'.repeat(40))
-			expect(result)
-				.toEqual({ kind: 'missing' })
+			expect(result.kind)
+				.toBe('error')
+			expect(result.kind === 'error' && result.message)
+				.toContain('cat-file -p')
 		})
 
 		it('listFirstParentHistory propagates git-unavailable from rev-list', async () => {
@@ -1014,10 +1055,59 @@ describe('gitRepository', () => {
 		})
 
 		it('pathExistsInFirstParentHistory propagates git-unavailable from the post-loop shallow check', async () => {
-			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), okOutcome('', 1), unavailableOutcome('no git')]))
+			// The ls-tree call reports a legitimate "path absent at this
+			// commit" outcome (exit 0, empty stdout, matching real Git
+			// behavior) so the walk reaches the post-loop shallow check.
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), okOutcome(''), unavailableOutcome('no git')]))
 				.pathExistsInFirstParentHistory('main', 'x')
 			expect(result)
 				.toEqual({ kind: 'git-unavailable', message: 'no git' })
+		})
+
+		// FINDING (repository.ts pathExistsInFirstParentHistory): a non-zero,
+		// non-`git-unavailable` `ls-tree` exit is a Git execution/read error --
+		// real Git exits `0` with empty output for a legitimately absent
+		// path -- so it must never be folded into "no match, keep walking"
+		// and allowed to fall through to `not-found`.
+		it('pathExistsInFirstParentHistory reports unresolved (not not-found) when an in-loop ls-tree call exits non-zero without being unavailable', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), okOutcome('', 128), okOutcome('false\n')]))
+				.pathExistsInFirstParentHistory('main', 'x')
+			expect(result)
+				.toEqual({ kind: 'unresolved' })
+		})
+
+		// FINDING (repository.ts pathExistsInFirstParentHistory): a non-zero,
+		// non-`git-unavailable` `rev-parse --is-shallow-repository` exit is
+		// folded into `repositoryHasAnyShallowBoundary === false`, so a
+		// probe that could not even run is treated the same as a proven
+		// non-shallow repository and falls through to `not-found`.
+		it('pathExistsInFirstParentHistory reports unresolved (not not-found) when the post-loop shallow-repository probe exits non-zero without being unavailable', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), okOutcome(''), okOutcome('', 128)]))
+				.pathExistsInFirstParentHistory('main', 'x')
+			expect(result)
+				.toEqual({ kind: 'unresolved' })
+		})
+
+		// Audit-driven (same pattern as the two findings above): a non-zero,
+		// non-`git-unavailable` exit from the boundary `cat-file` re-inspection
+		// is a Git execution/read error on a commit `rev-list` itself just
+		// reported as existing, not proof of a shallow boundary; it must be
+		// reported as unresolved rather than asserting the specific (and
+		// here unproven) `shallow` conclusion.
+		it('pathExistsInFirstParentHistory reports unresolved (not shallow) when the final boundary cat-file re-inspection exits non-zero without being unavailable', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), okOutcome(''), okOutcome('true\n'), okOutcome('', 128)]))
+				.pathExistsInFirstParentHistory('main', 'x')
+			expect(result)
+				.toEqual({ kind: 'unresolved' })
+		})
+
+		// Audit-driven (same pattern; `listFirstParentHistory`'s own
+		// post-walk boundary check has the identical fallback).
+		it('listFirstParentHistory reports unresolved (not shallow) when the post-walk boundary cat-file check exits non-zero without being unavailable', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), okOutcome('', 128)]))
+				.listFirstParentHistory('main')
+			expect(result)
+				.toEqual({ kind: 'unresolved' })
 		})
 
 		it('diffTrees propagates git-unavailable', async () => {

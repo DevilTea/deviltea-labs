@@ -570,6 +570,66 @@ describe('validateBootstrap', () => {
 			.toBe(2)
 	})
 
+	// FINDING (bootstrap-validation.ts parentage if-chain): `getFirstParent`'s
+	// `error` kind (the commit was proven to exist but its parentage could not
+	// be read) is not `missing`/`not-a-commit`/`resolved` -- with an
+	// unresolved ref, the parentage if-chain previously handled only those
+	// three kinds explicitly and let anything else silently fall through to
+	// the trailing "'root-commit': fine" comment, treating an unproven
+	// parentage read failure as though it were a root commit with nothing to
+	// check. This must instead report incomplete.
+	it('reports EF-VAL-011 (not a silent proceed-as-root-commit) when the ref was previously unresolved and the parentage read itself fails', async () => {
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+
+		const git = wrapGitRepository(repo(), {
+			getFirstParent: async () => ({ kind: 'error', message: 'simulated parentage read failure' }),
+		})
+		const result = await validateBootstrap({ git, proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-011'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('simulated parentage read failure')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	// Same defect, captured OID branch: `firstParent.kind !== 'resolved'`
+	// already folds `error` into the mismatch report, but the message text
+	// must not claim a proven mismatch that was never actually established.
+	// `refTipOid` must be a real, resolvable commit whose own history has no
+	// prior EF state -- otherwise the bootstrap history check (which runs
+	// before the parentage check under test) would itself fail to walk a
+	// bogus OID and report EF-VAL-011 for an unrelated reason first.
+	it('reports EF-VAL-011 when the ref already resolved and the parentage read itself fails', async () => {
+		await writeFile(tempDir, 'README.md', '# Ordinary pre-EF history\n')
+		const refTipOid = commitAll(tempDir, 'ordinary pre-EF commit')
+
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap on top of the resolved ref tip')
+
+		const git = wrapGitRepository(repo(), {
+			getFirstParent: async () => ({ kind: 'error', message: 'simulated parentage read failure' }),
+		})
+		const result = await validateBootstrap({
+			git,
+			proposedOid,
+			operationStartRefState: { resolved: true, oid: refTipOid },
+		})
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-011'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('simulated parentage read failure')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
 	it('reports EF-VAL-006 when git is unavailable checking bootstrap history for a resolved ref', async () => {
 		await writeMinimalProject(tempDir)
 		const proposedOid = commitAll(tempDir, 'bootstrap')

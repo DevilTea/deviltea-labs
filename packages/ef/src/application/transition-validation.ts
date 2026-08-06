@@ -86,8 +86,18 @@ async function materialize(git: GitRepository, commitOid: string): Promise<Mater
 	const treeResult = await git.readTree(commitOid)
 	if (treeResult.kind === 'git-unavailable')
 		return { ok: false, reason: 'git-unavailable', message: treeResult.message }
-	if (treeResult.kind === 'missing')
-		return { ok: false, reason: 'unresolvable', message: `Commit '${commitOid}' could not be materialized.` }
+	if (treeResult.kind !== 'resolved') {
+		// `missing` (the commit does not exist) and `error` (the commit exists
+		// but its tree could not be read) are both non-materializable outcomes
+		// from this function's perspective -- both mean `commitOid` cannot be
+		// used, so both are reported as `unresolvable` for the caller to
+		// surface as incomplete, never treated as though the read simply
+		// found nothing.
+		const message = treeResult.kind === 'missing'
+			? `Commit '${commitOid}' could not be materialized.`
+			: `Commit '${commitOid}' tree could not be read: ${treeResult.message}`
+		return { ok: false, reason: 'unresolvable', message }
+	}
 
 	const oidByPath = new Map<string, string>()
 	for (const entry of treeResult.entries) {
@@ -371,6 +381,15 @@ export async function validateTransition(input: ValidateTransitionInput): Promis
 	if (firstParent.kind === 'git-unavailable') {
 		return incompleteResult([
 			makeDiagnostic('EF-VAL-006', `Git is unavailable while checking proposed parentage: ${firstParent.message}`),
+		], policy, { baselineOid: resolvedBaselineOid, integrationRef, expectedRefOid: operationStartRefOid })
+	}
+	// `getFirstParent` ran and observed `resolvedProposedOid` exists, but the
+	// follow-up body read failed unexpectedly: parentage could not be
+	// determined at all, which is neither a proven match nor a proven
+	// mismatch against the trusted baseline.
+	if (firstParent.kind === 'error') {
+		return incompleteResult([
+			makeDiagnostic('EF-VAL-011', `Proposed commit '${resolvedProposedOid}' parentage could not be determined: ${firstParent.message}`),
 		], policy, { baselineOid: resolvedBaselineOid, integrationRef, expectedRefOid: operationStartRefOid })
 	}
 	if (firstParent.kind !== 'resolved' || firstParent.parentOid !== resolvedBaselineOid) {

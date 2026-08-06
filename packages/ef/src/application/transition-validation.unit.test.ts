@@ -613,6 +613,30 @@ describe('validateTransition', () => {
 			.toContain('EF-VAL-002')
 	})
 
+	// FINDING (repository.ts readTree -> transition-validation.ts materialize):
+	// `readTree`'s `error` kind (the commit was proven to exist but its tree
+	// could not be read) must still be reported as incomplete (EF-VAL-002),
+	// exactly like `missing` -- both mean the baseline cannot be
+	// materialized -- rather than being accessed as though `treeResult` were
+	// `resolved` (which would throw on `.entries`).
+	it('reports EF-VAL-002 when the trusted baseline commit tree exists but cannot be read (execution error, not missing)', async () => {
+		await writeMinimalProject(tempDir)
+		const baselineOid = commitAll(tempDir, 'bootstrap')
+		const realGit = repo()
+		const git = wrapGitRepository(realGit, {
+			readTree: async oid => (oid === baselineOid ? { kind: 'error', message: 'simulated ls-tree failure' } : realGit.readTree(oid)),
+		})
+
+		const result = await validateTransition({ git, baselineOid, proposedOid: baselineOid, operationStartRefOid: baselineOid })
+
+		expect(result.complete)
+			.toBe(false)
+		expect(codesOf(result.diagnostics))
+			.toContain('EF-VAL-002')
+		expect(result.diagnostics.some(d => d.message.includes('simulated ls-tree failure')))
+			.toBe(true)
+	})
+
 	it('reports EF-VAL-006 when git becomes unavailable on the second, snapshot-loading read of the trusted baseline tree', async () => {
 		await writeMinimalProject(tempDir)
 		const baselineOid = commitAll(tempDir, 'bootstrap')
@@ -660,6 +684,33 @@ describe('validateTransition', () => {
 			.toContain('EF-VAL-011')
 	})
 
+	it('reports EF-VAL-011 when the proposed commit tree exists but cannot be read on the second, snapshot-loading read (execution error, not missing)', async () => {
+		await writeMinimalProject(tempDir)
+		const baselineOid = commitAll(tempDir, 'bootstrap')
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', status: 'draft' }))
+		const proposedOid = commitAll(tempDir, 'draft REQ-001')
+
+		const realGit = repo()
+		let proposedReadTreeCalls = 0
+		const git = wrapGitRepository(realGit, {
+			readTree: async (oid) => {
+				if (oid !== proposedOid)
+					return realGit.readTree(oid)
+				proposedReadTreeCalls += 1
+				return proposedReadTreeCalls === 1 ? realGit.readTree(oid) : { kind: 'error', message: 'simulated ls-tree failure' }
+			},
+		})
+
+		const result = await validateTransition({ git, baselineOid, proposedOid, operationStartRefOid: baselineOid })
+
+		expect(result.complete)
+			.toBe(false)
+		expect(codesOf(result.diagnostics))
+			.toContain('EF-VAL-011')
+		expect(result.diagnostics.some(d => d.message.includes('simulated ls-tree failure')))
+			.toBe(true)
+	})
+
 	it('reports EF-VAL-002 with a "nothing" fallback message when the operation-start ref was unresolved', async () => {
 		await writeMinimalProject(tempDir)
 		const baselineOid = commitAll(tempDir, 'bootstrap')
@@ -704,6 +755,32 @@ describe('validateTransition', () => {
 			.toBe(false)
 		expect(codesOf(result.diagnostics))
 			.toContain('EF-VAL-006')
+	})
+
+	// FINDING (repository.ts getFirstParent -> transition-validation.ts):
+	// `getFirstParent`'s `error` kind (the proposed commit was proven to exist
+	// but its parentage could not be read) must be reported as incomplete
+	// (EF-VAL-011), not silently folded into an ordinary "wrong parent"
+	// mismatch message that claims a proof that was never established.
+	it('reports EF-VAL-011 when the proposed commit\'s parentage cannot be read (neither a proven match nor a proven mismatch)', async () => {
+		await writeMinimalProject(tempDir)
+		const baselineOid = commitAll(tempDir, 'bootstrap')
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', status: 'draft' }))
+		const proposedOid = commitAll(tempDir, 'draft REQ-001')
+
+		const git = wrapGitRepository(repo(), {
+			getFirstParent: async () => ({ kind: 'error', message: 'simulated parentage read failure' }),
+		})
+		const result = await validateTransition({ git, baselineOid, proposedOid, operationStartRefOid: baselineOid })
+
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-011'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('simulated parentage read failure')
 	})
 
 	it('reports EF-VAL-006 when git is unavailable while materializing the proposed commit', async () => {

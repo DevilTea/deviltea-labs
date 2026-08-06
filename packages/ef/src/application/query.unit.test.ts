@@ -306,6 +306,34 @@ Exercises EF-QRY-008 (invalid-graph).
 - N/A.
 `
 
+const REQ_BAD_RELATION = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-950
+title: Bad Relation Requirement
+status: active
+summary: A requirement whose relations array contains a shape-invalid entry, for Finding A discarded-relation-data regressions.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-001
+  - not-a-mapping
+resources: []
+---
+
+## Requirement
+
+Exercises EF-REL-002 discarding a relation entry from both the sanitized graph indexes and the raw projection alike.
+
+## Rationale
+
+Exercises Finding A's discarded-relation-data gate.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
 const ADR_REFERENCES_POL = `---
 schema: ef/decision@1
 type: decision
@@ -402,6 +430,8 @@ function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRe
 		currentIds: new Map(),
 		chgEffects: [],
 		graphTrustworthy: true,
+		discardedRelationData: false,
+		artifactsWithDiscardedRelationData: new Set(),
 	}
 	return { snapshot, validation }
 }
@@ -673,6 +703,143 @@ describe('executeQuery', () => {
 			const search = await executeQuery(ok, { kind: 'search', terms: ['misfiled'] })
 			expect(search.complete)
 				.toBe(true)
+		})
+	})
+
+	describe('discarded relation data gate (Finding A: 10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
+		/** Adds REQ-950 (a shape-invalid relation entry, EF-REL-002) to the rich project fixture. */
+		async function contextWithDiscardedRelationData(): Promise<QueryContext> {
+			await writeFile(tempDir, '.engineering/req/REQ-950.md', REQ_BAD_RELATION)
+			return reloadContext()
+		}
+
+		it('sets validation.discardedRelationData and tracks only the affected artifact', async () => {
+			const bad = await contextWithDiscardedRelationData()
+			expect(bad.validation.discardedRelationData)
+				.toBe(true)
+			expect([...bad.validation.artifactsWithDiscardedRelationData])
+				.toEqual(['REQ-950'])
+		})
+
+		it('gates lookup (full projection) with EF-QRY-013 for the specific affected Artifact', async () => {
+			const bad = await contextWithDiscardedRelationData()
+			const result = await executeQuery(bad, { kind: 'lookup', id: 'REQ-950' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates lookup (summary projection) with EF-QRY-013 for the specific affected Artifact too', async () => {
+			const bad = await contextWithDiscardedRelationData()
+			const result = await executeQuery(bad, { kind: 'lookup', id: 'REQ-950', projection: 'summary' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('does NOT gate lookup for an untouched Artifact: the projection gate is per-artifact, not project-wide', async () => {
+			const bad = await contextWithDiscardedRelationData()
+			const result = await executeQuery(bad, { kind: 'lookup', id: 'REQ-001' })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data?.found)
+				.toBe(true)
+		})
+
+		it('gates list with EF-QRY-013 when the affected Artifact is included in the returned page', async () => {
+			const bad = await contextWithDiscardedRelationData()
+			const result = await executeQuery(bad, { kind: 'list' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('does NOT gate list when a type filter excludes the affected Artifact from the returned page', async () => {
+			const bad = await contextWithDiscardedRelationData()
+			// REQ-950 is a 'requirement'; excluding that type leaves it out of
+			// this result entirely, so the result can honestly report complete.
+			const result = await executeQuery(bad, { kind: 'list', type: ['prd'] })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.artifacts.some(a => a.id === 'REQ-950'))
+				.toBe(false)
+		})
+
+		it('gates search with EF-QRY-013 when a matching result includes the affected Artifact', async () => {
+			const bad = await contextWithDiscardedRelationData()
+			const result = await executeQuery(bad, { kind: 'search', terms: ['discarding'] })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('does NOT gate search when no returned match includes the affected Artifact', async () => {
+			const bad = await contextWithDiscardedRelationData()
+			const result = await executeQuery(bad, { kind: 'search', terms: ['filtering'] })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.results.some(r => r.artifact.id === 'REQ-950'))
+				.toBe(false)
+		})
+
+		it('gates relations/trace/impact/resolve-current project-wide (EF-QRY-013), even when querying an untouched Artifact', async () => {
+			const bad = await contextWithDiscardedRelationData()
+
+			const relations = await executeQuery(bad, { kind: 'relations', id: 'REQ-001' })
+			expect(relations.complete)
+				.toBe(false)
+			expect(relations.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const trace = await executeQuery(bad, { kind: 'trace', roots: ['REQ-001'], types: ['derived-from'], direction: 'both', maxDepth: 1 })
+			expect(trace.complete)
+				.toBe(false)
+			expect(trace.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const impact = await executeQuery(bad, { kind: 'impact', roots: ['REQ-001'], maxDepth: 1 })
+			expect(impact.complete)
+				.toBe(false)
+			expect(impact.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const resolveCurrent = await executeQuery(bad, { kind: 'resolve-current', id: 'REQ-001' })
+			expect(resolveCurrent.complete)
+				.toBe(false)
+			expect(resolveCurrent.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('eF-REL-003 (dangling relation target) does not set discardedRelationData; only a traversal that actually reaches the dangling edge fails, via the existing EF-QRY-007 path', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-901.md', REQ_GHOST_SRC)
+			const ghostContext = await reloadContext()
+			expect(ghostContext.validation.discardedRelationData)
+				.toBe(false)
+
+			// An unrelated relations query elsewhere in the graph is unaffected.
+			const unrelated = await executeQuery(ghostContext, { kind: 'relations', id: 'REQ-001' })
+			expect(unrelated.complete)
+				.toBe(true)
+
+			// Traversal that actually reaches the dangling target still fails,
+			// via the pre-existing, unchanged EF-QRY-007 path.
+			const result = await executeQuery(ghostContext, { kind: 'relations', id: 'REQ-901', types: ['derived-from'] })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-007')
 		})
 	})
 
@@ -1294,6 +1461,41 @@ describe('executeQuery', () => {
 				.toBe('EF-QRY-010')
 			expect(result.diagnostics[0]!.message)
 				.toContain('could not be completely materialized')
+		})
+
+		// `computeHistory`'s `untrusted-data` outcome (a historical blob the walk
+		// needed exists but could not be read/decoded) must map to the more
+		// specific `EF-QRY-013`, distinct from `EF-QRY-010`'s "the Git history
+		// itself is unavailable" (query-history.ts `ComputeHistoryResult` docs).
+		it('eF-QRY-013 (not EF-QRY-010) when a historical blob the walk needs exists but cannot be read', async () => {
+			const GIT_TEST_ENV = {
+				GIT_AUTHOR_NAME: 'EF Test',
+				GIT_AUTHOR_EMAIL: 'ef-test@example.com',
+				GIT_COMMITTER_NAME: 'EF Test',
+				GIT_COMMITTER_EMAIL: 'ef-test@example.com',
+			}
+			execFileSync('git', ['-C', tempDir, 'init', '-q', '-b', 'main'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			execFileSync('git', ['-C', tempDir, 'add', '-A'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			execFileSync('git', ['-C', tempDir, 'commit', '-q', '-m', 'bootstrap'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			const tipOid = execFileSync('git', ['-C', tempDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
+				.trim()
+
+			const realGit = createGitRepository(tempDir, createGitExecutor())
+			// REQ-001.md exists as a real blob at `tipOid`'s tree (proven by the
+			// real `readTree` call this override still delegates to); only the
+			// content fetch is forced to fail, distinct from a genuine absence.
+			const brokenGit = wrapGitRepository(realGit, {
+				readBlob: async () => ({ kind: 'missing' }),
+			})
+			const historyContext: QueryContext = {
+				...context,
+				history: { git: brokenGit, integrationRefOid: tipOid },
+			}
+			const result = await executeQuery(historyContext, { kind: 'history', id: 'REQ-001' })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
 		})
 	})
 

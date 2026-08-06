@@ -206,30 +206,34 @@ describe('computeHistory', () => {
 
 	it('reports engineering effects (introduces then modifies) with correct before/after status and commit_oid', async () => {
 		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', new Map())
-		expect(outcome)
-			.toBeDefined()
+		expect(outcome.kind)
+			.toBe('complete')
+		if (outcome.kind !== 'complete')
+			return
 
-		expect(outcome!.effects)
+		expect(outcome.effects)
 			.toEqual([
 				expect.objectContaining({ effect: 'introduces', status_before: null, status_after: 'active', commit_oid: oids.commit3 }),
 				expect.objectContaining({ effect: 'modifies', status_before: 'active', status_after: 'superseded', commit_oid: oids.commit5 }),
 			])
-		expect(outcome!.effects[0]!.chg.id)
+		expect(outcome.effects[0]!.chg.id)
 			.toBe('CHG-001')
-		expect(outcome!.effects[1]!.chg.id)
+		expect(outcome.effects[1]!.chg.id)
 			.toBe('CHG-002')
 	})
 
 	it('reports Git commits that change the Artifact aggregate, oldest to newest, with bytewise-sorted changed_paths', async () => {
 		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', new Map())
-		expect(outcome)
-			.toBeDefined()
+		expect(outcome.kind)
+			.toBe('complete')
+		if (outcome.kind !== 'complete')
+			return
 
-		expect(outcome!.commits.map(c => c.oid))
+		expect(outcome.commits.map(c => c.oid))
 			.toEqual([oids.commit3, oids.commit5, oids.commit6])
-		expect(outcome!.commits[0]!.changed_paths)
+		expect(outcome.commits[0]!.changed_paths)
 			.toEqual(['.engineering/req/REQ-001.md'])
-		expect(outcome!.commits[2]!.changed_paths)
+		expect(outcome.commits[2]!.changed_paths)
 			.toEqual([
 				'.engineering/req/REQ-001.md',
 				'.engineering/resources/REQ-001/notes.md',
@@ -238,27 +242,31 @@ describe('computeHistory', () => {
 
 	it('tracks draft-only Git history (no CHG effects) for an Artifact aggregate', async () => {
 		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-002', 'requirement', new Map())
-		expect(outcome)
-			.toBeDefined()
-		expect(outcome!.effects)
+		expect(outcome.kind)
+			.toBe('complete')
+		if (outcome.kind !== 'complete')
+			return
+		expect(outcome.effects)
 			.toEqual([])
-		expect(outcome!.commits.map(c => c.oid))
+		expect(outcome.commits.map(c => c.oid))
 			.toEqual([oids.commit2, oids.commit4])
 	})
 
 	it('includes control files (ef.yaml, .gitignore) in the PROJECT aggregate', async () => {
 		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'PROJECT', 'project', new Map())
-		expect(outcome)
-			.toBeDefined()
-		expect(outcome!.commits.map(c => c.oid))
+		expect(outcome.kind)
+			.toBe('complete')
+		if (outcome.kind !== 'complete')
+			return
+		expect(outcome.commits.map(c => c.oid))
 			.toEqual([oids.commit1, oids.commit7])
-		expect(outcome!.commits[0]!.changed_paths)
+		expect(outcome.commits[0]!.changed_paths)
 			.toEqual([
 				'.engineering/.gitignore',
 				'.engineering/PROJECT.md',
 				'.engineering/ef.yaml',
 			])
-		expect(outcome!.commits[1]!.changed_paths)
+		expect(outcome.commits[1]!.changed_paths)
 			.toEqual(['.engineering/ef.yaml'])
 	})
 
@@ -284,13 +292,76 @@ describe('computeHistory', () => {
 		}
 		const byId = new Map([['CHG-001', liveChg]])
 		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId)
-		expect(outcome!.effects[0]!.chg)
+		expect(outcome.kind)
+			.toBe('complete')
+		if (outcome.kind !== 'complete')
+			return
+		expect(outcome.effects[0]!.chg)
 			.toEqual(buildArtifactSummary(liveChg.envelope, liveChg.path))
-		expect(outcome!.effects[0]!.chg.title)
+		expect(outcome.effects[0]!.chg.title)
 			.toBe('LIVE CURRENT TITLE')
 	})
 
-	it('returns undefined when the required history cannot be completely materialized (shallow clone)', async () => {
+	it('returns untrusted-data (never a false empty/partial history) when the current record\'s actual path has a filename mismatch (EF-ID-005) from its canonical path', async () => {
+		// `graphTrustworthy` (snapshot-validation.ts) deliberately does NOT gate
+		// on EF-ID-005/EF-ID-014 -- REQ-001's declared ID is still unique and
+		// correctly decoded, so it reaches history lookup. But `computeHistory`
+		// scans the *canonical* path derived from (type, id); if the record's
+		// actual authoritative path is misfiled, that canonical path is not
+		// where the aggregate's real blob lives, so scanning it anyway could
+		// silently return an empty/partial history instead of failing.
+		const misfiledRecord: SnapshotArtifactRecord = {
+			path: '.engineering/req/wrong-filename.md',
+			id: 'REQ-001',
+			type: 'requirement',
+			status: 'superseded',
+			relations: [],
+			envelope: {
+				schema: 'ef/requirement@1',
+				type: 'requirement',
+				id: 'REQ-001',
+				title: 'Title of REQ-001',
+				status: 'superseded',
+				summary: 'Summary of REQ-001.',
+				tags: [],
+				relations: [],
+				resources: [],
+				extensions: {},
+			},
+		}
+		const byId = new Map([['REQ-001', misfiledRecord]])
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId)
+		expect(outcome)
+			.toEqual({ kind: 'untrusted-data' })
+	})
+
+	it('returns untrusted-data (never a false empty/partial history) when the current record\'s actual path is outside its canonical directory (EF-ID-014)', async () => {
+		const misfiledRecord: SnapshotArtifactRecord = {
+			path: '.engineering/misplaced/REQ-001.md',
+			id: 'REQ-001',
+			type: 'requirement',
+			status: 'superseded',
+			relations: [],
+			envelope: {
+				schema: 'ef/requirement@1',
+				type: 'requirement',
+				id: 'REQ-001',
+				title: 'Title of REQ-001',
+				status: 'superseded',
+				summary: 'Summary of REQ-001.',
+				tags: [],
+				relations: [],
+				resources: [],
+				extensions: {},
+			},
+		}
+		const byId = new Map([['REQ-001', misfiledRecord]])
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId)
+		expect(outcome)
+			.toEqual({ kind: 'untrusted-data' })
+	})
+
+	it('returns history-unavailable when the required history cannot be completely materialized (shallow clone)', async () => {
 		const shallowDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-shallow-')))
 		try {
 			git(shallowDir, ['clone', '-q', '--depth', '1', '--branch', 'main', `file://${tempDir}`, '.'])
@@ -298,7 +369,7 @@ describe('computeHistory', () => {
 				.trim()
 			const outcome = await computeHistory(gitRepo(shallowDir), tipOid, 'REQ-001', 'requirement', new Map())
 			expect(outcome)
-				.toBeUndefined()
+				.toEqual({ kind: 'history-unavailable' })
 		}
 		finally {
 			await fs.rm(shallowDir, { recursive: true, force: true })
@@ -333,10 +404,11 @@ describe('computeHistory', () => {
 				.toBeGreaterThan(0)
 
 			const outcome = await computeHistory(gitRepo(), oids.commit7!, 'PROJECT', 'project', new Map())
-			expect(outcome)
-				.not
-				.toBeUndefined()
-			expect(outcome!.commits.length)
+			expect(outcome.kind)
+				.toBe('complete')
+			if (outcome.kind !== 'complete')
+				return
+			expect(outcome.commits.length)
 				.toBeGreaterThan(0)
 		}
 		finally {
@@ -344,7 +416,7 @@ describe('computeHistory', () => {
 		}
 	})
 
-	it('returns undefined when a historical commit tree cannot be resolved mid-walk', async () => {
+	it('returns history-unavailable when a historical commit tree cannot be resolved mid-walk', async () => {
 		const real = gitRepo()
 		const wrapped = wrapGitRepository(real, {
 			readTree: async (oid: string) => {
@@ -355,10 +427,10 @@ describe('computeHistory', () => {
 		})
 		const outcome = await computeHistory(wrapped, oids.commit7!, 'REQ-001', 'requirement', new Map())
 		expect(outcome)
-			.toBeUndefined()
+			.toEqual({ kind: 'history-unavailable' })
 	})
 
-	it('treats an unresolvable target blob as an undecodable envelope, falling back status_after to the terminal default', async () => {
+	it('fails the query with untrusted-data (does not silently treat the target as absent) when the target Artifact\'s own historical blob cannot be resolved/read', async () => {
 		const real = gitRepo()
 		const wrapped = wrapGitRepository(real, {
 			readTree: async (oid: string) => {
@@ -373,17 +445,14 @@ describe('computeHistory', () => {
 				}
 			},
 		})
-		// Limited to commit3 itself: REQ-001 first appears in this commit, so
-		// there is no earlier history whose `previousEnvelope` could mask the
-		// fallback -- both `currentEnvelope` and `previousEnvelope` are absent,
-		// so `status_after` must fall all the way back to the literal 'retired'.
+		// REQ-001's tree entry at commit3 points at an oid that does not exist in
+		// the object database, so `readBlob` fails to resolve it. The blob still
+		// EXISTS as a tree entry at this historical commit -- this is an
+		// unreadable blob, not a genuine absence -- so the whole query must fail
+		// rather than silently falling back as if the target had never existed.
 		const outcome = await computeHistory(wrapped, oids.commit3!, 'REQ-001', 'requirement', new Map())
 		expect(outcome)
-			.toBeDefined()
-		expect(outcome!.effects)
-			.toEqual([
-				expect.objectContaining({ effect: 'introduces', status_before: null, status_after: 'retired', commit_oid: oids.commit3 }),
-			])
+			.toEqual({ kind: 'untrusted-data' })
 	})
 
 	it('does not report an engineering effect for a non-effect relation (references) alongside an effect relation on the same completed CHG', async () => {
@@ -391,9 +460,11 @@ describe('computeHistory', () => {
 		const commitOid = commitAll(tempDir, 'chg-003 mixed relations')
 
 		const outcome = await computeHistory(gitRepo(), commitOid, 'REQ-001', 'requirement', new Map())
-		expect(outcome)
-			.toBeDefined()
-		const chg3Effects = outcome!.effects.filter(e => e.chg.id === 'CHG-003')
+		expect(outcome.kind)
+			.toBe('complete')
+		if (outcome.kind !== 'complete')
+			return
+		const chg3Effects = outcome.effects.filter(e => e.chg.id === 'CHG-003')
 		expect(chg3Effects)
 			.toEqual([
 				expect.objectContaining({ effect: 'modifies', commit_oid: commitOid }),
@@ -411,9 +482,11 @@ describe('computeHistory', () => {
 		const commitOid = commitAll(tempDir, 'add external resource to REQ-001')
 
 		const outcome = await computeHistory(gitRepo(), commitOid, 'REQ-001', 'requirement', new Map())
-		expect(outcome)
-			.toBeDefined()
-		const lastCommit = outcome!.commits.at(-1)!
+		expect(outcome.kind)
+			.toBe('complete')
+		if (outcome.kind !== 'complete')
+			return
+		const lastCommit = outcome.commits.at(-1)!
 		expect(lastCommit.oid)
 			.toBe(commitOid)
 		expect(lastCommit.changed_paths)
@@ -434,13 +507,15 @@ describe('computeHistory: PROJECT control-path availability', () => {
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, withControlsOid, 'PROJECT', 'project', new Map())
-			expect(outcome)
-				.toBeDefined()
-			expect(outcome!.commits.map(c => c.oid))
+			expect(outcome.kind)
+				.toBe('complete')
+			if (outcome.kind !== 'complete')
+				return
+			expect(outcome.commits.map(c => c.oid))
 				.toEqual([bootstrapOid, withControlsOid])
-			expect(outcome!.commits[0]!.changed_paths)
+			expect(outcome.commits[0]!.changed_paths)
 				.toEqual(['.engineering/PROJECT.md'])
-			expect(outcome!.commits[1]!.changed_paths)
+			expect(outcome.commits[1]!.changed_paths)
 				.toEqual([
 					'.engineering/.gitignore',
 					'.engineering/ef.yaml',
@@ -453,7 +528,7 @@ describe('computeHistory: PROJECT control-path availability', () => {
 })
 
 describe('computeHistory: malformed CHG file mid-history', () => {
-	it('ignores a chg/*.md file whose envelope cannot be decoded, without crashing or reporting a false effect', async () => {
+	it('fails the query (does not silently skip or report a false effect) when a chg/*.md blob exists at a historical commit but its envelope cannot be decoded', async () => {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-stub-')))
 		try {
 			git(dir, ['init', '-q', '-b', 'main'])
@@ -461,6 +536,8 @@ describe('computeHistory: malformed CHG file mid-history', () => {
 			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
 			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
 			// A CHG stub whose frontmatter is missing required fields and therefore fails to decode.
+			// This blob EXISTS at this historical commit -- it is not absent -- so
+			// it must fail the whole query rather than being silently skipped.
 			await writeFile(dir, '.engineering/chg/CHG-001.md', '---\nschema: ef/change@1\ntype: change\nid: CHG-001\n---\n\nplaceholder\n')
 			commitAll(dir, 'chg stub, undecodable envelope')
 
@@ -471,11 +548,33 @@ describe('computeHistory: malformed CHG file mid-history', () => {
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, completedOid, 'REQ-001', 'requirement', new Map())
 			expect(outcome)
-				.toBeDefined()
-			expect(outcome!.effects)
-				.toEqual([
-					expect.objectContaining({ effect: 'introduces', commit_oid: completedOid }),
-				])
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails the query when the chg/*.md blob that would report the completing effect itself has malformed frontmatter', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-malformed-completing-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// The CHG meant to introduce REQ-001 has malformed frontmatter (missing
+			// required fields) at the very commit that would otherwise report the
+			// completing effect. This must fail the query, not silently report
+			// REQ-001 as having no engineering history.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', '---\nschema: ef/change@1\ntype: change\nid: CHG-001\nstatus: completed\n---\n\nmalformed, missing required fields\n')
+			const malformedCompletingOid = commitAll(dir, 'malformed completing chg')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, malformedCompletingOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
 			await fs.rm(dir, { recursive: true, force: true })

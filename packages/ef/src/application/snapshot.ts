@@ -234,6 +234,17 @@ export async function loadSnapshotFromWorkingTree(projectRoot: string, deps: Sna
 
 class GitUnavailableError extends Error {}
 
+/**
+ * A Git object was already proven to exist (a prior `cat-file -t` or the
+ * tree listing that produced this entry succeeded) but a follow-up read on
+ * it then failed unexpectedly (`ReadTreeResult`/`ReadBlobResult`'s `error`
+ * kind). Distinct from {@link GitUnavailableError} (the executor itself could
+ * not run/observe the command) and from a genuine absence: this must make
+ * the whole snapshot load incomplete, never be silently treated as though
+ * the entry does not exist.
+ */
+class GitReadError extends Error {}
+
 function entryKindOf(entry: GitTreeEntry): SnapshotEntryKind {
 	if (entry.mode === '120000')
 		return 'symlink'
@@ -246,6 +257,8 @@ async function readBlobOrThrow(git: GitRepository, entry: GitTreeEntry | undefin
 	const result = await git.readBlob(entry.oid)
 	if (result.kind === 'git-unavailable')
 		throw new GitUnavailableError(result.message)
+	if (result.kind === 'error')
+		throw new GitReadError(result.message)
 	if (result.kind !== 'resolved')
 		return undefined
 	return result.bytes
@@ -265,6 +278,13 @@ export async function loadSnapshotFromCommit(git: GitRepository, commitOid: stri
 			return { ok: false, reason: 'git-unavailable', message: treeResult.message }
 		if (treeResult.kind === 'missing')
 			return { ok: false, reason: 'commit-not-found', message: `Commit '${commitOid}' could not be materialized.` }
+		if (treeResult.kind === 'error') {
+			// `commitOid` was already proven to exist; the tree read itself then
+			// failed unexpectedly. Distinct from `commit-not-found` (a genuine
+			// absence) -- reported as `read-error` so a caller never mistakes
+			// this execution/read failure for the commit simply not existing.
+			return { ok: false, reason: 'read-error', message: `Commit '${commitOid}' tree could not be read: ${treeResult.message}` }
+		}
 
 		const engineeringEntries = treeResult.entries.filter(entry => entry.path === ENGINEERING_DIR || entry.path.startsWith(`${ENGINEERING_DIR}/`))
 
@@ -324,6 +344,8 @@ export async function loadSnapshotFromCommit(git: GitRepository, commitOid: stri
 	catch (error) {
 		if (error instanceof GitUnavailableError)
 			return { ok: false, reason: 'git-unavailable', message: error.message }
+		if (error instanceof GitReadError)
+			return { ok: false, reason: 'read-error', message: error.message }
 		throw error
 	}
 }

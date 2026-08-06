@@ -112,6 +112,41 @@ export interface SnapshotValidationResult {
 	 * this.
 	 */
 	graphTrustworthy: boolean
+	/**
+	 * `true` when ANY Artifact's raw `relations` array had at least one entry
+	 * excluded (or, for `EF-REL-015`, partially discarded) while
+	 * `validateRelationEntries` sanitized it into the subset this module
+	 * indexes the graph from -- `EF-REL-001` (unknown relation type),
+	 * `EF-REL-002` (shape-invalid entry), `EF-REL-005` (self-relation), or
+	 * `EF-REL-015` (invalid/non-JSON-compatible extension field). Every
+	 * graph-traversal query kind (`relations`, `trace`, `impact`,
+	 * `resolve-current`) walks `incomingRelations`/`byId[].relations`/
+	 * `chgEffects`, all built from that sanitized subset across the WHOLE
+	 * project, so a discarded entry on any Artifact -- not only the one a
+	 * given traversal starts from -- could be a missing edge that traversal
+	 * should have seen; this is `graphTrustworthy`'s "no partial graph"
+	 * contract, scoped to relation-entry sanitization (Finding A,
+	 * 10-query-and-trace.md "Invalid Graph and Partial Results": "MUST NOT
+	 * return a partial graph ... that an Agent could mistake for complete
+	 * context"). `EF-REL-003` (dangling relation target) is deliberately NOT
+	 * one of the codes tracked here: it is a graph-integrity finding about a
+	 * PRESENT, fully-sanitized entry whose target does not exist, already
+	 * caught by the traversal itself reaching a missing `byId` node
+	 * (`EF-QRY-007`), not a sanitization discard.
+	 */
+	discardedRelationData: boolean
+	/**
+	 * Artifact IDs (by their own declared `id`) whose relations array
+	 * triggered `discardedRelationData` above. A `lookup`/`list`/`search`
+	 * result that would project this specific Artifact's `relations` field --
+	 * built from its raw decoded envelope, not the sanitized subset -- must
+	 * not report `complete: true` while doing so: `EF-REL-002` (shape-invalid
+	 * entry) is discarded from that raw projection too (an envelope can only
+	 * decode a relation entry that is itself a YAML mapping), so the
+	 * projected `relations` array can silently omit content the file actually
+	 * declares.
+	 */
+	artifactsWithDiscardedRelationData: ReadonlySet<string>
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +174,18 @@ const ARRAY_ENTRY_SHAPE_FIELD = /^(?:relations|resources)\[\d+\]$/
 
 function withoutRedundantArrayEntryShapeFindings(diagnostics: readonly Diagnostic[]): Diagnostic[] {
 	return diagnostics.filter(d => !(d.code === 'EF-ENV-004' && d.field !== undefined && ARRAY_ENTRY_SHAPE_FIELD.test(d.field)))
+}
+
+/**
+ * Codes `validateRelationEntries` (04-relations.md) reports precisely when a
+ * raw relation entry's data does not survive sanitization intact: see
+ * `SnapshotValidationResult.discardedRelationData` for what each one
+ * discards and why that matters to query trustworthiness (Finding A).
+ */
+const RELATION_DATA_DISCARDED_CODES = new Set<string>(['EF-REL-001', 'EF-REL-002', 'EF-REL-005', 'EF-REL-015'])
+
+function relationEntriesDiscardedData(diagnostics: readonly Diagnostic[]): boolean {
+	return diagnostics.some(d => RELATION_DATA_DISCARDED_CODES.has(d.code))
 }
 
 /** Structured-location identity, ignoring message text (mirrors `diagnostics.ts`'s own dedup key, minus `code`). */
@@ -245,6 +292,11 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	// query's own completeness gate.
 	let hasUndecodedArtifact = false
 
+	// Artifact IDs (by declared `id`) whose relations array triggered
+	// `discardedRelationData` -- see `SnapshotValidationResult`'s field docs
+	// for what is discarded and why (Finding A).
+	const artifactsWithDiscardedRelationData = new Set<string>()
+
 	for (const artifact of snapshot.artifacts) {
 		if (!artifact.frontmatter.ok) {
 			diagnostics.push({ ...artifact.frontmatter.diagnostic, path: artifact.path })
@@ -276,6 +328,8 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 
 		const relationResult = validateRelationEntries({ id: envelope.id, relations: rawRelations }, artifact.path)
 		diagnostics.push(...relationResult.diagnostics)
+		if (relationEntriesDiscardedData(relationResult.diagnostics))
+			artifactsWithDiscardedRelationData.add(envelope.id)
 
 		diagnostics.push(...validateResourceDescriptors({ id: envelope.id, resources: rawResources }, artifact.path))
 
@@ -426,14 +480,35 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	// at all) as an ordinary EF-RES-006 "missing" finding. Artifact files
 	// need no such resolution: `snapshot.artifacts[].path` already IS the
 	// walked, case-preserving path used to read them.
-	const discoveredPathsByLowercase = new Map<string, string>()
+	//
+	// On a case-sensitive filesystem, `snapshot.entryKinds` can legitimately
+	// contain BOTH `Foo.json` and `foo.json` as distinct discovered entries.
+	// A `location` that names one of them EXACTLY must resolve to itself --
+	// checked first, directly against `entryKinds`, before any case-folding --
+	// rather than being compared against whichever spelling happened to be
+	// discovered first and arbitrarily kept for that case-folded key (Finding
+	// B: that prior behavior rejected a descriptor that exactly named the
+	// OTHER, real, on-disk file as wrong-case). The case-fold fallback below
+	// is reserved for a `location` that does not exactly match any discovered
+	// path, and is itself ambiguity-aware: when more than one on-disk entry
+	// folds to the same lowercase key, there is no non-arbitrary candidate to
+	// report as "the" actual path, so it resolves to `undefined` (leaving the
+	// separate "file does not exist" finding, `EF-RES-006`, as the only
+	// diagnostic for that genuinely-not-matched spelling) instead of guessing.
+	const discoveredPathsByLowercase = new Map<string, string[]>()
 	for (const discoveredPath of snapshot.entryKinds.keys()) {
 		const key = discoveredPath.toLowerCase()
-		if (!discoveredPathsByLowercase.has(key))
-			discoveredPathsByLowercase.set(key, discoveredPath)
+		const candidates = discoveredPathsByLowercase.get(key)
+		if (candidates)
+			candidates.push(discoveredPath)
+		else
+			discoveredPathsByLowercase.set(key, [discoveredPath])
 	}
 	function resolveActualPath(location: string): string | undefined {
-		return discoveredPathsByLowercase.get(location.toLowerCase())
+		if (snapshot.entryKinds.has(location))
+			return location
+		const candidates = discoveredPathsByLowercase.get(location.toLowerCase())
+		return candidates?.length === 1 ? candidates[0] : undefined
 	}
 
 	const pathNormalizationEntries: PathNormalizationEntry[] = [
@@ -506,6 +581,8 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		currentIds,
 		chgEffects,
 		graphTrustworthy,
+		discardedRelationData: artifactsWithDiscardedRelationData.size > 0,
+		artifactsWithDiscardedRelationData,
 	}
 }
 

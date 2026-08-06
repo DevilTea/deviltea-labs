@@ -1,4 +1,5 @@
 import type { GitExecOutcome, GitExecutor } from '../../git/executor'
+import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -7,6 +8,27 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runValidateCommand } from './validate'
 
+/**
+ * Wraps a real executor, forcing a Git process that RAN and was OBSERVED
+ * (`ok: true`) but exited non-zero for `execIn` calls matching `shouldFail`;
+ * every other call passes through unchanged. Distinct from
+ * {@link withSelectiveFailure}'s `unavailable` (the process could not even be
+ * run/observed): this models an execution/read error on a call whose
+ * preceding existence check already succeeded (`GitRepository#readTree`'s and
+ * `#readBlob`'s `error` kind).
+ */
+function withNonZeroExit(base: GitExecutor, shouldFail: (args: readonly string[]) => boolean, exitCode: number): GitExecutor {
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: (root, args, options): Promise<GitExecOutcome> => {
+			if (shouldFail(args)) {
+				return Promise.resolve({ ok: true, result: { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), exitCode, signal: null } })
+			}
+			return base.execIn(root, args, options)
+		},
+	}
+}
+
 /** Wraps a real executor, forcing failure for `execIn` calls matching `shouldFail`; every other call passes through unchanged. */
 function withSelectiveFailure(base: GitExecutor, shouldFail: (args: readonly string[]) => boolean, message: string): GitExecutor {
 	return {
@@ -14,6 +36,27 @@ function withSelectiveFailure(base: GitExecutor, shouldFail: (args: readonly str
 		execIn: (root, args, options): Promise<GitExecOutcome> => {
 			if (shouldFail(args))
 				return Promise.resolve({ ok: false, failure: { kind: 'unavailable', message } })
+			return base.execIn(root, args, options)
+		},
+	}
+}
+
+/**
+ * Wraps a real executor, forcing failure only for the FIRST `execIn` call
+ * matching `shouldFail`; every later call (matching or not) passes through to
+ * the real executor. Models a transient, first-observation-only Git failure:
+ * a re-read of the exact same commit later in the same command invocation
+ * succeeds.
+ */
+function withFirstMatchingCallFailure(base: GitExecutor, shouldFail: (args: readonly string[]) => boolean, message: string): GitExecutor {
+	let alreadyFailed = false
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: (root, args, options): Promise<GitExecOutcome> => {
+			if (!alreadyFailed && shouldFail(args)) {
+				alreadyFailed = true
+				return Promise.resolve({ ok: false, failure: { kind: 'unavailable', message } })
+			}
 			return base.execIn(root, args, options)
 		},
 	}
@@ -654,6 +697,59 @@ describe('runValidateCommand', () => {
 			.toContain('stub: cat-file -p transiently unavailable')
 	})
 
+	// FINDING (`peekConfigAt`): `readTree`'s `error` kind (the commit was
+	// already proven to exist via `cat-file -t` but the follow-up `ls-tree`
+	// then exited non-zero) is a distinct execution/read failure from both
+	// `git-unavailable` (the process could not even run) and a genuine
+	// `missing` commit. Before this fix, `peekConfigAt` folded it into the
+	// same `{ kind: 'absent' }` it returns for a config that genuinely does
+	// not exist, silently letting the run proceed as though the baseline had
+	// no configuration at all instead of reporting the read failure.
+	it('transition scope reports EF-VAL-006 (not a silently absent baseline config) when ls-tree exits non-zero after the baseline commit is proven to exist', async () => {
+		await writeMinimalProject(root)
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+		const baseline = commitAll(root, 'baseline')
+		git(root, ['checkout', '-q', '-b', 'feature'])
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+		await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: modifies, target: REQ-001 }]'))
+		const proposed = commitAll(root, 'proposed')
+		git(root, ['checkout', '-q', 'main'])
+
+		const flakyExecutor = withNonZeroExit(createGitExecutor(), args => args[0] === 'ls-tree', 128)
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('ls-tree')
+	})
+
+	// Same defect, at the blob-read layer: `readBlob`'s `error` kind (the
+	// blob was already proven to exist via `cat-file -t` but the content
+	// fetch then exited non-zero).
+	it('transition scope reports EF-VAL-006 (not a silently absent baseline config) when the ef.yaml content fetch exits non-zero after the blob is proven to exist', async () => {
+		await writeMinimalProject(root)
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+		const baseline = commitAll(root, 'baseline')
+		git(root, ['checkout', '-q', '-b', 'feature'])
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+		await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: modifies, target: REQ-001 }]'))
+		const proposed = commitAll(root, 'proposed')
+		git(root, ['checkout', '-q', 'main'])
+
+		const flakyExecutor = withNonZeroExit(createGitExecutor(), args => args[0] === 'cat-file' && args[1] === '-p', 128)
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('cat-file -p')
+	})
+
 	it('transition scope reports EF-VAL-006 (not EF-VAL-002) when the operation-start integration-ref probe itself fails', async () => {
 		// `git show-ref` (used only by `GitRepository#resolveRef`) is forced to
 		// fail here, simulating the `'error'`/`'git-unavailable'` `RefResolutionResult`
@@ -702,6 +798,38 @@ describe('runValidateCommand', () => {
 			.toBe('EF-VAL-006')
 		expect(json.diagnostics[0].message)
 			.toContain('stub: show-ref transiently unavailable')
+	})
+
+	it('bootstrap scope reports EF-VAL-006 (not a validated expected_ref_oid: null) when the preflight config peek fails once but the later snapshot materialization succeeds', async () => {
+		// `peekConfigAt`'s own `readTree` call is the FIRST `ls-tree` invocation
+		// in the whole bootstrap flow; `validateBootstrap`'s own
+		// `loadSnapshotFromCommit` re-reads the same tree moments later. Forcing
+		// only that first call to fail simulates a transient/first-observation
+		// Git failure that clears up by the time the real materialization runs.
+		// Previously, `peekConfigAt` folded that failure into the same
+		// `undefined` it returns for a genuinely absent config, so
+		// `operationStartRefState` silently became `{ resolved: false }` and the
+		// run proceeded to a "successful" bootstrap validation with
+		// `expected_ref_oid: null`, even though ref absence was never actually
+		// established -- the required "no prior EF state" history probe was
+		// silently skipped instead of the run being reported incomplete.
+		git(root, ['checkout', '-q', '-b', 'bootstrap-branch'])
+		await writeMinimalProject(root)
+		const proposed = commitAll(root, 'bootstrap candidate')
+
+		const flakyExecutor = withFirstMatchingCallFailure(createGitExecutor(), args => args[0] === 'ls-tree', 'stub: ls-tree transiently unavailable (first call only)')
+		const outcome = await runValidateCommand({ scope: 'bootstrap', proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('stub: ls-tree transiently unavailable (first call only)')
+		expect(json.expected_ref_oid)
+			.toBeNull()
 	})
 
 	it('transition scope reports EF-VAL-002 when the baseline commit predates .engineering entirely (no ef.yaml in its tree)', async () => {
