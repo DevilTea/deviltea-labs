@@ -11,6 +11,7 @@ export default defineConfig({
 			// Keep the report scoped to published runtime source. tsconfig is a JSON
 			// configuration product and is covered by consumer contracts instead.
 			include: [
+				'packages/ef/src/**/*.ts',
 				'packages/eslint-config/src/**/*.ts',
 				'packages/tiny-state-machine/src/**/*.ts',
 				'packages/tiny-state-machine-vue/src/**/*.ts',
