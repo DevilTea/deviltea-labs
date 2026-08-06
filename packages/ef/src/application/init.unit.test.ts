@@ -114,6 +114,32 @@ describe('computeInitPlan', () => {
 			.toBe('not-a-worktree-root')
 	})
 
+	it('accepts a target reached through a symlinked alias that resolves to the same worktree root', async () => {
+		// Simulates the cross-platform condition this equality check must
+		// tolerate (11-filesystem-and-config.md worktree-root identity): Git's
+		// `rev-parse --show-toplevel` output and a filesystem-derived path can
+		// denote the identical worktree root while differing in string form
+		// (a symlinked alias here stands in for a Windows short-path/case
+		// difference between the two sources). `deps.findWorktreeRoot` below
+		// is real Git, so `-C aliasPath` resolves the symlink itself and
+		// reports the real `tempDir`, distinct from `targetRoot` as a string.
+		const aliasPath = path.join(os.tmpdir(), `ef-init-alias-${Date.now()}-${Math.random()
+			.toString(36)
+			.slice(2)}`)
+		await fs.symlink(tempDir, aliasPath, 'dir')
+		try {
+			const result = await computeInitPlan(
+				{ targetRoot: aliasPath, values: BASE_VALUES },
+				createGitRepository(aliasPath, createGitExecutor()),
+			)
+			expect(result.ok)
+				.toBe(true)
+		}
+		finally {
+			await fs.rm(aliasPath, { force: true })
+		}
+	})
+
 	it('propagates git-unavailable from the worktree-root check', async () => {
 		const deps: ComputeInitPlanDeps = {
 			findWorktreeRoot: async () => ({ kind: 'git-unavailable', message: 'git is not installed' }),

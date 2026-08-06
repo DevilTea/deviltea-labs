@@ -26,6 +26,7 @@ import type { Config } from './config'
 import { lstat, readFile } from 'node:fs/promises'
 import path from 'pathe'
 import { isDirectory } from '../platform/fs-facts'
+import { isSameLocation } from '../platform/path-identity'
 import { decodeConfig } from './config'
 
 export interface DiscoverProjectInput {
@@ -117,7 +118,7 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 	const worktreeResult = await deps.findWorktreeRoot(candidateRoot)
 	if (worktreeResult.kind === 'git-unavailable')
 		return worktreeResult
-	if (worktreeResult.kind === 'not-a-worktree' || worktreeResult.root !== candidateRoot)
+	if (worktreeResult.kind === 'not-a-worktree' || !isSameLocation(worktreeResult.root, candidateRoot))
 		return { kind: 'not-project-worktree-root', root: candidateRoot }
 
 	let configText: string
@@ -135,9 +136,9 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 		if (cwdWorktree.kind === 'git-unavailable')
 			return cwdWorktree
 
-		const withinOwnWorktree = cwdWorktree.kind === 'found' && cwdWorktree.root === candidateRoot
+		const withinOwnWorktree = cwdWorktree.kind === 'found' && isSameLocation(cwdWorktree.root, candidateRoot)
 		const withinDeclaredLinkedRepo = cwdWorktree.kind === 'found' && config !== null
-			&& config.linkedRepositories.some(descriptor => path.join(candidateRoot, descriptor.path) === cwdWorktree.root)
+			&& config.linkedRepositories.some(descriptor => isSameLocation(path.join(candidateRoot, descriptor.path), cwdWorktree.root))
 
 		if (!withinOwnWorktree && !withinDeclaredLinkedRepo)
 			return { kind: 'unassociated', root: candidateRoot }
