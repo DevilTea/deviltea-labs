@@ -304,6 +304,52 @@ describe('loadSnapshotFromCommit', () => {
 			.toEqual({ ok: false, reason: 'git-unavailable', message: 'git process crashed' })
 	})
 
+	// FINDING (repository.ts readTree -> snapshot.ts loadSnapshotFromCommit):
+	// `readTree`'s `error` kind means the commit was already proven to exist
+	// but its tree could not be read -- distinct from `missing` (a genuine
+	// absence). This must surface as an incomplete `read-error`, not be
+	// accessed as though `treeResult` were `resolved`.
+	it('reports read-error (not commit-not-found) when the commit tree exists but cannot be read', async () => {
+		const repo = fakeGitRepository({
+			readTree: async () => ({ kind: 'error', message: 'ls-tree failed after cat-file -t proved existence' }),
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('read-error')
+		expect(result.ok === false && result.message)
+			.toContain('ls-tree failed after cat-file -t proved existence')
+	})
+
+	// FINDING (repository.ts readBlob -> snapshot.ts readBlobOrThrow): before
+	// this fix, `readBlobOrThrow` folded ANY non-`resolved` `readBlob` kind
+	// (including the new `error` kind) into `undefined`, silently treating a
+	// blob proven to exist as a tree entry -- but which then failed to read --
+	// the same as a genuinely absent control file. A control file that fails
+	// to read this way must fail the whole load as `read-error`, not silently
+	// report `configBytes: undefined` as though '.engineering/ef.yaml' were
+	// simply never committed.
+	it('reports read-error (not a silently absent config) when a required blob exists but its content read fails', async () => {
+		const repo = fakeGitRepository({
+			readTree: async () => ({
+				kind: 'resolved',
+				entries: [
+					{ path: '.engineering', mode: '040000', oid: 'tree-oid', type: 'tree' },
+					{ path: '.engineering/ef.yaml', mode: '100644', oid: 'blob-oid', type: 'blob' },
+				],
+			}),
+			readBlob: async () => ({ kind: 'error', message: 'cat-file -p failed after cat-file -t proved it is a blob' }),
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('read-error')
+		expect(result.ok === false && result.message)
+			.toContain('cat-file -p failed after cat-file -t proved it is a blob')
+	})
+
 	it('produces the same artifacts, config, and layout diagnostics as the equivalent working tree', async () => {
 		await writeMinimalProject(tempDir)
 		const resourceDir = path.join(tempDir, '.engineering', 'resources', 'PROJECT')

@@ -171,6 +171,18 @@ export async function validateBootstrap(input: ValidateBootstrapInput): Promise<
 			makeDiagnostic('EF-VAL-006', `Git is unavailable while checking proposed parentage: ${firstParent.message}`),
 		], policy, { proposedOid: resolvedProposedOid, integrationRef, expectedRefOid })
 	}
+	// `getFirstParent` ran and observed `resolvedProposedOid` exists (its
+	// `cat-file -t` succeeded), but the follow-up body read failed
+	// unexpectedly: parentage could not be determined at all, which is
+	// neither a proven match nor a proven mismatch. Handled once here, ahead
+	// of the ref-state branches below, so this can never silently fall
+	// through either branch's exhaustive `missing`/`not-a-commit`/`resolved`/
+	// `root-commit` handling and be mistaken for a root commit.
+	if (firstParent.kind === 'error') {
+		return incompleteResult([
+			makeDiagnostic('EF-VAL-011', `Proposed bootstrap commit '${resolvedProposedOid}' parentage could not be determined: ${firstParent.message}`),
+		], policy, { proposedOid: resolvedProposedOid, integrationRef, expectedRefOid })
+	}
 
 	if (operationStartRefState.resolved === true) {
 		if (firstParent.kind !== 'resolved' || firstParent.parentOid !== operationStartRefState.oid) {

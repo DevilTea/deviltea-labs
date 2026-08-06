@@ -165,6 +165,31 @@ function graphTrustworthyFailure(context: QueryContext, kind: QueryKind): QueryR
 	return failure(kind, 'EF-QRY-013', 'The Artifact graph could not be completely and unambiguously loaded, so the query result would not be trustworthy.')
 }
 
+/**
+ * Additional `EF-QRY-013` prerequisite gate for the four graph-traversal
+ * query kinds (`relations`, `trace`, `impact`, `resolve-current`), applied
+ * right alongside `graphTrustworthyFailure` above (Finding A,
+ * `snapshot-validation.ts`'s `discardedRelationData` field docs).
+ * `context.validation.discardedRelationData` is `true` when ANY Artifact's
+ * raw relations array had at least one entry excluded while
+ * `validateRelationEntries` sanitized it into the subset these four kinds
+ * traverse (`incomingRelations`/`byId[].relations`/`chgEffects`). Because
+ * that sanitized subset is built project-wide, a discarded entry on any
+ * Artifact -- not only the one a given traversal starts from -- could be a
+ * missing edge the traversal should have seen, so this gates every one of
+ * these kinds regardless of which Artifact they touch, mirroring
+ * `graphTrustworthyFailure`'s project-wide reach but scoped to relation-entry
+ * sanitization specifically. `lookup`/`list`/`search` are gated instead by
+ * the narrower, per-Artifact `artifactsWithDiscardedRelationData` check at
+ * their own call sites below, since those kinds project an Artifact's raw
+ * (unsanitized) relations rather than traversing the sanitized graph.
+ */
+function relationDataTrustworthyFailure(context: QueryContext, kind: QueryKind): QueryResult | undefined {
+	if (!context.validation.discardedRelationData)
+		return undefined
+	return failure(kind, 'EF-QRY-013', 'An Artifact\'s declared relations could not be completely sanitized elsewhere in the graph, so the requested relation graph would not be trustworthy.')
+}
+
 const DIRECTIONS: ReadonlySet<string> = new Set(['outgoing', 'incoming', 'both'])
 const RELATION_TYPE_SET: ReadonlySet<string> = new Set(RELATION_TYPES)
 const CORE_IMPACT_TYPES = ['derived-from', 'addresses', 'governed-by'] as const
@@ -233,6 +258,15 @@ function handleLookup(context: QueryContext, request: LookupQueryRequest): Query
 			diagnostics: [queryDiagnostic('EF-QRY-003', `Artifact '${request.id}' was not found.`)],
 		}
 	}
+
+	// Finding A: this projection is built from `record.envelope.relations` --
+	// the raw decoded relations, not the sanitized graph-index subset -- so a
+	// shape-invalid entry (`EF-REL-002`) discarded during sanitization is ALSO
+	// missing from it (an envelope can only decode a relation entry that is
+	// itself a YAML mapping). Reporting `complete: true` while projecting
+	// this specific Artifact would silently omit that content.
+	if (context.validation.artifactsWithDiscardedRelationData.has(record.id))
+		return failure('lookup', 'EF-QRY-013', `Artifact '${record.id}' declares a relations entry that could not be completely loaded, so its projected result would not be trustworthy.`)
 
 	const artifact = projection === 'full'
 		? buildArtifactFull(record.envelope, record.path, bodyTextFor(context.snapshot, record.path))
@@ -323,6 +357,14 @@ function handleList(context: QueryContext, request: ListQueryRequest): QueryResu
 	const total = matching.length
 	const paged = limit === null ? matching.slice(offset) : matching.slice(offset, offset + limit)
 
+	// Finding A: only gate when an actually-returned Artifact's projection
+	// would silently omit sanitized-away relation content (see the matching
+	// check in `handleLookup`); an affected Artifact excluded by filters or
+	// pagination does not appear in this result, so it cannot make this
+	// result's `complete: true` claim false.
+	if (paged.some(record => context.validation.artifactsWithDiscardedRelationData.has(record.id)))
+		return failure('list', 'EF-QRY-013', 'One or more returned Artifacts declare a relations entry that could not be completely loaded, so this result would not be trustworthy.')
+
 	return {
 		schema: 'ef/query-result@1',
 		kind: 'list',
@@ -357,6 +399,12 @@ function handleSearch(context: QueryContext, request: SearchQueryRequest): Query
 		return untrustworthy
 
 	const data = executeSearch(context.snapshot, context.validation, prepared, caseSensitive, offset, limit)
+
+	// Finding A: same per-artifact reasoning as `handleList` -- only gate when
+	// an actually-returned result's projected Artifact is affected.
+	if (data.results.some(entry => context.validation.artifactsWithDiscardedRelationData.has(entry.artifact.id)))
+		return failure('search', 'EF-QRY-013', 'One or more returned Artifacts declare a relations entry that could not be completely loaded, so this result would not be trustworthy.')
+
 	return { schema: 'ef/query-result@1', kind: 'search', complete: true, data, diagnostics: [] }
 }
 
@@ -381,6 +429,10 @@ function handleRelations(context: QueryContext, request: RelationsQueryRequest):
 	const untrustworthy = graphTrustworthyFailure(context, 'relations')
 	if (untrustworthy)
 		return untrustworthy
+
+	const untrustworthyRelationData = relationDataTrustworthyFailure(context, 'relations')
+	if (untrustworthyRelationData)
+		return untrustworthyRelationData
 
 	if (!context.validation.byId.has(request.id))
 		return failure('relations', 'EF-QRY-014', `Artifact '${request.id}' does not exist.`)
@@ -427,6 +479,10 @@ function handleTrace(context: QueryContext, request: TraceQueryRequest): QueryRe
 	if (untrustworthyTrace)
 		return untrustworthyTrace
 
+	const untrustworthyTraceRelationData = relationDataTrustworthyFailure(context, 'trace')
+	if (untrustworthyTraceRelationData)
+		return untrustworthyTraceRelationData
+
 	const missing = request.roots.filter(id => !context.validation.byId.has(id))
 	if (missing.length > 0) {
 		return failure('trace', 'EF-QRY-014', `Artifact ID(s) not found: ${dedupeSortIds(missing)
@@ -467,6 +523,10 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 	const untrustworthyImpact = graphTrustworthyFailure(context, 'impact')
 	if (untrustworthyImpact)
 		return untrustworthyImpact
+
+	const untrustworthyImpactRelationData = relationDataTrustworthyFailure(context, 'impact')
+	if (untrustworthyImpactRelationData)
+		return untrustworthyImpactRelationData
 
 	const missing = request.roots.filter(id => !context.validation.byId.has(id))
 	if (missing.length > 0) {
@@ -539,6 +599,10 @@ function handleResolveCurrent(context: QueryContext, request: ResolveCurrentQuer
 	if (untrustworthy)
 		return untrustworthy
 
+	const untrustworthyRelationData = relationDataTrustworthyFailure(context, 'resolve-current')
+	if (untrustworthyRelationData)
+		return untrustworthyRelationData
+
 	if (!context.validation.byId.has(request.id))
 		return failure('resolve-current', 'EF-QRY-014', `Artifact '${request.id}' does not exist.`)
 
@@ -583,8 +647,17 @@ async function handleHistory(context: QueryContext, request: HistoryQueryRequest
 		return failure('history', 'EF-QRY-010', 'Required history context is unavailable.')
 
 	const outcome = await computeHistory(context.history.git, context.history.integrationRefOid, request.id, record.type, context.validation.byId)
-	if (!outcome)
+	// `EF-QRY-010` ("Requested history context is unavailable",
+	// diagnostic-registry.md) covers the required Git history itself being
+	// inaccessible; `EF-QRY-013` ("Query cannot produce a complete
+	// trustworthy result", diagnostic-registry.md) covers a path/blob the
+	// walk touched that cannot be trusted (see `computeHistory`'s
+	// `ComputeHistoryResult` docs for the exact split).
+	if (outcome.kind === 'history-unavailable')
 		return failure('history', 'EF-QRY-010', 'Required Git integration history could not be completely materialized.')
+	if (outcome.kind === 'untrusted-data') {
+		return failure('history', 'EF-QRY-013', 'A path or historical record needed to compute this Artifact\'s history could not be completely and trustworthily read.')
+	}
 
 	return {
 		schema: 'ef/query-result@1',

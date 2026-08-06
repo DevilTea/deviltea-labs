@@ -92,19 +92,48 @@ function earlyFailure(options: ValidateCommandOptions, code: Parameters<typeof s
 	return outcomeFor(options.format, options.noColor, options.workspace, summary, [{ code, severity: severityOf(code), message, related: [] }])
 }
 
-async function peekConfigAt(git: GitRepository, commitOid: string): Promise<Config | undefined> {
+/**
+ * `peekConfigAt`'s result: a Git read failure while probing the commit's
+ * configuration is neither a proven "no config here" (`absent`) nor a loaded
+ * `found` config -- collapsing it into the same shape as a genuine absence
+ * previously let a transient or first-observation `readTree`/`readBlob`
+ * failure silently proceed as though the commit's config had never existed,
+ * skipping the ref-state probe this peek exists to feed
+ * (09-validation.md "An inaccessible ref ... makes the operation incomplete
+ * rather than eligible by assumption" applies equally to the read that
+ * establishes which ref to probe).
+ */
+type ConfigPeekOutcome
+	= | { kind: 'found', config: Config }
+		| { kind: 'absent' }
+		| { kind: 'error', message: string }
+
+async function peekConfigAt(git: GitRepository, commitOid: string): Promise<ConfigPeekOutcome> {
 	const tree = await git.readTree(commitOid)
+	// `git-unavailable` (the executor could not run/observe the command) and
+	// `error` (the commit was already proven to exist but the tree read then
+	// failed unexpectedly) are both execution/read failures, never a proof of
+	// absence -- both must surface as `error`, not be folded into `absent`
+	// alongside a genuine `missing` commit.
+	if (tree.kind === 'git-unavailable' || tree.kind === 'error')
+		return { kind: 'error', message: tree.message }
 	if (tree.kind !== 'resolved')
-		return undefined
+		return { kind: 'absent' }
 	const entry = tree.entries.find(e => e.path === '.engineering/ef.yaml' && e.type === 'blob')
 	if (!entry)
-		return undefined
+		return { kind: 'absent' }
 	const blob = await git.readBlob(entry.oid)
+	// Same reasoning as the tree read above: a blob already proven to exist
+	// as a tree entry whose content read then fails unexpectedly must not be
+	// treated the same as the file simply never existing.
+	if (blob.kind === 'git-unavailable' || blob.kind === 'error')
+		return { kind: 'error', message: blob.message }
 	if (blob.kind !== 'resolved')
-		return undefined
+		return { kind: 'absent' }
 	const text = new TextDecoder('utf-8', { fatal: false })
 		.decode(blob.bytes)
-	return decodeConfig(text, '.engineering/ef.yaml').config ?? undefined
+	const config = decodeConfig(text, '.engineering/ef.yaml').config
+	return config ? { kind: 'found', config } : { kind: 'absent' }
 }
 
 async function applyWorkspaceChecks(
@@ -197,8 +226,14 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 
 	if (options.scope === 'transition') {
 		const baselineResolved = await git.resolveCommit(options.baseline!)
-		const baselineConfig = baselineResolved.kind === 'resolved' ? await peekConfigAt(git, baselineResolved.oid) : undefined
-		const operationStartRefOid = baselineConfig ? await resolveRefOidOrNull(git, baselineConfig.repository.integrationRef) : null
+		let operationStartRefOid: OperationStartRefOid = null
+		if (baselineResolved.kind === 'resolved') {
+			const baselinePeek = await peekConfigAt(git, baselineResolved.oid)
+			if (baselinePeek.kind === 'error')
+				return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading the trusted baseline's configuration: ${baselinePeek.message}`)
+			if (baselinePeek.kind === 'found')
+				operationStartRefOid = await resolveRefOidOrNull(git, baselinePeek.config.repository.integrationRef)
+		}
 
 		const result = await validateTransition({
 			git,
@@ -212,11 +247,17 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 		let complete = result.complete
 
 		if (options.workspace && result.proposedOid) {
-			const proposedConfig = await peekConfigAt(git, result.proposedOid)
-			const linked = proposedConfig?.linkedRepositories ?? []
-			const workspaceResult = await applyWorkspaceChecks(root, deps.executor, linked)
-			diagnostics = [...diagnostics, ...workspaceResult.diagnostics]
-			complete = complete && workspaceResult.complete
+			const proposedPeek = await peekConfigAt(git, result.proposedOid)
+			if (proposedPeek.kind === 'error') {
+				diagnostics = [...diagnostics, { code: 'EF-VAL-006', severity: severityOf('EF-VAL-006'), message: `Git is unavailable while reading the proposed commit's configuration for workspace validation: ${proposedPeek.message}`, related: [] }]
+				complete = false
+			}
+			else {
+				const linked = proposedPeek.kind === 'found' ? proposedPeek.config.linkedRepositories : []
+				const workspaceResult = await applyWorkspaceChecks(root, deps.executor, linked)
+				diagnostics = [...diagnostics, ...workspaceResult.diagnostics]
+				complete = complete && workspaceResult.complete
+			}
 		}
 
 		const summary = summarizeValidation({
@@ -237,10 +278,17 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	// ---- bootstrap ------------------------------------------------------------
 
 	const proposedResolved = await git.resolveCommit(options.proposed!)
-	const proposedConfig = proposedResolved.kind === 'resolved' ? await peekConfigAt(git, proposedResolved.oid) : undefined
-	const operationStartRefState: OperationStartRefState = proposedConfig
-		? await resolveRefStateOrUnresolved(git, proposedConfig.repository.integrationRef)
-		: { resolved: false }
+	let operationStartRefState: OperationStartRefState = { resolved: false }
+	let proposedConfig: Config | undefined
+	if (proposedResolved.kind === 'resolved') {
+		const proposedPeek = await peekConfigAt(git, proposedResolved.oid)
+		if (proposedPeek.kind === 'error')
+			return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading the proposed bootstrap commit's configuration: ${proposedPeek.message}`)
+		if (proposedPeek.kind === 'found') {
+			proposedConfig = proposedPeek.config
+			operationStartRefState = await resolveRefStateOrUnresolved(git, proposedPeek.config.repository.integrationRef)
+		}
+	}
 
 	const result = await validateBootstrap({
 		git,

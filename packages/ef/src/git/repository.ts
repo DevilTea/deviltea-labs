@@ -134,6 +134,16 @@ export type FirstParentResult
 		| { kind: 'root-commit' }
 		| { kind: 'missing' }
 		| { kind: 'not-a-commit' }
+		/**
+		 * `cat-file -t` already proved `commitOid` exists and names a commit;
+		 * the follow-up `cat-file -p` then ran but exited unexpectedly. This is
+		 * an execution/read error on an object just proven to exist, never
+		 * proof the commit itself is missing -- a caller MUST treat this as
+		 * incomplete, never fold it into `missing` (09-validation.md "An
+		 * inaccessible ref ... makes the operation incomplete rather than
+		 * eligible by assumption" applies equally to a commit body read).
+		 */
+		| { kind: 'error', message: string }
 		| GitUnavailable
 
 // ---------------------------------------------------------------------------
@@ -152,6 +162,14 @@ export type GitTree = readonly GitTreeEntry[]
 export type ReadTreeResult
 	= | { kind: 'resolved', entries: GitTree }
 		| { kind: 'missing' }
+		/**
+		 * `cat-file -t` already proved `commitOid` exists; the follow-up
+		 * `ls-tree` then ran but exited unexpectedly. This is an execution/read
+		 * error on an object just proven to exist, never proof the commit
+		 * itself is missing -- a caller MUST treat this as incomplete, never
+		 * fold it into `missing`.
+		 */
+		| { kind: 'error', message: string }
 		| GitUnavailable
 
 /**
@@ -192,6 +210,14 @@ export type ReadBlobResult
 	= | { kind: 'resolved', bytes: Buffer }
 		| { kind: 'missing' }
 		| { kind: 'not-a-blob', actualType: string }
+		/**
+		 * `cat-file -t` already proved `blobOid` exists and names a blob; the
+		 * follow-up `cat-file -p` then ran but exited unexpectedly. This is an
+		 * execution/read error on an object just proven to exist, never proof
+		 * the blob itself is missing -- a caller MUST treat this as incomplete,
+		 * never fold it into `missing`.
+		 */
+		| { kind: 'error', message: string }
 		| GitUnavailable
 
 // ---------------------------------------------------------------------------
@@ -207,6 +233,14 @@ export type ReadBlobResult
 export type HistoryResult
 	= | { kind: 'complete', oids: readonly string[] }
 		| { kind: 'shallow' }
+		/**
+		 * `rev-list` could not resolve `commitish` at all, OR the walk
+		 * produced OIDs but a required follow-up plumbing call (the boundary
+		 * `cat-file` re-inspection) ran and exited unexpectedly. Either way
+		 * completeness could not be conclusively determined; a caller MUST
+		 * treat this as incomplete, never assume `complete` or assert the
+		 * specific `shallow` conclusion from a failed read.
+		 */
 		| { kind: 'unresolved' }
 		| GitUnavailable
 
@@ -219,6 +253,15 @@ export type PathHistoryResult
 		| { kind: 'not-found' }
 		/** The repository is shallow and the path was not found within the visible history: absence cannot be concluded because hidden ancestors beyond the shallow boundary were never inspected. */
 		| { kind: 'shallow' }
+		/**
+		 * `rev-list` could not resolve `startOid` at all, OR the walk
+		 * produced OIDs but a required follow-up plumbing call (an in-loop
+		 * `ls-tree`, the post-loop shallow-repository probe, or the boundary
+		 * `cat-file` re-inspection) ran and exited unexpectedly. Either way
+		 * `found`/`not-found`/`shallow` could not be conclusively
+		 * determined; a caller MUST treat this as incomplete, never fall
+		 * back to a specific found/absent/shallow conclusion.
+		 */
 		| { kind: 'unresolved' }
 		| GitUnavailable
 
@@ -431,8 +474,12 @@ class GitRepositoryImpl implements GitRepository {
 		const bodyOutcome = await this.executor.execIn(this.root, ['cat-file', '-p', commitOid])
 		if (!bodyOutcome.ok)
 			return toGitUnavailable(bodyOutcome.failure)
-		if (bodyOutcome.result.exitCode !== 0)
-			return { kind: 'missing' }
+		if (bodyOutcome.result.exitCode !== 0) {
+			// The type check above just proved `commitOid` exists and is a
+			// commit; a non-zero exit from the body fetch now is an unexpected
+			// execution/read error, not proof the object is missing.
+			return { kind: 'error', message: `git cat-file -p '${commitOid}' failed after cat-file -t proved it is a commit (exit status ${bodyOutcome.result.exitCode ?? 'null'}).` }
+		}
 		const text = bodyOutcome.result.stdout.toString('utf8')
 		const headerEnd = text.indexOf('\n\n')
 		const header = headerEnd === -1 ? text : text.slice(0, headerEnd)
@@ -445,11 +492,22 @@ class GitRepositoryImpl implements GitRepository {
 	}
 
 	async readTree(commitOid: string): Promise<ReadTreeResult> {
+		// `missing` is established ONLY by this existence probe. Once
+		// `commitOid` is proven to exist, a subsequent `ls-tree` failure is an
+		// execution/read error on an object already known to exist, never
+		// proof of absence.
+		const typeOutcome = await this.executor.execIn(this.root, ['cat-file', '-t', commitOid])
+		if (!typeOutcome.ok)
+			return toGitUnavailable(typeOutcome.failure)
+		if (typeOutcome.result.exitCode !== 0)
+			return { kind: 'missing' }
+
 		const outcome = await this.executor.execIn(this.root, ['ls-tree', '-r', '-t', '-z', '--full-tree', commitOid])
 		if (!outcome.ok)
 			return toGitUnavailable(outcome.failure)
-		if (outcome.result.exitCode !== 0)
-			return { kind: 'missing' }
+		if (outcome.result.exitCode !== 0) {
+			return { kind: 'error', message: `git ls-tree failed for '${commitOid}' after cat-file -t proved it exists (exit status ${outcome.result.exitCode ?? 'null'}).` }
+		}
 		return { kind: 'resolved', entries: parseLsTreeZ(outcome.result.stdout) }
 	}
 
@@ -467,8 +525,12 @@ class GitRepositoryImpl implements GitRepository {
 		const contentOutcome = await this.executor.execIn(this.root, ['cat-file', '-p', blobOid])
 		if (!contentOutcome.ok)
 			return toGitUnavailable(contentOutcome.failure)
-		if (contentOutcome.result.exitCode !== 0)
-			return { kind: 'missing' }
+		if (contentOutcome.result.exitCode !== 0) {
+			// The type check above just proved `blobOid` exists and is a blob;
+			// a non-zero exit from the content fetch now is an unexpected
+			// execution/read error, not proof the object is missing.
+			return { kind: 'error', message: `git cat-file -p '${blobOid}' failed after cat-file -t proved it is a blob (exit status ${contentOutcome.result.exitCode ?? 'null'}).` }
+		}
 		return { kind: 'resolved', bytes: contentOutcome.result.stdout }
 	}
 
@@ -517,9 +579,13 @@ class GitRepositoryImpl implements GitRepository {
 		if (!boundaryOutcome.ok)
 			return toGitUnavailable(boundaryOutcome.failure)
 		if (boundaryOutcome.result.exitCode !== 0) {
-			// Cannot re-inspect a commit rev-list itself just reported; treat
-			// conservatively as an unproven (shallow) boundary.
-			return { kind: 'shallow' }
+			// `oldestVisibleOid` was just produced by a successful `rev-list`
+			// walk, so it names a real, existing commit; `cat-file` failing
+			// on it now is an unexpected execution/read error, not proof of
+			// a shallow boundary. Asserting `shallow` here would convert a
+			// failed read into a specific (and here unproven) semantic
+			// conclusion; report the walk as unresolved instead.
+			return { kind: 'unresolved' }
 		}
 		const text = boundaryOutcome.result.stdout.toString('utf8')
 		const headerEnd = text.indexOf('\n\n')
@@ -572,14 +638,32 @@ class GitRepositoryImpl implements GitRepository {
 			const outcome = await this.executor.execIn(this.root, ['ls-tree', oid, '--', path])
 			if (!outcome.ok)
 				return toGitUnavailable(outcome.failure)
-			if (outcome.result.exitCode === 0 && outcome.result.stdout.length > 0)
+			if (outcome.result.exitCode !== 0) {
+				// `oid` was just produced by a successful `rev-list` walk, so
+				// it names a real, existing commit; a real `ls-tree` exits
+				// `0` with empty output when a path is simply absent from
+				// that commit's tree, so a non-zero exit here is an
+				// unexpected execution/read error, never a legitimate
+				// "path absent at this commit" signal. Silently continuing
+				// the loop would let the walk conclude `not-found` despite
+				// never having actually inspected this commit's tree.
+				return { kind: 'unresolved' }
+			}
+			if (outcome.result.stdout.length > 0)
 				return { kind: 'found', commitOid: oid }
 		}
 
 		const shallowOutcome = await this.executor.execIn(this.root, ['rev-parse', '--is-shallow-repository'])
 		if (!shallowOutcome.ok)
 			return toGitUnavailable(shallowOutcome.failure)
-		const repositoryHasAnyShallowBoundary = shallowOutcome.result.exitCode === 0 && shallowOutcome.result.stdout.toString('utf8')
+		if (shallowOutcome.result.exitCode !== 0) {
+			// A fatal, non-`git-unavailable` exit from the probe itself is an
+			// execution/read error, not proof the repository is non-shallow;
+			// folding it into "false" would let an unprobed (and possibly
+			// real) shallow boundary silently fall through to `not-found`.
+			return { kind: 'unresolved' }
+		}
+		const repositoryHasAnyShallowBoundary = shallowOutcome.result.stdout.toString('utf8')
 			.trim() === 'true'
 		if (!repositoryHasAnyShallowBoundary)
 			return { kind: 'not-found' }
@@ -595,9 +679,13 @@ class GitRepositoryImpl implements GitRepository {
 		if (!boundaryOutcome.ok)
 			return toGitUnavailable(boundaryOutcome.failure)
 		if (boundaryOutcome.result.exitCode !== 0) {
-			// Cannot re-inspect a commit rev-list itself just reported;
-			// treat conservatively as an unproven (shallow) boundary.
-			return { kind: 'shallow' }
+			// `lastVisibleOid` was just produced by a successful `rev-list`
+			// walk, so it names a real, existing commit; `cat-file` failing
+			// on it now is an unexpected execution/read error, not proof of
+			// a shallow boundary. Asserting `shallow` here would convert a
+			// failed read into a specific (and here unproven) semantic
+			// conclusion; report the walk as unresolved instead.
+			return { kind: 'unresolved' }
 		}
 		const text = boundaryOutcome.result.stdout.toString('utf8')
 		const headerEnd = text.indexOf('\n\n')

@@ -1,4 +1,4 @@
-import type { ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
+import type { ProjectSnapshot, SnapshotArtifactFile, SnapshotEntryKind } from './snapshot'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -490,6 +490,107 @@ describe('validateSnapshot', () => {
 		})
 	})
 
+	describe('discarded relation data (Finding A: 10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
+		it('is false for a minimal valid project with no relation findings', async () => {
+			await writeMinimalProject(tempDir)
+			const result = await load()
+			expect(result.discardedRelationData)
+				.toBe(false)
+			expect(result.artifactsWithDiscardedRelationData.size)
+				.toBe(0)
+		})
+
+		it('is true and tracks the artifact id for a shape-invalid relation entry (EF-REL-002)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: references\n    target: PROJECT\n  - not-a-mapping\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-002')
+			expect(result.discardedRelationData)
+				.toBe(true)
+			expect([...result.artifactsWithDiscardedRelationData])
+				.toEqual(['REQ-001'])
+		})
+
+		it('is true and tracks the artifact id for an unknown relation type (EF-REL-001)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: not-a-known-type\n    target: PROJECT\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-001')
+			expect(result.discardedRelationData)
+				.toBe(true)
+			expect([...result.artifactsWithDiscardedRelationData])
+				.toEqual(['REQ-001'])
+		})
+
+		it('is true and tracks the artifact id for a self-relation (EF-REL-005)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: references\n    target: REQ-001\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-005')
+			expect(result.discardedRelationData)
+				.toBe(true)
+			expect([...result.artifactsWithDiscardedRelationData])
+				.toEqual(['REQ-001'])
+		})
+
+		it('is true and tracks the artifact id for an invalid extension field (EF-REL-015)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: references\n    target: PROJECT\n    foo: bar\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-015')
+			expect(result.discardedRelationData)
+				.toBe(true)
+			expect([...result.artifactsWithDiscardedRelationData])
+				.toEqual(['REQ-001'])
+		})
+
+		it('tracks only the specific artifact with the discarded entry, not an unrelated artifact with clean relations', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: references\n    target: PROJECT\n  - not-a-mapping\n',
+			}))
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', requirementMd({
+				id: 'REQ-002',
+				relations: '\n  - type: references\n    target: PROJECT\n',
+			}))
+			const result = await load()
+			expect([...result.artifactsWithDiscardedRelationData])
+				.toEqual(['REQ-001'])
+		})
+
+		it('eF-REL-003 (dangling relation target) does not set discardedRelationData: a present-but-unresolvable target is a graph-integrity finding, not a sanitization discard', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: references\n    target: REQ-999\n',
+			}))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-REL-003')
+			expect(result.discardedRelationData)
+				.toBe(false)
+			expect(result.artifactsWithDiscardedRelationData.size)
+				.toBe(0)
+		})
+	})
+
 	describe('supersession graph integrity', () => {
 		it('reports EF-SUP-005 for a two-node supersession cycle', async () => {
 			await writeMinimalProject(tempDir)
@@ -627,6 +728,69 @@ describe('validateSnapshot', () => {
 				resources: '\n  - type: json-schema\n    location: .engineering/resources/REQ-001/schema.json\n    role: contract\n    media_type: application/json\n    normative: true\n    description: A schema.\n',
 			}))
 			await writeFile(tempDir, '.engineering/resources/REQ-001/schema.json', '{}\n')
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-FS-006')
+		})
+
+		// Finding B: on a case-sensitive filesystem, `snapshot.entryKinds` can
+		// legitimately contain both `Foo.json` and `foo.json` as distinct
+		// discovered entries. A descriptor that exactly names one of them must
+		// resolve against that exact entry first, rather than against whichever
+		// spelling a case-folded lookup happened to keep.
+
+		it('prefers an exact location match over an arbitrarily discovered case-fold candidate (portable: fabricated entryKinds, independent of host filesystem case sensitivity)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				resources: '\n  - type: json-schema\n    location: .engineering/resources/REQ-001/foo.json\n    role: contract\n    media_type: application/json\n    normative: true\n    description: The lower-case spelling, named exactly.\n',
+			}))
+			await writeFile(tempDir, '.engineering/resources/REQ-001/foo.json', '{}\n')
+
+			const loaded = await loadSnapshotFromWorkingTree(tempDir)
+			if (!loaded.ok)
+				throw new Error(`failed to load snapshot: ${loaded.message}`)
+
+			// Simulate a walk that discovered an unrelated 'Foo.json' entry
+			// BEFORE the real, exactly-matching 'foo.json' entry -- Map
+			// insertion order is what a naive "keep only the first-seen
+			// case-folded spelling" implementation depends on, so inserting the
+			// wrong-case entry first reproduces the exact ordering the prior
+			// (buggy) implementation silently relied on.
+			const entryKinds = new Map<string, SnapshotEntryKind>([
+				['.engineering/resources/REQ-001/Foo.json', 'file'],
+				...loaded.snapshot.entryKinds,
+			])
+			const snapshot: ProjectSnapshot = { ...loaded.snapshot, entryKinds }
+
+			const result = validateSnapshot(snapshot)
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-FS-006')
+		})
+
+		it('does not report EF-FS-006 for either of two case-distinct files when each descriptor exactly names its own file (case-sensitive filesystem only)', async (ctx) => {
+			await writeMinimalProject(tempDir)
+			const dir = path.join(tempDir, '.engineering/resources/REQ-001')
+			await fs.mkdir(dir, { recursive: true })
+			await fs.writeFile(path.join(dir, 'Foo.json'), '{"case":"upper"}\n')
+			await fs.writeFile(path.join(dir, 'foo.json'), '{"case":"lower"}\n')
+
+			// This regression is only meaningful on a filesystem that keeps
+			// 'Foo.json' and 'foo.json' as two distinct directory entries; skip
+			// on a case-insensitive (but case-preserving) filesystem -- e.g. the
+			// macOS default -- where the second write silently overwrote the
+			// first and this fixture cannot be created faithfully.
+			const entries = await fs.readdir(dir)
+			const bothDistinctEntriesExist = entries.filter(name => name.toLowerCase() === 'foo.json').length === 2
+			if (!bothDistinctEntriesExist) {
+				ctx.skip()
+				return
+			}
+
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				resources: '\n  - type: json-schema\n    location: .engineering/resources/REQ-001/Foo.json\n    role: contract\n    media_type: application/json\n    normative: true\n    description: The upper-case spelling, named exactly.\n  - type: json-schema\n    location: .engineering/resources/REQ-001/foo.json\n    role: reference\n    media_type: application/json\n    normative: false\n    description: The lower-case spelling, named exactly.\n',
+			}))
 			const result = await load()
 			expect(codesOf(result.diagnostics))
 				.not.toContain('EF-FS-006')

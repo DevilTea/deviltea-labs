@@ -45,21 +45,69 @@ export interface HistoryOutcome {
 	commits: HistoryCommitData[]
 }
 
-/** `undefined` means the required first-parent history could not be completely materialized (`EF-QRY-010`: shallow, missing, or otherwise inaccessible). */
+/**
+ * `computeHistory`'s result: `complete` carries the materialized outcome;
+ * the two failure kinds distinguish "the required Git history itself is
+ * unavailable" from "the history walk touched a path or blob that cannot be
+ * trusted" -- previously folded into the same `undefined` and reported as a
+ * single `EF-QRY-010` by every caller. `./query.ts`'s `handleHistory` maps
+ * these onto the two distinct registered diagnostics the review ruling for
+ * this defect class specifies:
+ *
+ * - `history-unavailable`: the required first-parent history itself could
+ *   not be completely materialized (shallow, unresolved, or otherwise
+ *   inaccessible Git history), or a historical commit's tree could not be
+ *   read mid-walk. This maps to `EF-QRY-010` ("Requested history context is
+ *   unavailable", diagnostic-registry.md).
+ * - `untrusted-data`: the target's current record sits at a path that
+ *   violates its canonical placement (`EF-ID-005`/`EF-ID-014`; see the
+ *   authoritative-path check below), or a historical blob this walk needed
+ *   exists but cannot be completely read and decoded (unreadable blob,
+ *   malformed frontmatter, or an envelope that fails to decode). This maps
+ *   to `EF-QRY-013` ("Query cannot produce a complete trustworthy result",
+ *   diagnostic-registry.md).
+ */
+export type ComputeHistoryResult
+	= | ({ kind: 'complete' } & HistoryOutcome)
+		| { kind: 'history-unavailable' }
+		| { kind: 'untrusted-data' }
+
 export async function computeHistory(
 	git: GitRepository,
 	integrationRefOid: string,
 	targetId: string,
 	targetType: ArtifactType,
 	byId: ReadonlyMap<string, SnapshotArtifactRecord>,
-): Promise<HistoryOutcome | undefined> {
+): Promise<ComputeHistoryResult> {
 	const historyResult = await git.listFirstParentHistory(integrationRefOid)
 	if (historyResult.kind !== 'complete')
-		return undefined
+		return { kind: 'history-unavailable' }
 
 	const oidsOldestFirst = [...historyResult.oids].reverse()
 	const canonicalPath = canonicalArtifactPath(targetType, targetId)
 	const isProject = targetType === 'project'
+
+	// History tracks an Artifact aggregate by scanning the *canonical* path
+	// derived from (type, id) at each historical commit (see the module
+	// docstring: a small, explicitly known candidate path set, not a tree
+	// diff). `EF-ID-005` (filename does not match ID) and `EF-ID-014` (file
+	// outside its canonical directory) deliberately do NOT gate
+	// `graphTrustworthy` (snapshot-validation.ts) -- the declared ID is still
+	// unique and correctly decoded, so lookup/relations/etc. over `byId`
+	// remain trustworthy even though the file/layout convention is violated.
+	// History is different: if the *current* record's actual authoritative
+	// path does not match the canonical path this walk is about to scan, the
+	// premise the whole aggregate-diffing walk relies on is already broken --
+	// the file this ID currently resolves to is not at the path history
+	// assumes it occupies, so scanning `canonicalPath` anyway could return an
+	// empty or silently partial history for an aggregate whose blob actually
+	// exists elsewhere. Treat this as a history-specific blocker instead
+	// (`untrusted-data`, not `history-unavailable`: the Git history itself is
+	// perfectly readable, only this target's own current placement is not
+	// trustworthy).
+	const currentRecord = byId.get(targetId)
+	if (currentRecord && currentRecord.path !== canonicalPath)
+		return { kind: 'untrusted-data' }
 
 	const treeCache = new Map<string, Map<string, GitTreeEntry> | undefined>()
 	async function treeMapAt(oid: string): Promise<Map<string, GitTreeEntry> | undefined> {
@@ -71,20 +119,38 @@ export async function computeHistory(
 		return map
 	}
 
-	async function envelopeAt(treeMap: Map<string, GitTreeEntry>, path: string): Promise<Envelope | undefined> {
+	// Distinguishes genuine tree absence (no entry, or a non-blob entry: the
+	// path legitimately does not exist as a file at this historical commit --
+	// e.g. the Artifact had not been created yet) from an entry that DOES
+	// exist as a blob at this commit but could not be completely read and
+	// decoded (unreadable blob, malformed frontmatter, or an envelope that
+	// fails to decode). The former is a normal, expected input to the walk;
+	// the latter means a historical blob this walk needed exists but its
+	// content cannot be trusted, which must fail the whole query rather than
+	// being silently treated the same as absence (the target could appear to
+	// disappear, or a malformed/unreadable CHG could simply be skipped from
+	// effects, while the command still reports `complete: true`).
+	type EnvelopeLookup
+		= | { kind: 'absent' }
+			| { kind: 'error' }
+			| { kind: 'resolved', envelope: Envelope }
+
+	async function envelopeAt(treeMap: Map<string, GitTreeEntry>, path: string): Promise<EnvelopeLookup> {
 		const entry = treeMap.get(path)
 		if (!entry || entry.type !== 'blob')
-			return undefined
+			return { kind: 'absent' }
 		const blobResult = await git.readBlob(entry.oid)
 		if (blobResult.kind !== 'resolved')
-			return undefined
+			return { kind: 'error' }
 		const text = utf8Decoder.decode(blobResult.bytes)
 		const split = splitFrontmatter(text)
 		if (!split.ok)
-			return undefined
+			return { kind: 'error' }
 		const document = parseFrontmatterDocument(split.frontmatterText, path, { startLine: 2 })
 		const decoded = decodeEnvelope({ mapping: document.mapping, locate: document.locate }, path)
-		return decoded.envelope ?? undefined
+		if (!decoded.envelope)
+			return { kind: 'error' }
+		return { kind: 'resolved', envelope: decoded.envelope }
 	}
 
 	function ownedPathsOf(treeMap: Map<string, GitTreeEntry> | undefined, envelope: Envelope | undefined): Set<string> {
@@ -115,9 +181,12 @@ export async function computeHistory(
 	for (const oid of oidsOldestFirst) {
 		const treeMap = await treeMapAt(oid)
 		if (!treeMap)
-			return undefined
+			return { kind: 'history-unavailable' }
 
-		const currentEnvelope = await envelopeAt(treeMap, canonicalPath)
+		const currentEnvelopeLookup = await envelopeAt(treeMap, canonicalPath)
+		if (currentEnvelopeLookup.kind === 'error')
+			return { kind: 'untrusted-data' }
+		const currentEnvelope = currentEnvelopeLookup.kind === 'resolved' ? currentEnvelopeLookup.envelope : undefined
 
 		// ---- Aggregate diffing: did this commit change the target's owned paths? ----
 		const prevOwned = ownedPathsOf(previousTreeMap, previousEnvelope)
@@ -138,8 +207,13 @@ export async function computeHistory(
 			if (entry.type !== 'blob' || !path.startsWith('.engineering/chg/') || !path.endsWith('.md'))
 				continue
 
-			const chgEnvelope = await envelopeAt(treeMap, path)
-			if (!chgEnvelope || chgEnvelope.type !== 'change')
+			const chgLookup = await envelopeAt(treeMap, path)
+			if (chgLookup.kind === 'error')
+				return { kind: 'untrusted-data' }
+			if (chgLookup.kind === 'absent')
+				continue
+			const chgEnvelope = chgLookup.envelope
+			if (chgEnvelope.type !== 'change')
 				continue
 			currentChgStatus.set(chgEnvelope.id, chgEnvelope.status)
 
@@ -173,5 +247,5 @@ export async function computeHistory(
 		previousChgStatus = currentChgStatus
 	}
 
-	return { effects, commits }
+	return { kind: 'complete', effects, commits }
 }
