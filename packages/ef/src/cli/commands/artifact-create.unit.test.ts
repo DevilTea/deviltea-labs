@@ -345,6 +345,34 @@ describe('runArtifactCreateCommand', () => {
 			.toBe('raced content')
 	})
 
+	// ---- Symlinked managed-directory chain (EF-FS-004 domain rejection) -------
+
+	it('exits 1 (EF-FS-004) and writes nothing outside the project when the canonical type directory is a symlink', async () => {
+		const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-create-outside-')))
+		try {
+			await fs.mkdir(path.join(root, '.engineering'), { recursive: true })
+			await fs.symlink(outsideDir, path.join(root, '.engineering/req'))
+
+			const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+			expect(outcome.exitCode)
+				.toBe(1)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(true)
+			expect(json.applied)
+				.toBe(false)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-FS-004')
+
+			// Nothing was written into the symlink's external target.
+			expect(await fs.readdir(outsideDir))
+				.toEqual([])
+		}
+		finally {
+			await fs.rm(outsideDir, { recursive: true, force: true })
+		}
+	})
+
 	it('exits 2 (incomplete, not raced) when the temporary file cannot be written (unwritable canonical directory)', async () => {
 		// The canonical type directory exists (so `ensureDirectory` and the
 		// initial target-existence check both succeed cleanly) but is

@@ -22,6 +22,7 @@
 
 import type { Diagnostic } from '../domain/diagnostics'
 import type { ArtifactType, Envelope } from '../domain/model'
+import type { SymlinkFact } from '../repository/symlinks'
 import type { ProjectSnapshot } from './snapshot'
 import { mkdir as fsMkdir, unlink as fsUnlink } from 'node:fs/promises'
 import path from 'pathe'
@@ -35,6 +36,7 @@ import { extractSections, parseBody } from '../parsing/markdown'
 import { isDirectory, isRegularFile, isSymlink, readFileBytes } from '../platform/fs-facts'
 import { publishViaHardLink, writeTempFileComplete } from '../platform/hard-link-publish'
 import { generateNonce } from '../platform/nonce'
+import { checkManagedSymlinks } from '../repository/symlinks'
 
 // ---------------------------------------------------------------------------
 // Type tokens and required skeleton headings (13-cli-contract.md, 08-artifact-schemas.md)
@@ -96,6 +98,7 @@ export type ComputeCreatePlanFailureReason
 		| 'missing-value'
 		| 'target-exists'
 		| 'invalid-plan'
+		| 'managed-directory-symlinked'
 
 export type ComputeCreatePlanResult
 	= | { ok: true, plan: ArtifactCreatePlan }
@@ -125,6 +128,21 @@ function buildDraftArtifactText(envelope: Envelope, headings: readonly string[])
 		.join('\n')
 
 	return frontmatter + body
+}
+
+/**
+ * `EF-FS-004` findings (11-filesystem-and-config.md symlink policy: "Symlinks
+ * are forbidden for `.engineering` and its canonical directories") for the
+ * two managed directories a new draft's canonical path descends through --
+ * `.engineering` itself and the type's canonical directory. Reuses
+ * `repository/symlinks.ts`'s own `checkManagedSymlinks` rather than
+ * reimplementing the forbidden-symlink diagnostic; only the already-loaded
+ * `snapshot.entryKinds` is consulted, keeping `computeCreatePlan` pure.
+ */
+function managedDirectoryChainDiagnostics(snapshot: ProjectSnapshot, artifactType: Exclude<ArtifactType, 'project'>): Diagnostic[] {
+	const chainPaths = ['.engineering', CANONICAL_DIR_BY_TYPE[artifactType]]
+	const facts: SymlinkFact[] = chainPaths.map(p => ({ path: p, isSymlink: snapshot.entryKinds.get(p) === 'symlink' }))
+	return checkManagedSymlinks(facts)
 }
 
 /** Every Artifact ID visible in `snapshot` whose envelope decoded successfully (02-identity.md "every ... provisional Artifact visible in the working graph"). */
@@ -196,6 +214,16 @@ export function computeCreatePlan(input: ComputeCreatePlanInput): ComputeCreateP
 	const prefix = ID_PREFIX_BY_TYPE[artifactType]
 	const id = domainNextId(prefix, collectVisibleIds(snapshot))
 	const filePath = `${CANONICAL_DIR_BY_TYPE[artifactType]}/${id}.md`
+
+	const chainDiagnostics = managedDirectoryChainDiagnostics(snapshot, artifactType)
+	if (chainDiagnostics.length > 0) {
+		return {
+			ok: false,
+			reason: 'managed-directory-symlinked',
+			message: `The managed directory chain for '${filePath}' contains a forbidden symlink.`,
+			diagnostics: chainDiagnostics,
+		}
+	}
 
 	if (snapshot.entryKinds.has(filePath))
 		return { ok: false, reason: 'target-exists', message: `'${filePath}' already exists.` }
@@ -279,6 +307,7 @@ export type ApplyCreatePlanResult
 		| { applied: false, outcome: 'raced', message: string }
 		| { applied: false, outcome: 'unsupported', message: string }
 		| { applied: false, outcome: 'incomplete', message: string }
+		| { applied: false, outcome: 'rejected', message: string }
 
 function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 	if (a.length !== b.length)
@@ -292,6 +321,27 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 async function targetExists(deps: ApplyCreatePlanDeps, targetPath: string): Promise<boolean> {
 	return (await deps.isRegularFile(targetPath)) || (await deps.isDirectory(targetPath)) || (await deps.isSymlink(targetPath))
+}
+
+/**
+ * Live, uncached `lstat` (via `deps.isSymlink`) of `.engineering` and the
+ * type's canonical directory -- the same two-component managed chain
+ * `managedDirectoryChainDiagnostics` checks from the snapshot at plan time,
+ * re-verified against the real filesystem immediately before the temporary
+ * write and again immediately before hard-link publication
+ * (13-cli-contract.md "verify again that allocation and the canonical target
+ * remain valid"). A snapshot taken at plan time cannot detect a chain
+ * component replaced with a symlink afterward; only a fresh `lstat` at each
+ * checkpoint can.
+ */
+async function managedDirectoryChainSymlinked(deps: ApplyCreatePlanDeps, projectRoot: string, targetPath: string): Promise<boolean> {
+	const engineeringPath = path.join(projectRoot, '.engineering')
+	const typeDirPath = path.dirname(targetPath)
+	if (await deps.isSymlink(engineeringPath))
+		return true
+	if (typeDirPath !== engineeringPath && await deps.isSymlink(typeDirPath))
+		return true
+	return false
 }
 
 async function safeUnlink(deps: ApplyCreatePlanDeps, tempPath: string): Promise<void> {
@@ -315,12 +365,26 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	if (await targetExists(deps, targetPath))
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
 
+	// Re-verify before ever touching the filesystem below `.engineering`:
+	// `ensureDirectory` (a recursive `mkdir`) follows symlinks, so checking
+	// only after it ran would be too late whenever `.engineering` itself is a
+	// symlink and the type directory does not yet exist beneath its target --
+	// `mkdir -p` would silently create it outside the project first.
+	if (await managedDirectoryChainSymlinked(deps, projectRoot, targetPath))
+		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink.` }
+
 	try {
 		await deps.ensureDirectory(path.dirname(targetPath))
 	}
 	catch (error) {
 		return { applied: false, outcome: 'incomplete', message: `Failed to ensure the canonical directory for '${plan.path}': ${(error as Error).message}` }
 	}
+
+	// Re-verify again immediately before the temporary write: a symlink
+	// substituted into the chain during/after `ensureDirectory` itself must
+	// still be caught before any file content is written through it.
+	if (await managedDirectoryChainSymlinked(deps, projectRoot, targetPath))
+		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink.` }
 
 	const tempPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.tmp-${deps.generateNonce()}`)
 
@@ -344,6 +408,14 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	if (await targetExists(deps, targetPath)) {
 		await safeUnlink(deps, tempPath)
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
+	}
+
+	// Re-verify again immediately before hard-link publication: a symlink
+	// substituted into the chain during the temporary write itself must still
+	// be caught before the canonical target is created through it.
+	if (await managedDirectoryChainSymlinked(deps, projectRoot, targetPath)) {
+		await safeUnlink(deps, tempPath)
+		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink.` }
 	}
 
 	const publishResult = await deps.publishViaHardLink(tempPath, targetPath)

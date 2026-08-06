@@ -212,7 +212,7 @@ describe('runCli', () => {
 
 	it('writes exact raw bytes for a successful resource read, with no format option involved', async () => {
 		await setupProject()
-		const location = '.engineering/resources/req/REQ-001/example.json'
+		const location = '.engineering/resources/REQ-001/example.json'
 		await writeFile(root, '.engineering/req/REQ-001.md', `---
 schema: ef/requirement@1
 type: requirement
