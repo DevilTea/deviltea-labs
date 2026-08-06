@@ -19,3 +19,5 @@ README files are the canonical documentation and are rendered here directly.
   type-safe state-machine core.
 - [`@deviltea/tiny-state-machine-vue`](./tiny-state-machine-vue) — Vue adapter
   for tiny-state-machine.
+- [`@deviltea/ef`](./ef) — file-based, Git-native engineering knowledge system
+  and CLI.
