@@ -24,17 +24,26 @@
  * cheaper per-commit existence/oid probe instead.
  */
 
+import type { Diagnostic } from '../domain/diagnostics'
 import type { ArtifactType, Envelope, Status } from '../domain/model'
 import type { GitRepository, GitTreeEntry } from '../git/repository'
 import type { HistoryCommitData, HistoryEffectData } from './query-types'
 import type { SnapshotArtifactRecord } from './snapshot-validation'
 import { decodeEnvelope } from '../domain/envelope'
+import { validateStatus } from '../domain/lifecycle'
 import { compareBytewise } from '../domain/model'
+import { validateRelationEntries } from '../domain/relations'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
 import { buildArtifactSummary, canonicalArtifactPath } from './query-projection'
+import { rawArrayField } from './snapshot-raw-fields'
 
-const PROJECT_CONTROL_PATHS = ['.engineering/ef.yaml', '.engineering/.gitignore'] as const
+const EF_YAML_PATH = '.engineering/ef.yaml'
+const PROJECT_CONTROL_PATHS = [EF_YAML_PATH, '.engineering/.gitignore'] as const
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false })
+
+function hasErrorDiagnostic(diagnostics: readonly Diagnostic[]): boolean {
+	return diagnostics.some(d => d.severity === 'error')
+}
 
 function isLocalResourceLocation(location: string): boolean {
 	return !location.startsWith('http://') && !location.startsWith('https://')
@@ -130,10 +139,22 @@ export async function computeHistory(
 	// being silently treated the same as absence (the target could appear to
 	// disappear, or a malformed/unreadable CHG could simply be skipped from
 	// effects, while the command still reports `complete: true`).
+	//
+	// A successfully-decoded `envelope` (non-null) does NOT by itself mean the
+	// data is trustworthy: `parseFrontmatterDocument`/`decodeEnvelope` still
+	// populate `document`/`decoded` with error-severity diagnostics for things
+	// like duplicate frontmatter keys (`EF-ENV-005`), an unsupported or
+	// mismatched schema (`EF-ENV-008`/`EF-ENV-009`), or a duplicate tag
+	// (`EF-ENV-012`) while still returning a usable-looking envelope (e.g. by
+	// keeping the last of two duplicate keys). `lifecycle.ts`'s `validateStatus`
+	// closes a further gap neither parser checks: an unknown or type-inapplicable
+	// `status` value (`EF-LIFE-001`/`EF-LIFE-002`) decodes as a plain string with
+	// no diagnostic of its own. Any error-severity finding from either source
+	// makes this blob's content untrusted, exactly like an undecodable envelope.
 	type EnvelopeLookup
 		= | { kind: 'absent' }
 			| { kind: 'error' }
-			| { kind: 'resolved', envelope: Envelope }
+			| { kind: 'resolved', envelope: Envelope, mapping: ReturnType<typeof parseFrontmatterDocument>['mapping'] }
 
 	async function envelopeAt(treeMap: Map<string, GitTreeEntry>, path: string): Promise<EnvelopeLookup> {
 		const entry = treeMap.get(path)
@@ -150,7 +171,12 @@ export async function computeHistory(
 		const decoded = decodeEnvelope({ mapping: document.mapping, locate: document.locate }, path)
 		if (!decoded.envelope)
 			return { kind: 'error' }
-		return { kind: 'resolved', envelope: decoded.envelope }
+		if (hasErrorDiagnostic(document.diagnostics) || hasErrorDiagnostic(decoded.diagnostics))
+			return { kind: 'error' }
+		const statusDiagnostics = validateStatus({ type: decoded.envelope.type, status: decoded.envelope.status, id: decoded.envelope.id }, path)
+		if (hasErrorDiagnostic(statusDiagnostics))
+			return { kind: 'error' }
+		return { kind: 'resolved', envelope: decoded.envelope, mapping: document.mapping }
 	}
 
 	function ownedPathsOf(treeMap: Map<string, GitTreeEntry> | undefined, envelope: Envelope | undefined): Set<string> {
@@ -178,15 +204,48 @@ export async function computeHistory(
 	const commits: HistoryCommitData[] = []
 	const effects: HistoryEffectData[] = []
 
+	// The bootstrap commit is the first authoritative EF state
+	// (11-filesystem-and-config.md: "Its first-parent ancestors MAY be
+	// ordinary repository history without EF state. From bootstrap onward, the
+	// branch's first-parent EF-bearing commit sequence is the sequence of
+	// authoritative EF states."). Until the walk reaches the first commit
+	// whose tree contains `.engineering/ef.yaml`, every earlier commit is
+	// skipped entirely -- never decoded at `canonicalPath` or scanned for
+	// `.engineering/chg/*.md` -- so ordinary pre-EF repository content that
+	// happens to sit at an EF-shaped path (a stale Artifact/CHG-looking file
+	// predating adoption) can neither fabricate a commit/effect entry nor
+	// fail an otherwise-valid query by looking like malformed EF data.
+	// `previousTreeMap`/`previousEnvelope`/`previousChgStatus` are left at
+	// their initial (empty) values through every skipped commit, so the first
+	// commit actually processed -- the bootstrap commit itself -- is diffed
+	// exactly as if it were `oidsOldestFirst[0]`.
+	let reachedBootstrap = false
+
 	for (const oid of oidsOldestFirst) {
 		const treeMap = await treeMapAt(oid)
 		if (!treeMap)
 			return { kind: 'history-unavailable' }
 
+		if (!reachedBootstrap) {
+			const efYamlEntry = treeMap.get(EF_YAML_PATH)
+			if (!efYamlEntry || efYamlEntry.type !== 'blob')
+				continue
+			reachedBootstrap = true
+		}
+
 		const currentEnvelopeLookup = await envelopeAt(treeMap, canonicalPath)
 		if (currentEnvelopeLookup.kind === 'error')
 			return { kind: 'untrusted-data' }
 		const currentEnvelope = currentEnvelopeLookup.kind === 'resolved' ? currentEnvelopeLookup.envelope : undefined
+
+		// The canonical path is scanned under the premise that whatever blob
+		// sits there IS this target's own envelope. If it decodes to a
+		// different declared `id` or `type`, that premise is broken -- some
+		// other Artifact's (or malformed) content occupies the path this walk
+		// assumes belongs to `targetId` -- and continuing would silently
+		// attribute an unrelated envelope's history to this target.
+		if (currentEnvelope && (currentEnvelope.id !== targetId || currentEnvelope.type !== targetType))
+			return { kind: 'untrusted-data' }
 
 		// ---- Aggregate diffing: did this commit change the target's owned paths? ----
 		const prevOwned = ownedPathsOf(previousTreeMap, previousEnvelope)
@@ -221,16 +280,33 @@ export async function computeHistory(
 			if (chgEnvelope.status !== 'completed' || wasCompleted)
 				continue
 
-			for (const relation of chgEnvelope.relations) {
+			// `chgEnvelope.relations` is `decodeEnvelope`'s raw-shape decoding of
+			// each entry (missing `type`/`target` default to `''`, unknown
+			// vocabulary passes through as-is) -- it does not apply
+			// `domain/relations.ts`'s own shape/vocabulary/self-relation checks.
+			// Re-derive the CHG's true raw `relations` array from the parsed YAML
+			// mapping (`snapshot-raw-fields.ts`, exactly as `snapshot-validation.ts`
+			// does for its own `chgEffects`) and run it through
+			// `validateRelationEntries` so a relation entry with an unrecognized
+			// type, invalid shape, or a self-relation can never be mistaken for a
+			// genuine `introduces`/`modifies`/`retires` effect.
+			const rawRelations = chgLookup.mapping ? rawArrayField(chgLookup.mapping, 'relations') : []
+			const relationValidation = validateRelationEntries({ id: chgEnvelope.id, relations: rawRelations }, path)
+
+			for (const relation of relationValidation.entries) {
 				if (relation.target !== targetId)
 					continue
 				if (relation.type !== 'introduces' && relation.type !== 'modifies' && relation.type !== 'retires')
 					continue
 
-				const liveRecord = byId.get(chgEnvelope.id)
-				const chgSummary = liveRecord
-					? buildArtifactSummary(liveRecord.envelope, liveRecord.path)
-					: buildArtifactSummary(chgEnvelope, path)
+				// History is defined by the authoritative integration state
+				// observed AT THIS COMMIT, not by whatever the CHG's current
+				// (possibly since-edited, possibly uncommitted) record says now
+				// -- the effect summary is built unconditionally from the
+				// historically-decoded `chgEnvelope`/`path` at this `oid`
+				// (10-query-and-trace.md history: effects carry the CHG summary
+				// from the authoritative integration commit).
+				const chgSummary = buildArtifactSummary(chgEnvelope, path)
 
 				effects.push({
 					chg: chgSummary,

@@ -490,17 +490,17 @@ describe('validateSnapshot', () => {
 		})
 	})
 
-	describe('discarded relation data (Finding A: 10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
-		it('is false for a minimal valid project with no relation findings', async () => {
+	describe('structured data loss tracking (Finding A/C: 10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
+		it('is empty for a minimal valid project with no findings', async () => {
 			await writeMinimalProject(tempDir)
 			const result = await load()
-			expect(result.discardedRelationData)
-				.toBe(false)
-			expect(result.artifactsWithDiscardedRelationData.size)
+			expect(result.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect(result.projectionLossArtifactIds.size)
 				.toBe(0)
 		})
 
-		it('is true and tracks the artifact id for a shape-invalid relation entry (EF-REL-002)', async () => {
+		it('tracks edge loss (and projection loss) for a shape-invalid relation entry (EF-REL-002)', async () => {
 			await writeMinimalProject(tempDir)
 			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
 				id: 'REQ-001',
@@ -509,13 +509,13 @@ describe('validateSnapshot', () => {
 			const result = await load()
 			expect(codesOf(result.diagnostics))
 				.toContain('EF-REL-002')
-			expect(result.discardedRelationData)
-				.toBe(true)
-			expect([...result.artifactsWithDiscardedRelationData])
+			expect([...result.edgeLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
 				.toEqual(['REQ-001'])
 		})
 
-		it('is true and tracks the artifact id for an unknown relation type (EF-REL-001)', async () => {
+		it('tracks edge loss (and projection loss) for an unknown relation type (EF-REL-001)', async () => {
 			await writeMinimalProject(tempDir)
 			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
 				id: 'REQ-001',
@@ -524,13 +524,13 @@ describe('validateSnapshot', () => {
 			const result = await load()
 			expect(codesOf(result.diagnostics))
 				.toContain('EF-REL-001')
-			expect(result.discardedRelationData)
-				.toBe(true)
-			expect([...result.artifactsWithDiscardedRelationData])
+			expect([...result.edgeLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
 				.toEqual(['REQ-001'])
 		})
 
-		it('is true and tracks the artifact id for a self-relation (EF-REL-005)', async () => {
+		it('tracks edge loss (and projection loss) for a self-relation (EF-REL-005)', async () => {
 			await writeMinimalProject(tempDir)
 			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
 				id: 'REQ-001',
@@ -539,13 +539,13 @@ describe('validateSnapshot', () => {
 			const result = await load()
 			expect(codesOf(result.diagnostics))
 				.toContain('EF-REL-005')
-			expect(result.discardedRelationData)
-				.toBe(true)
-			expect([...result.artifactsWithDiscardedRelationData])
+			expect([...result.edgeLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
 				.toEqual(['REQ-001'])
 		})
 
-		it('is true and tracks the artifact id for an invalid extension field (EF-REL-015)', async () => {
+		it('finding C: tracks an invalid extension field (EF-REL-015) as projection loss only, NEVER as edge loss -- a graph query\'s edges are (source, type, target), unaffected by lost extension metadata', async () => {
 			await writeMinimalProject(tempDir)
 			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
 				id: 'REQ-001',
@@ -554,9 +554,11 @@ describe('validateSnapshot', () => {
 			const result = await load()
 			expect(codesOf(result.diagnostics))
 				.toContain('EF-REL-015')
-			expect(result.discardedRelationData)
-				.toBe(true)
-			expect([...result.artifactsWithDiscardedRelationData])
+			expect(result.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect([...result.relationExtensionLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
 				.toEqual(['REQ-001'])
 		})
 
@@ -571,11 +573,11 @@ describe('validateSnapshot', () => {
 				relations: '\n  - type: references\n    target: PROJECT\n',
 			}))
 			const result = await load()
-			expect([...result.artifactsWithDiscardedRelationData])
+			expect([...result.projectionLossArtifactIds])
 				.toEqual(['REQ-001'])
 		})
 
-		it('eF-REL-003 (dangling relation target) does not set discardedRelationData: a present-but-unresolvable target is a graph-integrity finding, not a sanitization discard', async () => {
+		it('eF-REL-003 (dangling relation target) does not set edge/projection loss: a present-but-unresolvable target is a graph-integrity finding, not a sanitization discard', async () => {
 			await writeMinimalProject(tempDir)
 			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
 				id: 'REQ-001',
@@ -584,9 +586,75 @@ describe('validateSnapshot', () => {
 			const result = await load()
 			expect(codesOf(result.diagnostics))
 				.toContain('EF-REL-003')
-			expect(result.discardedRelationData)
-				.toBe(false)
-			expect(result.artifactsWithDiscardedRelationData.size)
+			expect(result.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect(result.projectionLossArtifactIds.size)
+				.toBe(0)
+		})
+
+		it('finding A: tracks resource loss (and projection loss) for a scalar (non-mapping) Resource entry, entirely omitted from the decoded envelope', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				resources: '\n  - type: reference\n    location: .engineering/resources/REQ-001/notes.md\n    role: reference\n    media_type: text/markdown\n    normative: false\n    description: Notes.\n  - not-a-mapping\n',
+			}))
+			await writeFile(tempDir, '.engineering/resources/REQ-001/notes.md', '# Notes\n')
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-RES-001')
+			expect(result.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect([...result.resourceLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+
+		it('finding A: tracks envelope-wide loss (and projection loss) for a duplicate core key (EF-ENV-005), where the parser silently keeps only one of the conflicting values', async () => {
+			await writeMinimalProject(tempDir)
+			// A second 'title:' key duplicates the frontmatter's core field;
+			// `collectFields` (envelope.ts) keeps only the last value, discarding
+			// the first without any other trace of it in the decoded envelope.
+			const duplicateTitleMd = requirementMd({ id: 'REQ-001' })
+				.replace('title: Example Requirement\n', 'title: Example Requirement\ntitle: Duplicated Title\n')
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateTitleMd)
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ENV-005')
+			expect(result.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect([...result.envelopeWideLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+
+		it('tracks tag loss for a non-string tag entry, silently dropped from the decoded envelope (distinct from an invalid-pattern or duplicate tag, both of which are kept)', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '[]',
+			})
+				.replace('tags: []', 'tags:\n  - alpha\n  - 123\n'))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ENV-012')
+			expect([...result.tagLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect([...result.projectionLossArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+
+		it('does NOT track tag loss for a merely invalid-pattern tag: the string entry itself is kept, unlike a dropped non-string entry', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001' })
+				.replace('tags: []', 'tags:\n  - Not_Valid_Pattern\n'))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ENV-012')
+			expect(result.tagLossArtifactIds.size)
+				.toBe(0)
+			expect(result.projectionLossArtifactIds.size)
 				.toBe(0)
 		})
 	})

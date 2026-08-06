@@ -128,8 +128,16 @@ async function peekConfigAt(git: GitRepository, commitOid: string): Promise<Conf
 	// treated the same as the file simply never existing.
 	if (blob.kind === 'git-unavailable' || blob.kind === 'error')
 		return { kind: 'error', message: blob.message }
-	if (blob.kind !== 'resolved')
-		return { kind: 'absent' }
+	if (blob.kind !== 'resolved') {
+		// `blob.kind` is `missing` or `not-a-blob`: `entry` was already proven
+		// to exist as a blob-type tree entry, so this is read corruption on an
+		// object already known to exist, never a legitimate absence. Folding it
+		// into `absent` would let validation proceed as though the baseline or
+		// proposed commit simply had no `ef.yaml`, silently skipping the
+		// ref-state probe this peek exists to feed.
+		const detail = blob.kind === 'not-a-blob' ? `not a blob (actual type '${blob.actualType}')` : 'missing'
+		return { kind: 'error', message: `'.engineering/ef.yaml' was listed in the tree as blob '${entry.oid}' but reading it reported it ${detail}.` }
+	}
 	const text = new TextDecoder('utf-8', { fatal: false })
 		.decode(blob.bytes)
 	const config = decodeConfig(text, '.engineering/ef.yaml').config
