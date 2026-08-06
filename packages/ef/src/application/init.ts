@@ -43,6 +43,7 @@ import { claimDirectory } from '../platform/claim-directory'
 import { createExclusive, readInitMarker, writeInitMarker } from '../platform/exclusive-file'
 import { isDirectory, readFileBytes } from '../platform/fs-facts'
 import { generateNonce } from '../platform/nonce'
+import { isSameLocation } from '../platform/path-identity'
 import { decodeConfig, isValidIntegrationRef } from '../repository/config'
 import { validateSnapshot } from './snapshot-validation'
 
@@ -242,7 +243,7 @@ export async function computeInitPlan(input: ComputeInitPlanInput, deps: Compute
 	const worktree = await deps.findWorktreeRoot(targetRoot)
 	if (worktree.kind === 'git-unavailable')
 		return { ok: false, reason: 'git-unavailable', message: worktree.message }
-	if (worktree.kind === 'not-a-worktree' || worktree.root !== targetRoot) {
+	if (worktree.kind === 'not-a-worktree' || !isSameLocation(worktree.root, targetRoot)) {
 		return {
 			ok: false,
 			reason: 'not-a-worktree-root',

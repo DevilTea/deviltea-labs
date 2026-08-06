@@ -54,9 +54,24 @@ function assert(name, condition, detail = '') {
 	record(name, Boolean(condition), condition ? '' : detail)
 }
 
-function assertEqual(name, actual, expected) {
+function assertEqual(name, actual, expected, context = '') {
 	const ok = Object.is(actual, expected)
-	record(name, ok, ok ? '' : `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
+	const detail = ok ? '' : `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}${context ? ` | ${context}` : ''}`
+	record(name, ok, detail)
+}
+
+const MAX_OUTPUT_DETAIL_BYTES = 4000
+
+/** Truncates `text` to a reasonable length for a failure detail line, so a huge stream doesn't flood CI logs while still being complete enough to diagnose a JSON-shape or exit-code mismatch. */
+function truncateForDetail(text) {
+	if (text.length <= MAX_OUTPUT_DETAIL_BYTES)
+		return text
+	return `${text.slice(0, MAX_OUTPUT_DETAIL_BYTES)}... [truncated, ${text.length} chars total]`
+}
+
+/** Full stdout/stderr (truncated) for a `runCli`/`runEf` result, appended to assertion failure details so a failing CI run shows the actual JSON diagnostics instead of just "expected/got". */
+function describeCliResult(result) {
+	return `stdout=${JSON.stringify(truncateForDetail(result.stdout.toString('utf8')))} stderr=${JSON.stringify(truncateForDetail(result.stderr.toString('utf8')))}`
 }
 
 /** Runs a setup command; throws with full diagnostic output on failure. Setup failures are environment problems, not smoke-test findings, so they abort the run instead of being recorded as findings. */
@@ -216,19 +231,19 @@ function main() {
 			const isExactlyOneJsonLine = stdoutText.endsWith('\n') && newlineCount === 1
 			const parsed = parseJsonOrUndefined(result.stdout)
 
-			assertEqual('version: exit code', result.status, 0)
+			assertEqual('version: exit code', result.status, 0, describeCliResult(result))
 			assert('version: stdout is exactly one JSON object plus one trailing LF', isExactlyOneJsonLine, `stdout=${JSON.stringify(stdoutText)}`)
 			assert('version: stdout parses as JSON', parsed !== undefined, `stdout=${JSON.stringify(stdoutText)}`)
-			assertEqual('version: schema', parsed?.schema, 'ef/version-result@1')
-			assertEqual('version: ef_core_major', parsed?.ef_core_major, 1)
-			assertEqual('version: version matches installed package.json', parsed?.version, installedPackageJson.version)
+			assertEqual('version: schema', parsed?.schema, 'ef/version-result@1', describeCliResult(result))
+			assertEqual('version: ef_core_major', parsed?.ef_core_major, 1, describeCliResult(result))
+			assertEqual('version: version matches installed package.json', parsed?.version, installedPackageJson.version, describeCliResult(result))
 		}
 
 		// ---- (b) ef help ---------------------------------------------------------
 
 		{
 			const result = runCli(['help'], { cwd: consumerDirectory })
-			assertEqual('help: exit code', result.status, 0)
+			assertEqual('help: exit code', result.status, 0, describeCliResult(result))
 		}
 
 		// ---- Temp Git repo for the project-mutation assertions ------------------
@@ -264,10 +279,10 @@ function main() {
 			], { cwd: projectDirectory })
 			const parsed = parseJsonOrUndefined(result.stdout)
 
-			assertEqual('init: exit code', result.status, 0)
-			assert('init: parses as JSON', parsed !== undefined, `stdout=${JSON.stringify(result.stdout.toString('utf8'))}, stderr=${JSON.stringify(result.stderr.toString('utf8'))}`)
-			assertEqual('init: applied', parsed?.applied, true)
-			assert('init: .engineering/ef.yaml exists', existsSync(join(projectDirectory, '.engineering', 'ef.yaml')), '')
+			assertEqual('init: exit code', result.status, 0, describeCliResult(result))
+			assert('init: parses as JSON', parsed !== undefined, describeCliResult(result))
+			assertEqual('init: applied', parsed?.applied, true, describeCliResult(result))
+			assert('init: .engineering/ef.yaml exists', existsSync(join(projectDirectory, '.engineering', 'ef.yaml')), describeCliResult(result))
 		}
 
 		// ---- (d) ef artifact create req ------------------------------------------
@@ -287,10 +302,10 @@ function main() {
 			], { cwd: projectDirectory })
 			const parsed = parseJsonOrUndefined(result.stdout)
 
-			assertEqual('artifact create req: exit code', result.status, 0)
-			assert('artifact create req: parses as JSON', parsed !== undefined, `stdout=${JSON.stringify(result.stdout.toString('utf8'))}, stderr=${JSON.stringify(result.stderr.toString('utf8'))}`)
-			assertEqual('artifact create req: applied', parsed?.applied, true)
-			assert('artifact create req: .engineering/req/REQ-001.md exists', existsSync(join(projectDirectory, '.engineering', 'req', 'REQ-001.md')), '')
+			assertEqual('artifact create req: exit code', result.status, 0, describeCliResult(result))
+			assert('artifact create req: parses as JSON', parsed !== undefined, describeCliResult(result))
+			assertEqual('artifact create req: applied', parsed?.applied, true, describeCliResult(result))
+			assert('artifact create req: .engineering/req/REQ-001.md exists', existsSync(join(projectDirectory, '.engineering', 'req', 'REQ-001.md')), describeCliResult(result))
 		}
 
 		// ---- (e) ef validate --scope snapshot ------------------------------------
@@ -299,9 +314,9 @@ function main() {
 			const result = runCli(['validate', '--scope', 'snapshot', '--format', 'json'], { cwd: projectDirectory })
 			const parsed = parseJsonOrUndefined(result.stdout)
 
-			assertEqual('validate snapshot: exit code', result.status, 0)
-			assert('validate snapshot: parses as JSON', parsed !== undefined, `stdout=${JSON.stringify(result.stdout.toString('utf8'))}, stderr=${JSON.stringify(result.stderr.toString('utf8'))}`)
-			assertEqual('validate snapshot: valid', parsed?.valid, true)
+			assertEqual('validate snapshot: exit code', result.status, 0, describeCliResult(result))
+			assert('validate snapshot: parses as JSON', parsed !== undefined, describeCliResult(result))
+			assertEqual('validate snapshot: valid', parsed?.valid, true, describeCliResult(result))
 		}
 
 		// ---- (f) ef resource read failure (byte-level) ---------------------------
@@ -309,8 +324,8 @@ function main() {
 		{
 			const result = runCli(['resource', 'read', 'REQ-999', 'x'], { cwd: projectDirectory })
 
-			assertEqual('resource read failure: exit code', result.status, 2)
-			assertEqual('resource read failure: stdout byte length', result.stdout.length, 0)
+			assertEqual('resource read failure: exit code', result.status, 2, describeCliResult(result))
+			assertEqual('resource read failure: stdout byte length', result.stdout.length, 0, describeCliResult(result))
 		}
 
 		// ---- (g) unknown command --------------------------------------------------
@@ -318,8 +333,8 @@ function main() {
 		{
 			const result = runCli(['nope', '--format', 'json'], { cwd: projectDirectory })
 
-			assertEqual('unknown command: exit code', result.status, 2)
-			assertEqual('unknown command: stdout byte length', result.stdout.length, 0)
+			assertEqual('unknown command: exit code', result.status, 2, describeCliResult(result))
+			assertEqual('unknown command: stdout byte length', result.stdout.length, 0, describeCliResult(result))
 		}
 	}
 	finally {

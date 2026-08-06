@@ -107,6 +107,38 @@ describe('discoverProject (isolated, fake git)', () => {
 			.toEqual({ kind: 'not-project-worktree-root', root: tempDir })
 	})
 
+	it('resolves when the injected Git worktree root reaches the same location as the fs-ascended candidate through a different path form', async () => {
+		// Stands in for the cross-platform condition the worktree-root check
+		// must tolerate (Windows: Git's forward-slash/long-form output vs. a
+		// short-name or differently-cased fs-derived path denoting the same
+		// directory). Here a symlinked alias plays the role of "a differently
+		// shaped path to the identical location": `.engineering` lives under
+		// the real directory, `cwd` ascends through the symlinked alias, and
+		// the injected Git dependency reports the *real* (unaliased) root --
+		// exactly as real Git would after resolving the symlink itself.
+		const realRoot = path.join(tempDir, 'real-project')
+		const engineeringDir = path.join(realRoot, '.engineering')
+		await fs.mkdir(engineeringDir, { recursive: true })
+		await fs.writeFile(path.join(engineeringDir, 'ef.yaml'), SINGLE_REPO_YAML)
+
+		const aliasRoot = path.join(tempDir, 'alias-project')
+		await fs.symlink(realRoot, aliasRoot, 'dir')
+		const nestedCwd = path.join(aliasRoot, 'src')
+		await fs.mkdir(nestedCwd, { recursive: true })
+
+		const deps: DiscoverProjectDeps = { findWorktreeRoot: async () => foundAt(realRoot) }
+		const result = await discoverProject({ cwd: nestedCwd }, deps)
+		expect(result.kind)
+			.toBe('resolved')
+		if (result.kind === 'resolved') {
+			// The candidate root returned is still the fs-ascended (aliased)
+			// form: canonicalization is for the equality check only, never for
+			// the reported/serialized path.
+			expect(result.root)
+				.toBe(aliasRoot)
+		}
+	})
+
 	it('reports not-project-worktree-root when the candidate root is not a Git worktree at all', async () => {
 		const engineeringDir = path.join(tempDir, '.engineering')
 		await fs.mkdir(engineeringDir, { recursive: true })
