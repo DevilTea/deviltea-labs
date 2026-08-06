@@ -14,8 +14,8 @@
 		"docs:preview": "pnpm --filter docs run preview",
 		"lint": "eslint .",
 		"new-package": "tsx scripts/new-package.ts",
-		"publint": "pnpm --filter @deviltea/tiny-state-machine exec publint && pnpm --filter @deviltea/tiny-state-machine-vue exec publint",
-		"test": "pnpm run test:unit && pnpm --filter @deviltea/eslint-config run test:package && pnpm --filter @deviltea/tsconfig run test:contracts",
+		"publint": "pnpm --filter @deviltea/tiny-state-machine exec publint && pnpm --filter @deviltea/tiny-state-machine-vue exec publint && pnpm --filter @deviltea/ef exec publint",
+		"test": "pnpm run test:unit && pnpm --filter @deviltea/eslint-config run test:package && pnpm --filter @deviltea/ef run test:package && pnpm --filter @deviltea/tsconfig run test:contracts",
 		"test:unit": "vitest run",
 		"typecheck": "pnpm -r --if-present run typecheck && pnpm --filter vue-temp-var run type-check"
 	},

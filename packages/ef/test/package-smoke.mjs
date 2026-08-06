@@ -4,19 +4,26 @@
  * "Testing and Verification": "installing the output of `pnpm pack` and
  * invoking the installed `ef` binary"; "exact stdout, stderr, JSON shape,
  * trailing newline, and exit-code assertions"; "byte-for-byte `resource
- * read` assertions").
+ * read` assertions"; "CI execution on Ubuntu, macOS, and Windows with
+ * supported Node.js versions").
  *
  * Plain Node.js script, no test framework: packs the current working tree
  * with `pnpm pack`, installs the resulting tarball into a clean throwaway
  * npm consumer project (the way a real downstream consumer would), and
- * exercises the installed `node_modules/.bin/ef` binary end to end. Every
- * assertion is exact -- byte-level for the raw-transport failure cases, full
- * JSON-shape for the JSON envelopes -- rather than a loose "it ran"
- * smoke check, per the linked decisions doc.
+ * exercises the installed `ef` binary end to end. Every assertion is exact
+ * -- byte-level for the raw-transport failure cases, full JSON-shape for the
+ * JSON envelopes -- rather than a loose "it ran" smoke check, per the linked
+ * decisions doc.
  *
  * Assumes `pnpm build` has already produced `dist/` (the `test:package`
  * script in `package.json` runs `pnpm build` first); this script only packs
  * and consumes the existing build output.
+ *
+ * When the `EF_SMOKE_TARBALL` environment variable is set to an absolute
+ * path, that tarball is installed directly and the internal build+pack step
+ * is skipped. CI uses this to build and pack the package once on Node.js 24
+ * and reuse the resulting tarball for the packed-consumer runs on every
+ * supported OS and Node.js version, instead of rebuilding per matrix leg.
  */
 
 import { spawnSync } from 'node:child_process'
@@ -29,7 +36,7 @@ import {
 	rmSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import process from 'node:process'
 
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
@@ -95,15 +102,31 @@ function main() {
 	const temporaryDirectory = mkdtempSync(join(tmpdir(), 'deviltea-ef-smoke-'))
 
 	try {
-		// ---- Pack the current build output ------------------------------------
+		// ---- Obtain a tarball of the build output -------------------------------
+		//
+		// `EF_SMOKE_TARBALL` (an absolute path), when set, skips the internal
+		// build+pack step and installs that tarball directly. CI packs once on
+		// Node.js 24 and reuses the tarball across every OS/Node.js matrix leg.
 
-		runSetup(pnpm, ['pack', '--pack-destination', temporaryDirectory])
+		const suppliedTarballPath = process.env.EF_SMOKE_TARBALL
+		let tarballPath
 
-		const tarballName = readdirSync(temporaryDirectory)
-			.find(fileName => fileName.endsWith('.tgz'))
-		if (!tarballName)
-			throw new Error('pnpm pack did not produce a tarball')
-		const tarballPath = join(temporaryDirectory, tarballName)
+		if (suppliedTarballPath) {
+			if (!isAbsolute(suppliedTarballPath))
+				throw new Error(`EF_SMOKE_TARBALL must be an absolute path, got: ${suppliedTarballPath}`)
+			if (!existsSync(suppliedTarballPath))
+				throw new Error(`EF_SMOKE_TARBALL does not exist: ${suppliedTarballPath}`)
+			tarballPath = suppliedTarballPath
+		}
+		else {
+			runSetup(pnpm, ['pack', '--pack-destination', temporaryDirectory])
+
+			const tarballName = readdirSync(temporaryDirectory)
+				.find(fileName => fileName.endsWith('.tgz'))
+			if (!tarballName)
+				throw new Error('pnpm pack did not produce a tarball')
+			tarballPath = join(temporaryDirectory, tarballName)
+		}
 
 		// ---- Install the tarball into a clean npm consumer project -------------
 
@@ -112,9 +135,26 @@ function main() {
 		runSetup(npm, ['init', '--yes'], { cwd: consumerDirectory })
 		runSetup(npm, ['install', tarballPath], { cwd: consumerDirectory })
 
+		// The installed binary is a POSIX shell script plus a `.cmd` shim on
+		// Windows (`node_modules/.bin/ef.cmd`); `spawnSync` with `shell: false`
+		// cannot execute a `.cmd` shim directly (it is not a native executable),
+		// so on Windows the CLI is invoked directly through Node.js against the
+		// installed package's entry point instead. The shim file's existence is
+		// still asserted so packaging regressions that drop the generated bin
+		// shim are caught on every platform.
+
 		const efBinaryName = process.platform === 'win32' ? 'ef.cmd' : 'ef'
-		const efBinary = join(consumerDirectory, 'node_modules', '.bin', efBinaryName)
-		assert('installed ef binary exists', existsSync(efBinary), `expected binary at ${efBinary}`)
+		const efBinaryShim = join(consumerDirectory, 'node_modules', '.bin', efBinaryName)
+		assert('installed ef binary exists', existsSync(efBinaryShim), `expected binary at ${efBinaryShim}`)
+
+		const efEntryPoint = join(consumerDirectory, 'node_modules', '@deviltea', 'ef', 'dist', 'cli.mjs')
+		const efBinary = process.platform === 'win32' ? process.execPath : efBinaryShim
+		const efBinaryArgsPrefix = process.platform === 'win32' ? [efEntryPoint] : []
+
+		/** Invokes the installed `ef` binary under test with the platform-appropriate launcher. */
+		function runCli(args, options = {}) {
+			return runEf(efBinary, [...efBinaryArgsPrefix, ...args], options)
+		}
 
 		const installedPackageJson = JSON.parse(readFileSync(
 			join(consumerDirectory, 'node_modules', '@deviltea', 'ef', 'package.json'),
@@ -135,7 +175,7 @@ function main() {
 		// ---- (a) ef version --format json --------------------------------------
 
 		{
-			const result = runEf(efBinary, ['version', '--format', 'json'], { cwd: consumerDirectory })
+			const result = runCli(['version', '--format', 'json'], { cwd: consumerDirectory })
 			const stdoutText = result.stdout.toString('utf8')
 			const newlineCount = (stdoutText.match(/\n/g) ?? []).length
 			const isExactlyOneJsonLine = stdoutText.endsWith('\n') && newlineCount === 1
@@ -152,7 +192,7 @@ function main() {
 		// ---- (b) ef help ---------------------------------------------------------
 
 		{
-			const result = runEf(efBinary, ['help'], { cwd: consumerDirectory })
+			const result = runCli(['help'], { cwd: consumerDirectory })
 			assertEqual('help: exit code', result.status, 0)
 		}
 
@@ -167,7 +207,7 @@ function main() {
 		// ---- (c) ef init --------------------------------------------------------
 
 		{
-			const result = runEf(efBinary, [
+			const result = runCli([
 				'init',
 				'--yes',
 				'--format',
@@ -198,7 +238,7 @@ function main() {
 		// ---- (d) ef artifact create req ------------------------------------------
 
 		{
-			const result = runEf(efBinary, [
+			const result = runCli([
 				'artifact',
 				'create',
 				'req',
@@ -221,7 +261,7 @@ function main() {
 		// ---- (e) ef validate --scope snapshot ------------------------------------
 
 		{
-			const result = runEf(efBinary, ['validate', '--scope', 'snapshot', '--format', 'json'], { cwd: projectDirectory })
+			const result = runCli(['validate', '--scope', 'snapshot', '--format', 'json'], { cwd: projectDirectory })
 			const parsed = parseJsonOrUndefined(result.stdout)
 
 			assertEqual('validate snapshot: exit code', result.status, 0)
@@ -232,7 +272,7 @@ function main() {
 		// ---- (f) ef resource read failure (byte-level) ---------------------------
 
 		{
-			const result = runEf(efBinary, ['resource', 'read', 'REQ-999', 'x'], { cwd: projectDirectory })
+			const result = runCli(['resource', 'read', 'REQ-999', 'x'], { cwd: projectDirectory })
 
 			assertEqual('resource read failure: exit code', result.status, 2)
 			assertEqual('resource read failure: stdout byte length', result.stdout.length, 0)
@@ -241,7 +281,7 @@ function main() {
 		// ---- (g) unknown command --------------------------------------------------
 
 		{
-			const result = runEf(efBinary, ['nope', '--format', 'json'], { cwd: projectDirectory })
+			const result = runCli(['nope', '--format', 'json'], { cwd: projectDirectory })
 
 			assertEqual('unknown command: exit code', result.status, 2)
 			assertEqual('unknown command: stdout byte length', result.stdout.length, 0)
