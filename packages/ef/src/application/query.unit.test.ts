@@ -430,8 +430,12 @@ function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRe
 		currentIds: new Map(),
 		chgEffects: [],
 		graphTrustworthy: true,
-		discardedRelationData: false,
-		artifactsWithDiscardedRelationData: new Set(),
+		edgeLossArtifactIds: new Set(),
+		relationExtensionLossArtifactIds: new Set(),
+		resourceLossArtifactIds: new Set(),
+		tagLossArtifactIds: new Set(),
+		envelopeWideLossArtifactIds: new Set(),
+		projectionLossArtifactIds: new Set(),
 	}
 	return { snapshot, validation }
 }
@@ -706,18 +710,18 @@ describe('executeQuery', () => {
 		})
 	})
 
-	describe('discarded relation data gate (Finding A: 10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
+	describe('structured data loss gate (Finding A: 10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
 		/** Adds REQ-950 (a shape-invalid relation entry, EF-REL-002) to the rich project fixture. */
 		async function contextWithDiscardedRelationData(): Promise<QueryContext> {
 			await writeFile(tempDir, '.engineering/req/REQ-950.md', REQ_BAD_RELATION)
 			return reloadContext()
 		}
 
-		it('sets validation.discardedRelationData and tracks only the affected artifact', async () => {
+		it('sets validation.edgeLossArtifactIds/projectionLossArtifactIds and tracks only the affected artifact', async () => {
 			const bad = await contextWithDiscardedRelationData()
-			expect(bad.validation.discardedRelationData)
-				.toBe(true)
-			expect([...bad.validation.artifactsWithDiscardedRelationData])
+			expect([...bad.validation.edgeLossArtifactIds])
+				.toEqual(['REQ-950'])
+			expect([...bad.validation.projectionLossArtifactIds])
 				.toEqual(['REQ-950'])
 		})
 
@@ -794,7 +798,7 @@ describe('executeQuery', () => {
 				.toBe(false)
 		})
 
-		it('gates relations/trace/impact/resolve-current project-wide (EF-QRY-013), even when querying an untouched Artifact', async () => {
+		it('gates relations (default direction "both")/trace ("both")/impact project-wide (EF-QRY-013), even when querying an untouched Artifact: these all depend on incoming edges, derived from every Artifact\'s outgoing array project-wide (Finding C)', async () => {
 			const bad = await contextWithDiscardedRelationData()
 
 			const relations = await executeQuery(bad, { kind: 'relations', id: 'REQ-001' })
@@ -814,19 +818,28 @@ describe('executeQuery', () => {
 				.toBe(false)
 			expect(impact.diagnostics[0]!.code)
 				.toBe('EF-QRY-013')
-
-			const resolveCurrent = await executeQuery(bad, { kind: 'resolve-current', id: 'REQ-001' })
-			expect(resolveCurrent.complete)
-				.toBe(false)
-			expect(resolveCurrent.diagnostics[0]!.code)
-				.toBe('EF-QRY-013')
 		})
 
-		it('eF-REL-003 (dangling relation target) does not set discardedRelationData; only a traversal that actually reaches the dangling edge fails, via the existing EF-QRY-007 path', async () => {
+		it('finding C: does NOT gate resolve-current for a root whose current-resolution result never reaches the affected, disconnected Artifact: resolve-current is outgoing-only, so it is scoped to its own result', async () => {
+			const bad = await contextWithDiscardedRelationData()
+
+			// REQ-950 (the affected Artifact) only relates to PRD-001; REQ-001 has
+			// no 'superseded-by' relation at all, so resolving its current form
+			// never visits anything REQ-950 touches.
+			const resolveCurrent = await executeQuery(bad, { kind: 'resolve-current', id: 'REQ-001' })
+			expect(resolveCurrent.complete)
+				.toBe(true)
+			expect(resolveCurrent.data!.current_ids)
+				.toEqual(['REQ-001'])
+		})
+
+		it('eF-REL-003 (dangling relation target) does not set edge/projection loss; only a traversal that actually reaches the dangling edge fails, via the existing EF-QRY-007 path', async () => {
 			await writeFile(tempDir, '.engineering/req/REQ-901.md', REQ_GHOST_SRC)
 			const ghostContext = await reloadContext()
-			expect(ghostContext.validation.discardedRelationData)
-				.toBe(false)
+			expect(ghostContext.validation.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect(ghostContext.validation.projectionLossArtifactIds.size)
+				.toBe(0)
 
 			// An unrelated relations query elsewhere in the graph is unaffected.
 			const unrelated = await executeQuery(ghostContext, { kind: 'relations', id: 'REQ-001' })
@@ -840,6 +853,171 @@ describe('executeQuery', () => {
 				.toBe(false)
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-007')
+		})
+	})
+
+	describe('graph query edge-loss scoping (Finding C: 10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
+		const REQ_EXT_ONLY_LOSS = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-700
+title: Extension Only Loss
+status: active
+summary: A requirement whose only relation-data loss is an invalid extension field (EF-REL-015), for Finding C's not-blocking regression.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-001
+    foo: bar
+resources: []
+---
+
+## Requirement
+
+Exercises EF-REL-015 (invalid extension field) not blocking any graph query kind.
+
+## Rationale
+
+Finding C: extension-only loss can never hide a graph edge, since graph edges are (source, type, target) only.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+		const PRD_ISLAND = `---
+schema: ef/prd@1
+type: prd
+id: PRD-800
+title: Isolated Island PRD
+status: active
+summary: A PRD with no relation to any other fixture Artifact, for Finding C's disconnected-component regression.
+tags: []
+relations: []
+resources: []
+---
+
+## Vision
+
+N/A.
+
+## Objectives
+
+N/A.
+`
+
+		const REQ_ISLAND_LOSSY = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-800
+title: Island Requirement With Discarded Relation Data
+status: active
+summary: A requirement in its own disconnected component whose relations array contains a shape-invalid entry, for Finding C's disconnected-component regression.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-800
+  - not-a-mapping
+resources: []
+---
+
+## Requirement
+
+Exercises EF-REL-002 in a component entirely disconnected from the rest of the fixture graph.
+
+## Rationale
+
+Finding C: an edge-lossy Artifact outside a traversal's reachable component must not block that traversal.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+		it('eF-REL-015-only loss (invalid extension field) does not block relations (any direction), trace, impact, or resolve-current -- even when the affected Artifact is the traversal root', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-700.md', REQ_EXT_ONLY_LOSS)
+			const context = await reloadContext()
+			expect(context.validation.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect([...context.validation.relationExtensionLossArtifactIds])
+				.toEqual(['REQ-700'])
+
+			const relationsBoth = await executeQuery(context, { kind: 'relations', id: 'REQ-700' })
+			expect(relationsBoth.complete)
+				.toBe(true)
+
+			const relationsOutgoing = await executeQuery(context, { kind: 'relations', id: 'REQ-700', direction: 'outgoing' })
+			expect(relationsOutgoing.complete)
+				.toBe(true)
+
+			const trace = await executeQuery(context, { kind: 'trace', roots: ['REQ-700'], types: ['derived-from'], direction: 'both', maxDepth: 1 })
+			expect(trace.complete)
+				.toBe(true)
+
+			const impact = await executeQuery(context, { kind: 'impact', roots: ['PRD-001'], maxDepth: 1 })
+			expect(impact.complete)
+				.toBe(true)
+
+			const resolveCurrent = await executeQuery(context, { kind: 'resolve-current', id: 'REQ-700' })
+			expect(resolveCurrent.complete)
+				.toBe(true)
+		})
+
+		it('an edge-lossy Artifact in a disconnected component does not block an outgoing-only relations/trace/resolve-current reachable only from a clean root', async () => {
+			await writeFile(tempDir, '.engineering/prd/PRD-800.md', PRD_ISLAND)
+			await writeFile(tempDir, '.engineering/req/REQ-800.md', REQ_ISLAND_LOSSY)
+			const context = await reloadContext()
+			expect([...context.validation.edgeLossArtifactIds])
+				.toEqual(['REQ-800'])
+
+			const relationsOutgoing = await executeQuery(context, { kind: 'relations', id: 'REQ-001', direction: 'outgoing' })
+			expect(relationsOutgoing.complete)
+				.toBe(true)
+
+			const traceOutgoing = await executeQuery(context, { kind: 'trace', roots: ['REQ-001'], types: ['derived-from', 'governed-by'], direction: 'outgoing', maxDepth: 5 })
+			expect(traceOutgoing.complete)
+				.toBe(true)
+
+			const resolveCurrent = await executeQuery(context, { kind: 'resolve-current', id: 'REQ-001' })
+			expect(resolveCurrent.complete)
+				.toBe(true)
+		})
+
+		it('the SAME disconnected edge-lossy Artifact still gates relations (direction "incoming"), trace ("incoming"), and impact project-wide: those depend on incoming edges derived from every Artifact\'s outgoing array', async () => {
+			await writeFile(tempDir, '.engineering/prd/PRD-800.md', PRD_ISLAND)
+			await writeFile(tempDir, '.engineering/req/REQ-800.md', REQ_ISLAND_LOSSY)
+			const context = await reloadContext()
+
+			const relationsIncoming = await executeQuery(context, { kind: 'relations', id: 'REQ-001', direction: 'incoming' })
+			expect(relationsIncoming.complete)
+				.toBe(false)
+			expect(relationsIncoming.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const traceIncoming = await executeQuery(context, { kind: 'trace', roots: ['REQ-001'], types: ['derived-from'], direction: 'incoming', maxDepth: 1 })
+			expect(traceIncoming.complete)
+				.toBe(false)
+			expect(traceIncoming.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const impact = await executeQuery(context, { kind: 'impact', roots: ['REQ-001'], maxDepth: 1 })
+			expect(impact.complete)
+				.toBe(false)
+			expect(impact.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('an outgoing-only traversal IS blocked when the edge-lossy Artifact\'s own known-valid edge touches the traversal\'s visited set (not a no-op scoping)', async () => {
+			// REQ-950's one valid relation (derived-from -> PRD-001) targets the
+			// same PRD-001 that REQ-001's own outgoing traversal reaches.
+			await writeFile(tempDir, '.engineering/req/REQ-950.md', REQ_BAD_RELATION)
+			const context = await reloadContext()
+
+			const relationsOutgoing = await executeQuery(context, { kind: 'relations', id: 'REQ-001', direction: 'outgoing' })
+			expect(relationsOutgoing.complete)
+				.toBe(false)
+			expect(relationsOutgoing.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
 		})
 	})
 

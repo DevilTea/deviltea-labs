@@ -113,40 +113,96 @@ export interface SnapshotValidationResult {
 	 */
 	graphTrustworthy: boolean
 	/**
-	 * `true` when ANY Artifact's raw `relations` array had at least one entry
-	 * excluded (or, for `EF-REL-015`, partially discarded) while
-	 * `validateRelationEntries` sanitized it into the subset this module
-	 * indexes the graph from -- `EF-REL-001` (unknown relation type),
-	 * `EF-REL-002` (shape-invalid entry), `EF-REL-005` (self-relation), or
-	 * `EF-REL-015` (invalid/non-JSON-compatible extension field). Every
-	 * graph-traversal query kind (`relations`, `trace`, `impact`,
-	 * `resolve-current`) walks `incomingRelations`/`byId[].relations`/
-	 * `chgEffects`, all built from that sanitized subset across the WHOLE
-	 * project, so a discarded entry on any Artifact -- not only the one a
-	 * given traversal starts from -- could be a missing edge that traversal
-	 * should have seen; this is `graphTrustworthy`'s "no partial graph"
-	 * contract, scoped to relation-entry sanitization (Finding A,
+	 * Artifact IDs (by their own declared `id`) whose raw `relations` array
+	 * had at least one entry excluded while `validateRelationEntries`
+	 * sanitized it into the subset this module indexes the graph from, in a
+	 * way that can make a graph edge `(source, type, target)` missing:
+	 * `EF-REL-001` (unknown relation type), `EF-REL-002` (shape-invalid
+	 * entry), or `EF-REL-005` (self-relation). Every graph-traversal query
+	 * kind (`relations`, `trace`, `impact`, `resolve-current`) walks
+	 * `incomingRelations`/`byId[].relations`/`chgEffects`, all built from that
+	 * sanitized subset across the whole project, so a discarded entry on any
+	 * Artifact -- not only the one a given traversal starts from -- could be
+	 * a missing edge that traversal should have seen (Finding A,
 	 * 10-query-and-trace.md "Invalid Graph and Partial Results": "MUST NOT
 	 * return a partial graph ... that an Agent could mistake for complete
-	 * context"). `EF-REL-003` (dangling relation target) is deliberately NOT
-	 * one of the codes tracked here: it is a graph-integrity finding about a
+	 * context"). The query layer (Finding C) scopes exactly how far this
+	 * reaches per traversal instead of always gating project-wide.
+	 *
+	 * `EF-REL-015` (invalid/non-JSON-compatible extension field) is
+	 * deliberately EXCLUDED from this set: it only ever discards extension
+	 * metadata alongside an otherwise-intact, still-indexed `(type, target)`
+	 * pair, and every graph query's edges contain only `(source, type,
+	 * target)` -- no edge is missing (Finding C). It is tracked separately in
+	 * `relationExtensionLossArtifactIds` and folded into
+	 * `projectionLossArtifactIds` instead.
+	 *
+	 * `EF-REL-003` (dangling relation target) is deliberately NOT one of the
+	 * codes tracked here either: it is a graph-integrity finding about a
 	 * PRESENT, fully-sanitized entry whose target does not exist, already
 	 * caught by the traversal itself reaching a missing `byId` node
 	 * (`EF-QRY-007`), not a sanitization discard.
 	 */
-	discardedRelationData: boolean
+	edgeLossArtifactIds: ReadonlySet<string>
 	/**
-	 * Artifact IDs (by their own declared `id`) whose relations array
-	 * triggered `discardedRelationData` above. A `lookup`/`list`/`search`
-	 * result that would project this specific Artifact's `relations` field --
-	 * built from its raw decoded envelope, not the sanitized subset -- must
-	 * not report `complete: true` while doing so: `EF-REL-002` (shape-invalid
-	 * entry) is discarded from that raw projection too (an envelope can only
-	 * decode a relation entry that is itself a YAML mapping), so the
-	 * projected `relations` array can silently omit content the file actually
-	 * declares.
+	 * Artifact IDs whose raw `relations` array had an entry with a valid
+	 * `type`/`target` pair but an invalid or non-JSON-compatible extension
+	 * field (`EF-REL-015`) -- metadata-only loss that never removes a graph
+	 * edge (see `edgeLossArtifactIds`'s doc). Folded into
+	 * `projectionLossArtifactIds` below since a `lookup`/`list`/`search`
+	 * projection of this Artifact still reflects the sanitization, not the
+	 * raw declared extension content.
 	 */
-	artifactsWithDiscardedRelationData: ReadonlySet<string>
+	relationExtensionLossArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs whose raw `resources` array had at least one entry
+	 * `validateResourceDescriptors` flagged `EF-RES-001` for: either the
+	 * entry itself was not a YAML mapping (entirely omitted from
+	 * `envelope.resources`, `domain/envelope.ts`'s `decodeEnvelope`), or a
+	 * present entry was missing/malformed a required core field (that field
+	 * silently decoded to its empty/default value -- `''`/`false` -- instead
+	 * of the file's actual, malformed content). Either way, this Artifact's
+	 * raw decoded `resources` diverges from what the file declares.
+	 */
+	resourceLossArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs whose raw `tags` array had at least one non-string entry
+	 * silently dropped during decode (`domain/envelope.ts` only collects
+	 * string tag entries into `envelope.tags`; a non-string entry is skipped
+	 * entirely, distinct from an invalid-pattern or duplicate string tag,
+	 * both of which are kept). Detected structurally by comparing the raw
+	 * array's entry count against the decoded `envelope.tags.length`, rather
+	 * than by diagnostic code (every entry-content problem under `tags[i]`
+	 * shares `EF-ENV-012`, including the invalid-pattern/duplicate cases that
+	 * do NOT lose data), so this set is exact -- never a false positive.
+	 */
+	tagLossArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs with an envelope-wide loss that can corrupt any of its
+	 * core fields (not only relations/resources/tags): `EF-ENV-005` (a
+	 * duplicate mapping key anywhere in the frontmatter -- the parser keeps
+	 * exactly one of the conflicting values, discarding the other
+	 * unrecoverably) or `EF-ENV-006` (an unrecognized top-level field, which
+	 * `decodeEnvelope` drops entirely rather than preserving as an
+	 * extension). Because either code can affect a field a `list`/`search`
+	 * request filters or searches on (including `type`/`status`/`schema`,
+	 * not just relations/resources/tags), a request that applies ANY filter
+	 * cannot trust its matching/total while an Artifact in this set exists
+	 * (see `query.ts`'s Finding B handling).
+	 */
+	envelopeWideLossArtifactIds: ReadonlySet<string>
+	/**
+	 * The union of every artifact-loss set above (`edgeLossArtifactIds`,
+	 * `relationExtensionLossArtifactIds`, `resourceLossArtifactIds`,
+	 * `tagLossArtifactIds`, `envelopeWideLossArtifactIds`): any Artifact whose
+	 * raw decoded envelope -- the object `lookup`/`list`/`search` project
+	 * verbatim (`query-projection.ts`), not the sanitized graph-index subset
+	 * -- silently discarded or coerced some structured content, whether or
+	 * not a graph edge was also lost. A `lookup`/`list`/`search` result that
+	 * would project this specific Artifact's envelope must not report
+	 * `complete: true` while doing so (Finding A).
+	 */
+	projectionLossArtifactIds: ReadonlySet<string>
 }
 
 // ---------------------------------------------------------------------------
@@ -177,15 +233,20 @@ function withoutRedundantArrayEntryShapeFindings(diagnostics: readonly Diagnosti
 }
 
 /**
- * Codes `validateRelationEntries` (04-relations.md) reports precisely when a
- * raw relation entry's data does not survive sanitization intact: see
- * `SnapshotValidationResult.discardedRelationData` for what each one
- * discards and why that matters to query trustworthiness (Finding A).
+ * `validateRelationEntries` (04-relations.md) codes that exclude an entry
+ * from the sanitized subset in a way that can make a graph edge
+ * `(source, type, target)` missing: see
+ * `SnapshotValidationResult.edgeLossArtifactIds` for the full reasoning
+ * (Finding A/C).
  */
-const RELATION_DATA_DISCARDED_CODES = new Set<string>(['EF-REL-001', 'EF-REL-002', 'EF-REL-005', 'EF-REL-015'])
+const EDGE_LOSS_RELATION_CODES = new Set<string>(['EF-REL-001', 'EF-REL-002', 'EF-REL-005'])
 
-function relationEntriesDiscardedData(diagnostics: readonly Diagnostic[]): boolean {
-	return diagnostics.some(d => RELATION_DATA_DISCARDED_CODES.has(d.code))
+function relationEntriesHaveEdgeLoss(diagnostics: readonly Diagnostic[]): boolean {
+	return diagnostics.some(d => EDGE_LOSS_RELATION_CODES.has(d.code))
+}
+
+function relationEntriesHaveExtensionLoss(diagnostics: readonly Diagnostic[]): boolean {
+	return diagnostics.some(d => d.code === 'EF-REL-015')
 }
 
 /** Structured-location identity, ignoring message text (mirrors `diagnostics.ts`'s own dedup key, minus `code`). */
@@ -292,10 +353,14 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	// query's own completeness gate.
 	let hasUndecodedArtifact = false
 
-	// Artifact IDs (by declared `id`) whose relations array triggered
-	// `discardedRelationData` -- see `SnapshotValidationResult`'s field docs
-	// for what is discarded and why (Finding A).
-	const artifactsWithDiscardedRelationData = new Set<string>()
+	// Per-artifact structured-data-loss tracking (Finding A/B/C) -- see each
+	// field's doc on `SnapshotValidationResult` for what is discarded/coerced
+	// and why it matters to query trustworthiness.
+	const edgeLossArtifactIds = new Set<string>()
+	const relationExtensionLossArtifactIds = new Set<string>()
+	const resourceLossArtifactIds = new Set<string>()
+	const tagLossArtifactIds = new Set<string>()
+	const envelopeWideLossArtifactIds = new Set<string>()
 
 	for (const artifact of snapshot.artifacts) {
 		if (!artifact.frontmatter.ok) {
@@ -325,13 +390,35 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		const mapping = artifact.document!.mapping
 		const rawRelations = mapping ? rawArrayField(mapping, 'relations') : []
 		const rawResources = mapping ? rawArrayField(mapping, 'resources') : []
+		const rawTags = mapping ? rawArrayField(mapping, 'tags') : []
 
 		const relationResult = validateRelationEntries({ id: envelope.id, relations: rawRelations }, artifact.path)
 		diagnostics.push(...relationResult.diagnostics)
-		if (relationEntriesDiscardedData(relationResult.diagnostics))
-			artifactsWithDiscardedRelationData.add(envelope.id)
+		if (relationEntriesHaveEdgeLoss(relationResult.diagnostics))
+			edgeLossArtifactIds.add(envelope.id)
+		if (relationEntriesHaveExtensionLoss(relationResult.diagnostics))
+			relationExtensionLossArtifactIds.add(envelope.id)
 
-		diagnostics.push(...validateResourceDescriptors({ id: envelope.id, resources: rawResources }, artifact.path))
+		const resourceDiagnostics = validateResourceDescriptors({ id: envelope.id, resources: rawResources }, artifact.path)
+		diagnostics.push(...resourceDiagnostics)
+		if (resourceDiagnostics.some(d => d.code === 'EF-RES-001'))
+			resourceLossArtifactIds.add(envelope.id)
+
+		// A non-string tag entry is silently skipped by `decodeEnvelope` (never
+		// appended to `envelope.tags`), unlike an invalid-pattern or duplicate
+		// string tag (both of which are kept, sharing the same `EF-ENV-012`
+		// code) -- so entry-count shrinkage is the only reliable, code-free
+		// signal that a tag was actually lost (`tagLossArtifactIds`'s doc).
+		if (rawTags.length > envelope.tags.length)
+			tagLossArtifactIds.add(envelope.id)
+
+		// `EF-ENV-005` (duplicate mapping key, reported by the parsing module
+		// against this same file, anywhere in its frontmatter) and `EF-ENV-006`
+		// (unrecognized top-level field, entirely dropped rather than kept as
+		// an extension) can each corrupt any core field, not only
+		// relations/resources/tags (`envelopeWideLossArtifactIds`'s doc).
+		if (artifact.document!.diagnostics.some(d => d.code === 'EF-ENV-005') || envelopeResult.diagnostics.some(d => d.code === 'EF-ENV-006'))
+			envelopeWideLossArtifactIds.add(envelope.id)
 
 		if (artifact.sections) {
 			const bodyDiagnostics = validateBody({ type: envelope.type, status: envelope.status, path: artifact.path, body: artifact.sections })
@@ -572,6 +659,14 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	const hasBlockingIdentityOrLayoutFinding = diagnostics.some(d => BLOCKING_IDENTITY_OR_LAYOUT_CODES.has(d.code))
 	const graphTrustworthy = !hasUndecodedArtifact && !hasBlockingIdentityOrLayoutFinding
 
+	const projectionLossArtifactIds = new Set<string>([
+		...edgeLossArtifactIds,
+		...relationExtensionLossArtifactIds,
+		...resourceLossArtifactIds,
+		...tagLossArtifactIds,
+		...envelopeWideLossArtifactIds,
+	])
+
 	return {
 		diagnostics: aggregateDiagnostics(diagnostics),
 		complete,
@@ -581,8 +676,12 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		currentIds,
 		chgEffects,
 		graphTrustworthy,
-		discardedRelationData: artifactsWithDiscardedRelationData.size > 0,
-		artifactsWithDiscardedRelationData,
+		edgeLossArtifactIds,
+		relationExtensionLossArtifactIds,
+		resourceLossArtifactIds,
+		tagLossArtifactIds,
+		envelopeWideLossArtifactIds,
+		projectionLossArtifactIds,
 	}
 }
 

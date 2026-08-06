@@ -29,6 +29,26 @@ function withNonZeroExit(base: GitExecutor, shouldFail: (args: readonly string[]
 	}
 }
 
+/**
+ * Wraps a real executor, forcing a Git process that RAN and was OBSERVED
+ * (`ok: true`, `exitCode: 0`) but produced `stdout` matching `shouldOverride`
+ * to return; every other call passes through unchanged. Models `cat-file -t`
+ * reporting an unexpected actual object type (`ReadTreeResult`/
+ * `ReadBlobResult`'s `not-a-blob` kind) for an object already proven to exist
+ * as a tree entry.
+ */
+function withStubbedStdout(base: GitExecutor, shouldOverride: (args: readonly string[]) => boolean, stdout: string): GitExecutor {
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: (root, args, options): Promise<GitExecOutcome> => {
+			if (shouldOverride(args)) {
+				return Promise.resolve({ ok: true, result: { stdout: Buffer.from(stdout), stderr: Buffer.alloc(0), exitCode: 0, signal: null } })
+			}
+			return base.execIn(root, args, options)
+		},
+	}
+}
+
 /** Wraps a real executor, forcing failure for `execIn` calls matching `shouldFail`; every other call passes through unchanged. */
 function withSelectiveFailure(base: GitExecutor, shouldFail: (args: readonly string[]) => boolean, message: string): GitExecutor {
 	return {
@@ -748,6 +768,62 @@ describe('runValidateCommand', () => {
 			.toBe('EF-VAL-006')
 		expect(json.diagnostics[0].message)
 			.toContain('cat-file -p')
+	})
+
+	// FINDING (`peekConfigAt`'s remaining branch): once the tree listing
+	// already proved `.engineering/ef.yaml` exists as a blob-type entry, a
+	// follow-up `readBlob` reporting it `missing` or `not-a-blob` is
+	// repository/read corruption, not a legitimate absence. Before this fix,
+	// `peekConfigAt` folded BOTH `readBlob` kinds into the same `{ kind:
+	// 'absent' }` used for a config that genuinely does not exist, silently
+	// letting the run proceed past the ref-state probe this peek exists to
+	// feed. The `cat-file -t` override below is scoped to any oid other than
+	// `baseline` itself, isolating the blob's own type-check call (the
+	// commit's own `cat-file -t`, in both `resolveCommit` and `readTree`,
+	// checks `baseline` and must keep succeeding).
+	it('transition scope reports EF-VAL-006 (not a silently absent baseline config) when cat-file -t reports the ef.yaml blob missing after the tree already lists it as a blob', async () => {
+		await writeMinimalProject(root)
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+		const baseline = commitAll(root, 'baseline')
+		git(root, ['checkout', '-q', '-b', 'feature'])
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+		await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: modifies, target: REQ-001 }]'))
+		const proposed = commitAll(root, 'proposed')
+		git(root, ['checkout', '-q', 'main'])
+
+		const flakyExecutor = withNonZeroExit(createGitExecutor(), args => args[0] === 'cat-file' && args[1] === '-t' && args[2] !== baseline, 1)
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('.engineering/ef.yaml')
+	})
+
+	// Same defect, `not-a-blob` variant: `cat-file -t` runs and exits zero,
+	// but reports an actual type other than `blob` for an oid the tree
+	// listing already reported as a blob-type entry.
+	it('transition scope reports EF-VAL-006 (not a silently absent baseline config) when cat-file -t reports the ef.yaml blob as not-a-blob after the tree already lists it as a blob', async () => {
+		await writeMinimalProject(root)
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+		const baseline = commitAll(root, 'baseline')
+		git(root, ['checkout', '-q', '-b', 'feature'])
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+		await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: modifies, target: REQ-001 }]'))
+		const proposed = commitAll(root, 'proposed')
+		git(root, ['checkout', '-q', 'main'])
+
+		const flakyExecutor = withStubbedStdout(createGitExecutor(), args => args[0] === 'cat-file' && args[1] === '-t' && args[2] !== baseline, 'tree\n')
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('.engineering/ef.yaml')
 	})
 
 	it('transition scope reports EF-VAL-006 (not EF-VAL-002) when the operation-start integration-ref probe itself fails', async () => {

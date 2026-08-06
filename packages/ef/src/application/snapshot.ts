@@ -259,9 +259,20 @@ async function readBlobOrThrow(git: GitRepository, entry: GitTreeEntry | undefin
 		throw new GitUnavailableError(result.message)
 	if (result.kind === 'error')
 		throw new GitReadError(result.message)
-	if (result.kind !== 'resolved')
-		return undefined
-	return result.bytes
+	if (result.kind === 'resolved')
+		return result.bytes
+	// `result.kind` is `missing` or `not-a-blob`: the tree listing already
+	// proved `entry` exists as a blob-type entry (only entries added to
+	// `blobEntries` -- i.e. `entry.type === 'blob'` -- ever reach this
+	// function), so a follow-up read reporting it missing or not a blob is
+	// repository/read corruption on an object already known to exist, never
+	// the file's genuine absence. Silently returning `undefined` here would
+	// drop the config, control file, or Artifact from the materialized
+	// snapshot without a trace -- an omitted Artifact is then invisible to
+	// `hasUndecodedArtifact`, letting validation/query look complete over an
+	// incomplete snapshot.
+	const detail = result.kind === 'not-a-blob' ? `not a blob (actual type '${result.actualType}')` : 'missing'
+	throw new GitReadError(`'${entry.path}' was listed in the tree as blob '${entry.oid}' but reading it reported it ${detail}.`)
 }
 
 /**

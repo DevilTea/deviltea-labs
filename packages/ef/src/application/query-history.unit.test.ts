@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
 import { createGitRepository } from '../git/repository'
 import { computeHistory } from './query-history'
-import { buildArtifactSummary } from './query-projection'
 
 /** Delegates every call to `real`, except properties overridden in `overrides` -- lets a test intercept one Git operation deep inside a real history walk while every other call still hits the real repository. */
 function wrapGitRepository(real: GitRepository, overrides: Partial<GitRepository>): GitRepository {
@@ -270,7 +269,15 @@ describe('computeHistory', () => {
 			.toEqual(['.engineering/ef.yaml'])
 	})
 
-	it('prefers a live (current-snapshot) CHG summary over the historically-decoded one when available', async () => {
+	it('builds the effect summary from the historically-decoded CHG (chgEnvelope/path at this oid), never from a live/current record that has since been edited', async () => {
+		// History is defined by authoritative integration first-parent state:
+		// the effect summary for CHG-001's completing commit MUST always
+		// reflect what CHG-001's frontmatter said AT `oids.commit3` (title
+		// 'Title of CHG-001', summary 'Summary of CHG-001.') -- never a
+		// `byId` live/current record, even when one is supplied and its
+		// content differs (e.g. an uncommitted working-tree edit, or any
+		// later edit to CHG-001's title/summary). Using the live record would
+		// rewrite the payload of this older historical event.
 		const liveChg: SnapshotArtifactRecord = {
 			path: '.engineering/chg/CHG-001.md',
 			id: 'CHG-001',
@@ -296,10 +303,12 @@ describe('computeHistory', () => {
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
 			return
-		expect(outcome.effects[0]!.chg)
-			.toEqual(buildArtifactSummary(liveChg.envelope, liveChg.path))
 		expect(outcome.effects[0]!.chg.title)
-			.toBe('LIVE CURRENT TITLE')
+			.toBe('Title of CHG-001')
+		expect(outcome.effects[0]!.chg.summary)
+			.toBe('Summary of CHG-001.')
+		expect(outcome.effects[0]!.chg.title)
+			.not.toBe('LIVE CURRENT TITLE')
 	})
 
 	it('returns untrusted-data (never a false empty/partial history) when the current record\'s actual path has a filename mismatch (EF-ID-005) from its canonical path', async () => {
@@ -499,11 +508,15 @@ describe('computeHistory: PROJECT control-path availability', () => {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-controls-')))
 		try {
 			git(dir, ['init', '-q', '-b', 'main'])
-			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
-			const bootstrapOid = commitAll(dir, 'project only, no control files yet')
+			// The bootstrap commit MUST carry `.engineering/ef.yaml` -- it is the
+			// first authoritative EF state -- but `.gitignore` need not exist yet;
+			// this still exercises `ownedPathsOf` correctly omitting a control
+			// path that is genuinely absent from a given historical commit's tree.
 			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			const bootstrapOid = commitAll(dir, 'bootstrap, no .gitignore yet')
 			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
-			const withControlsOid = commitAll(dir, 'add control files')
+			const withControlsOid = commitAll(dir, 'add .gitignore')
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, withControlsOid, 'PROJECT', 'project', new Map())
@@ -514,12 +527,12 @@ describe('computeHistory: PROJECT control-path availability', () => {
 			expect(outcome.commits.map(c => c.oid))
 				.toEqual([bootstrapOid, withControlsOid])
 			expect(outcome.commits[0]!.changed_paths)
-				.toEqual(['.engineering/PROJECT.md'])
-			expect(outcome.commits[1]!.changed_paths)
 				.toEqual([
-					'.engineering/.gitignore',
+					'.engineering/PROJECT.md',
 					'.engineering/ef.yaml',
 				])
+			expect(outcome.commits[1]!.changed_paths)
+				.toEqual(['.engineering/.gitignore'])
 		}
 		finally {
 			await fs.rm(dir, { recursive: true, force: true })
@@ -573,6 +586,195 @@ describe('computeHistory: malformed CHG file mid-history', () => {
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, malformedCompletingOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () => {
+	// The bootstrap commit is the first authoritative EF state; its
+	// first-parent ancestors MAY be ordinary repository history without EF
+	// state. The walk MUST initialize at the first commit whose tree contains
+	// `.engineering/ef.yaml` and never decode/scan anything earlier, even when
+	// earlier ordinary history happens to contain files at exactly the paths
+	// EF would use.
+
+	it('does not fabricate a commit or effect from ordinary pre-bootstrap history containing Artifact/CHG-shaped files at EF paths', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-preboot-fabricate-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+
+			// Ordinary pre-EF repository history (no `.engineering/ef.yaml`
+			// anywhere) that happens to already contain a fully valid-looking
+			// Artifact and a completed CHG at exactly the paths EF would use --
+			// e.g. leftover content from an experiment, or a template copied in
+			// before the project actually adopted EF.
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			const preBootstrapOid = commitAll(dir, 'pre-EF experimental content (no ef.yaml)')
+
+			// Bootstrap: establishes the first authoritative EF state. Both
+			// pre-existing files are left byte-for-byte unchanged -- only the
+			// project's control files and PROJECT.md are newly added.
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			const bootstrapOid = commitAll(dir, 'bootstrap')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome.kind)
+				.toBe('complete')
+			if (outcome.kind !== 'complete')
+				return
+
+			// The pre-bootstrap commit must never appear anywhere in the result.
+			expect(outcome.commits.map(c => c.oid))
+				.not.toContain(preBootstrapOid)
+			expect(outcome.effects.map(e => e.commit_oid))
+				.not.toContain(preBootstrapOid)
+
+			// REQ-001's first appearance in *authoritative* history is bootstrap
+			// itself (not the earlier ordinary commit), and CHG-001's completed
+			// `introduces` effect is attributed to bootstrap, not fabricated at
+			// the pre-EF commit.
+			expect(outcome.commits.map(c => c.oid))
+				.toEqual([bootstrapOid])
+			expect(outcome.commits[0]!.changed_paths)
+				.toEqual(['.engineering/req/REQ-001.md'])
+			expect(outcome.effects)
+				.toEqual([
+					expect.objectContaining({ effect: 'introduces', status_before: null, status_after: 'active', commit_oid: bootstrapOid }),
+				])
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('does not fail an otherwise-valid history query because of unparsable content sitting at the canonical path before bootstrap', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-preboot-garbage-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+
+			// Ordinary pre-EF content at REQ-001's eventual canonical path:
+			// no frontmatter at all. Decoding this (if the walk ever reached it)
+			// would fail outright (EF-ENV-001) -- exactly the "stricter parsing"
+			// this round adds -- so this proves the walk never even attempts it.
+			await writeFile(dir, '.engineering/req/REQ-001.md', 'Not an EF-authored file. Unrelated pre-existing content.\n')
+			await writeFile(dir, '.engineering/chg/CHG-001.md', 'Also not EF-authored; unrelated pre-existing content.\n')
+			const preBootstrapOid = commitAll(dir, 'pre-EF garbage at EF-shaped paths (no ef.yaml)')
+
+			// Bootstrap replaces both with real EF content.
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			await fs.rm(path.join(dir, '.engineering/chg/CHG-001.md'))
+			const bootstrapOid = commitAll(dir, 'bootstrap replaces pre-EF garbage with real Artifacts')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome.kind)
+				.toBe('complete')
+			if (outcome.kind !== 'complete')
+				return
+			expect(outcome.commits.map(c => c.oid))
+				.toEqual([bootstrapOid])
+			expect(outcome.commits[0]!.changed_paths)
+				.toEqual(['.engineering/req/REQ-001.md'])
+			expect(outcome.effects)
+				.toEqual([])
+			expect(preBootstrapOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: envelope trust (document/decoded diagnostics and target identity)', () => {
+	it('fails with untrusted-data (does not silently complete) when a completed CHG\'s frontmatter has a duplicate top-level key', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-dup-key-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001's frontmatter declares `status` twice -- `draft`, then
+			// `completed` -- a duplicate top-level mapping key (EF-ENV-005,
+			// error severity). The YAML parser still resolves a usable-looking
+			// envelope from this (keeping the last value, `completed`), so
+			// without checking `document.diagnostics` this would silently drive
+			// a completed `introduces` effect from data that is not trustworthy.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', `---
+schema: ef/change@1
+type: change
+id: CHG-001
+title: Title of CHG-001
+status: draft
+status: completed
+summary: Summary of CHG-001.
+tags: []
+relations:
+  - type: introduces
+    target: REQ-001
+resources: []
+---
+
+## Rationale
+
+Rationale text.
+
+## Sources
+
+Sources text.
+
+## Changes
+
+- Did something.
+
+## Verification
+
+Result: passed
+
+- Verified.
+`)
+			const completingOid = commitAll(dir, 'chg with duplicate top-level key')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data (does not silently attribute an unrelated envelope\'s history) when the blob at the target\'s canonical path decodes to a different declared id', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-wrong-id-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			// A file sitting at REQ-001's canonical path (`.engineering/req/REQ-001.md`)
+			// but whose own declared `id` is a completely different Artifact
+			// (`REQ-999`). The blob decodes to a perfectly well-formed envelope,
+			// so without an explicit identity check this would be silently
+			// treated as REQ-001's own history.
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-999', 'active'))
+			const oid = commitAll(dir, 'wrong-id envelope at REQ-001 canonical path')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, oid, 'REQ-001', 'requirement', new Map())
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}

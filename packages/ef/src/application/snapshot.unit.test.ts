@@ -421,7 +421,16 @@ describe('loadSnapshotFromCommit', () => {
 			.toEqual({ config: null, diagnostics: [] })
 	})
 
-	it('excludes an artifact whose blob cannot be resolved (e.g. a pruned object), without treating the commit as unreadable', async () => {
+	// FINDING (readBlobOrThrow): once the tree listing already proved an
+	// Artifact entry exists as a blob (`type: 'blob'`), a follow-up
+	// `readBlob` reporting it `missing` (e.g. a pruned object) is
+	// repository/read corruption, not a legitimate absence -- silently
+	// excluding the Artifact from `snapshot.artifacts` would drop it from the
+	// materialized snapshot without a trace, leaving it invisible to
+	// `hasUndecodedArtifact` so validation/query could still look complete.
+	// Before this fix, this case was folded into the same `undefined` used
+	// for a genuinely absent path and the whole load reported `ok: true`.
+	it('reports read-error (not a silent omission) when a tree-listed artifact blob is reported missing', async () => {
 		const repo = fakeGitRepository({
 			readTree: async () => ({
 				kind: 'resolved',
@@ -439,13 +448,84 @@ describe('loadSnapshotFromCommit', () => {
 		})
 		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
 		expect(result.ok)
-			.toBe(true)
-		if (!result.ok)
-			return
-		expect(result.snapshot.artifacts)
-			.toEqual([])
-		expect(result.snapshot.configBytes)
-			.toBeUndefined()
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('read-error')
+		expect(result.ok === false && result.message)
+			.toContain('.engineering/req/REQ-001.md')
+	})
+
+	// Same defect, `not-a-blob` variant: the tree proved the path is a blob,
+	// but `readBlob` then reports the object it points at has a different
+	// actual type (e.g. a corrupted/rewritten repository). Still a read
+	// failure, never a legitimate absence.
+	it('reports read-error (not a silent omission) when a tree-listed artifact blob is reported not-a-blob', async () => {
+		const repo = fakeGitRepository({
+			readTree: async () => ({
+				kind: 'resolved',
+				entries: [
+					{ path: '.engineering', mode: '040000', oid: 'tree-oid', type: 'tree' },
+					{ path: '.engineering/req', mode: '040000', oid: 'tree-req-oid', type: 'tree' },
+					{ path: '.engineering/req/REQ-001.md', mode: '100644', oid: 'blob-oid-corrupt', type: 'blob' },
+				],
+			}),
+			readBlob: async (oid: string) => {
+				if (oid === 'blob-oid-corrupt')
+					return { kind: 'not-a-blob', actualType: 'tree' }
+				throw new Error(`unexpected oid: ${oid}`)
+			},
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('read-error')
+		expect(result.ok === false && result.message)
+			.toContain('.engineering/req/REQ-001.md')
+	})
+
+	// Same defect, config-file variant: the tree proved `.engineering/ef.yaml`
+	// exists as a blob, so a follow-up `missing` read must not be folded into
+	// `configBytes: undefined` as though the file were genuinely absent.
+	it('reports read-error (not a silently absent config) when a tree-listed ef.yaml blob is reported missing', async () => {
+		const repo = fakeGitRepository({
+			readTree: async () => ({
+				kind: 'resolved',
+				entries: [
+					{ path: '.engineering', mode: '040000', oid: 'tree-oid', type: 'tree' },
+					{ path: '.engineering/ef.yaml', mode: '100644', oid: 'blob-oid-missing', type: 'blob' },
+				],
+			}),
+			readBlob: async () => ({ kind: 'missing' }),
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('read-error')
+		expect(result.ok === false && result.message)
+			.toContain('.engineering/ef.yaml')
+	})
+
+	// Same defect, `not-a-blob` variant of the config-file case.
+	it('reports read-error (not a silently absent config) when a tree-listed ef.yaml blob is reported not-a-blob', async () => {
+		const repo = fakeGitRepository({
+			readTree: async () => ({
+				kind: 'resolved',
+				entries: [
+					{ path: '.engineering', mode: '040000', oid: 'tree-oid', type: 'tree' },
+					{ path: '.engineering/ef.yaml', mode: '100644', oid: 'blob-oid-corrupt', type: 'blob' },
+				],
+			}),
+			readBlob: async () => ({ kind: 'not-a-blob', actualType: 'tree' }),
+		})
+		const result = await loadSnapshotFromCommit(repo, 'a'.repeat(40))
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('read-error')
+		expect(result.ok === false && result.message)
+			.toContain('.engineering/ef.yaml')
 	})
 
 	it('rethrows a non-GitUnavailableError raised while materializing the commit tree', async () => {
