@@ -305,6 +305,45 @@ describe('computeHistory', () => {
 		}
 	})
 
+	it('succeeds for a complete first-parent chain even when the repository also has an unrelated shallow-fetched branch (GitRepository#listFirstParentHistory Finding B parity)', async () => {
+		// `git rev-parse --is-shallow-repository` is repository-wide: it is
+		// true whenever ANY shallow boundary exists anywhere, even on a branch
+		// unrelated to the one being queried. `listFirstParentHistory` used to
+		// consult that repo-wide flag *before* even attempting to walk
+		// `integrationRefOid`'s own history, so fetching in an unrelated
+		// shallow branch made every history query in this repository -- even
+		// one whose own history is completely available -- fail with
+		// `EF-QRY-010`. This proves `computeHistory` (and therefore the
+		// `EF-QRY-010` mapping it relies on) now only reports incomplete when
+		// the *queried* history is actually inaccessible, not merely when some
+		// unrelated shallow branch happens to exist in the same repository.
+		const otherSourceDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-other-source-')))
+		try {
+			git(otherSourceDir, ['init', '-q', '-b', 'main'])
+			await writeFile(otherSourceDir, 'a.txt', 'a\n')
+			commitAll(otherSourceDir, 'a')
+			await writeFile(otherSourceDir, 'b.txt', 'b\n')
+			const otherTip = commitAll(otherSourceDir, 'b')
+
+			git(tempDir, ['fetch', '-q', '--depth', '1', `file://${otherSourceDir}`, `main:refs/heads/unrelated-shallow-branch`])
+			expect(git(tempDir, ['rev-parse', '--is-shallow-repository'])
+				.trim())
+				.toBe('true')
+			expect(otherTip.length)
+				.toBeGreaterThan(0)
+
+			const outcome = await computeHistory(gitRepo(), oids.commit7!, 'PROJECT', 'project', new Map())
+			expect(outcome)
+				.not
+				.toBeUndefined()
+			expect(outcome!.commits.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(otherSourceDir, { recursive: true, force: true })
+		}
+	})
+
 	it('returns undefined when a historical commit tree cannot be resolved mid-walk', async () => {
 		const real = gitRepo()
 		const wrapped = wrapGitRepository(real, {

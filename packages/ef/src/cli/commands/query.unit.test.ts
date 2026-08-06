@@ -1,3 +1,4 @@
+import type { GitExecOutcome, GitExecutor } from '../../git/executor'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -5,6 +6,18 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runQueryCommand } from './query'
+
+/** Wraps a real executor, forcing failure for `execIn` calls matching `shouldFail`; every other call passes through unchanged. */
+function withSelectiveFailure(base: GitExecutor, shouldFail: (args: readonly string[]) => boolean, message: string): GitExecutor {
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: (root, args, options): Promise<GitExecOutcome> => {
+			if (shouldFail(args))
+				return Promise.resolve({ ok: false, failure: { kind: 'unavailable', message } })
+			return base.execIn(root, args, options)
+		},
+	}
+}
 
 const GIT_TEST_ENV = {
 	GIT_AUTHOR_NAME: 'EF Test',
@@ -261,6 +274,36 @@ describe('runQueryCommand', () => {
 			.toBe('PROJECT')
 		expect(json.data.commits)
 			.toEqual([{ oid: bootstrapOid, changed_paths: expect.arrayContaining(['.engineering/PROJECT.md']) }])
+	})
+
+	it('reports EF-QRY-010 with the underlying Git failure surfaced, not a generic message, when the integration-ref probe itself fails', async () => {
+		// `git show-ref` (used only by `GitRepository#resolveRef`) is forced to
+		// fail here, simulating the `'error'`/`'git-unavailable'` `RefResolutionResult`
+		// kinds -- distinct from the ref simply never having resolved
+		// (`'proven-absent'`, already covered by the sibling "no history context
+		// can be established" case above). Folding this distinct probe failure
+		// into a silently-absent history context previously produced the exact
+		// same generic "Required history context is unavailable." message as an
+		// ordinary unresolved ref, discarding the actual Git failure detail
+		// (parity with `validate.ts`'s `EF-VAL-006` messages, which do surface it).
+		await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
+		await writeFile(root, '.engineering/.gitignore', GITIGNORE)
+		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
+		commitAll(root, 'bootstrap')
+
+		const flakyExecutor = withSelectiveFailure(createGitExecutor(), args => args[0] === 'show-ref', 'stub: show-ref transiently unavailable')
+		const outcome = await runQueryCommand({ kind: 'history', id: 'PROJECT' }, { format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.data)
+			.toBeNull()
+		expect(json.diagnostics[0].code)
+			.toBe('EF-QRY-010')
+		expect(json.diagnostics[0].message)
+			.toContain('stub: show-ref transiently unavailable')
 	})
 
 	it('reports EF-QRY-013 (project-resolution failure envelope) when the project snapshot cannot be loaded', async () => {

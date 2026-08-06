@@ -243,6 +243,21 @@ function requiresChg(type: ArtifactType, before: Status | undefined, after: Stat
 // validateTransition
 // ---------------------------------------------------------------------------
 
+/**
+ * The OID that the baseline-fixed `integration_ref` resolved to when the
+ * integration operation began (`string`), `null` when that ref was PROVEN
+ * unresolved, or a probe-failure marker when the check that was supposed to
+ * establish either fact failed. The failure case is distinct from both and
+ * MUST NOT be treated as an ordinary ref mismatch (09-validation.md "An
+ * inaccessible ref ... makes the operation incomplete rather than eligible
+ * by assumption").
+ */
+export type OperationStartRefOid = string | null | { kind: 'ref-probe-error', message: string }
+
+function isRefProbeError(value: OperationStartRefOid): value is { kind: 'ref-probe-error', message: string } {
+	return typeof value === 'object' && value !== null
+}
+
 export interface ValidateTransitionInput {
 	git: GitRepository
 	/** Full commit OID of the trusted baseline (11-filesystem-and-config.md "Trusted transition baseline"). */
@@ -250,13 +265,11 @@ export interface ValidateTransitionInput {
 	/** Full commit OID of the explicit proposed commit; its first parent MUST be `baselineOid`. */
 	proposedOid: string
 	/**
-	 * The OID that the baseline-fixed `integration_ref` resolved to when the
-	 * integration operation began, or `null` when that ref was unresolved.
 	 * Mutable ref state is an explicit caller-supplied input rather than
 	 * re-resolved here (09-validation.md "Validation hooks": "operation-start
 	 * captured project-repository and local-ref state").
 	 */
-	operationStartRefOid: string | null
+	operationStartRefOid: OperationStartRefOid
 	policy?: ValidationPolicy
 }
 
@@ -320,6 +333,15 @@ export async function validateTransition(input: ValidateTransitionInput): Promis
 	const integrationRef = baselineConfig.repository.integrationRef
 
 	// ---- Verify operation-start ref state against the baseline ---------------
+
+	if (isRefProbeError(operationStartRefOid)) {
+		// A failed probe is neither a proven resolution nor a proven mismatch:
+		// it MUST make the run incomplete, never be misclassified as an
+		// ordinary baseline mismatch.
+		return incompleteResult([
+			makeDiagnostic('EF-VAL-006', `Git is unavailable while resolving the integration ref '${integrationRef}' at the start of the operation: ${operationStartRefOid.message}`),
+		], policy, { baselineOid: resolvedBaselineOid, integrationRef })
+	}
 
 	if (operationStartRefOid !== resolvedBaselineOid) {
 		return incompleteResult([

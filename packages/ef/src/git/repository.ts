@@ -111,7 +111,18 @@ function isFullOid(oid: string, hexLength: number): boolean {
 
 export type RefResolutionResult
 	= | { kind: 'resolved', oid: string }
-		| { kind: 'unresolved' }
+		/** `git show-ref --verify` exited `1`: the ref is PROVEN absent, not merely unprobed. */
+		| { kind: 'proven-absent' }
+		/**
+		 * `show-ref --verify` ran but exited with something other than `0`
+		 * (resolved) or `1` (proven absent) -- e.g. a corrupt ref database or
+		 * an unexpected usage error -- or exited `0` with unparseable output.
+		 * This is neither a resolved OID nor a proof of absence: a caller MUST
+		 * treat it as incomplete (09-validation.md "An inaccessible ref ...
+		 * makes the operation incomplete rather than eligible by assumption"),
+		 * never fall back to treating the ref as though it does not exist.
+		 */
+		| { kind: 'error', message: string }
 		| GitUnavailable
 
 // ---------------------------------------------------------------------------
@@ -369,16 +380,40 @@ class GitRepositoryImpl implements GitRepository {
 	}
 
 	async resolveRef(fullRef: string): Promise<RefResolutionResult> {
-		const outcome = await this.executor.execIn(this.root, ['show-ref', '--verify', '--', fullRef])
-		if (!outcome.ok)
-			return toGitUnavailable(outcome.failure)
-		if (outcome.result.exitCode !== 0)
-			return { kind: 'unresolved' }
-		const line = outcome.result.stdout.toString('utf8')
+		// `show-ref --verify` WITHOUT `--quiet` does not reliably use exit `1`
+		// for "ref does not exist" -- at least the installed Git prints a
+		// `fatal: '<ref>' - not a valid ref` message and exits `128` for a
+		// syntactically well-formed but simply missing ref, indistinguishable
+		// by exit code alone from a genuine execution/repository error. `-q`
+		// is documented to make a failed verify use exit `1` specifically, so
+		// existence is probed quietly first; the OID is fetched with a
+		// second, now-expected-to-succeed call only once existence is
+		// confirmed.
+		const verifyOutcome = await this.executor.execIn(this.root, ['show-ref', '--verify', '--quiet', '--', fullRef])
+		if (!verifyOutcome.ok)
+			return toGitUnavailable(verifyOutcome.failure)
+		const verifyExitCode = verifyOutcome.result.exitCode
+		if (verifyExitCode === 1)
+			return { kind: 'proven-absent' }
+		if (verifyExitCode !== 0) {
+			return { kind: 'error', message: `git show-ref --verify --quiet for '${fullRef}' exited with status ${verifyExitCode ?? 'null'}.` }
+		}
+
+		const resolveOutcome = await this.executor.execIn(this.root, ['show-ref', '--verify', '--', fullRef])
+		if (!resolveOutcome.ok)
+			return toGitUnavailable(resolveOutcome.failure)
+		if (resolveOutcome.result.exitCode !== 0) {
+			// The quiet probe just confirmed existence; a mismatched second
+			// read (e.g. the ref was deleted concurrently) is an
+			// execution/observation error, not a proof of absence.
+			return { kind: 'error', message: `git show-ref --verify for '${fullRef}' failed to confirm existence already reported by the quiet probe (status ${resolveOutcome.result.exitCode ?? 'null'}).` }
+		}
+		const line = resolveOutcome.result.stdout.toString('utf8')
 			.trim()
 		const oid = line.split(' ')[0]
-		if (!oid)
-			return { kind: 'unresolved' }
+		if (!oid) {
+			return { kind: 'error', message: `git show-ref --verify for '${fullRef}' exited 0 but produced no parseable output.` }
+		}
 		return { kind: 'resolved', oid }
 	}
 
@@ -437,15 +472,29 @@ class GitRepositoryImpl implements GitRepository {
 		return { kind: 'resolved', bytes: contentOutcome.result.stdout }
 	}
 
+	/**
+	 * Walks `commitish`'s first-parent ancestry (via `rev-list
+	 * --first-parent`) and only concludes `shallow` once that walk has
+	 * actually run out of visible history: the same precise boundary test
+	 * {@link pathExistsInFirstParentHistory} uses, applied here instead of a
+	 * repo-wide pre-check.
+	 *
+	 * `rev-parse --is-shallow-repository` is repository-wide: it is true when
+	 * ANY shallow boundary exists anywhere, even on a branch unrelated to
+	 * `commitish`, so consulting it *before* walking (as this method
+	 * previously did) wrongly reported `shallow` for a commitish whose own
+	 * first-parent chain is completely available and reaches a true root,
+	 * merely because some other branch in the same repository happens to be
+	 * shallow-fetched. A shallow graft hides a commit's parent from traversal
+	 * (`rev-list`) but `cat-file` still reports the object's true `parent`
+	 * header, so the walked chain's oldest (last) visible commit is inspected
+	 * with `cat-file` before concluding: a `parent` header proves a hidden
+	 * ancestor beyond a genuine shallow boundary; its absence proves the chain
+	 * actually ended at a true root commit, so this `commitish`'s history is
+	 * complete despite an unrelated shallow boundary existing elsewhere in the
+	 * same repository.
+	 */
 	async listFirstParentHistory(commitish: string): Promise<HistoryResult> {
-		const shallowOutcome = await this.executor.execIn(this.root, ['rev-parse', '--is-shallow-repository'])
-		if (!shallowOutcome.ok)
-			return toGitUnavailable(shallowOutcome.failure)
-		if (shallowOutcome.result.exitCode === 0 && shallowOutcome.result.stdout.toString('utf8')
-			.trim() === 'true') {
-			return { kind: 'shallow' }
-		}
-
 		const outcome = await this.executor.execIn(this.root, ['rev-list', '--first-parent', commitish])
 		if (!outcome.ok)
 			return toGitUnavailable(outcome.failure)
@@ -455,6 +504,30 @@ class GitRepositoryImpl implements GitRepository {
 			.split('\n')
 			.map(s => s.trim())
 			.filter(s => s.length > 0)
+
+		const oldestVisibleOid = oids[oids.length - 1]
+		if (oldestVisibleOid === undefined) {
+			// No commit was even walked; nothing to re-inspect for a hidden
+			// boundary, and an empty first-parent chain is not a shallow
+			// symptom on its own.
+			return { kind: 'complete', oids }
+		}
+
+		const boundaryOutcome = await this.executor.execIn(this.root, ['cat-file', '-p', oldestVisibleOid])
+		if (!boundaryOutcome.ok)
+			return toGitUnavailable(boundaryOutcome.failure)
+		if (boundaryOutcome.result.exitCode !== 0) {
+			// Cannot re-inspect a commit rev-list itself just reported; treat
+			// conservatively as an unproven (shallow) boundary.
+			return { kind: 'shallow' }
+		}
+		const text = boundaryOutcome.result.stdout.toString('utf8')
+		const headerEnd = text.indexOf('\n\n')
+		const header = headerEnd === -1 ? text : text.slice(0, headerEnd)
+		const hiddenParent = header.split('\n')
+			.some(line => line.startsWith('parent '))
+		if (hiddenParent)
+			return { kind: 'shallow' }
 		return { kind: 'complete', oids }
 	}
 
@@ -469,9 +542,20 @@ class GitRepositoryImpl implements GitRepository {
 	 * never appeared in a hidden ancestor beyond it
 	 * (09-validation.md Bootstrap exception: "An inaccessible ref or
 	 * required history makes the operation incomplete rather than eligible
-	 * by assumption."). When no visible commit's tree contains `path`, the
-	 * repository's shallowness is checked before concluding absence: a
-	 * shallow repository reports `shallow` instead of `not-found`.
+	 * by assumption.").
+	 *
+	 * `rev-parse --is-shallow-repository` is repository-wide: it is true when
+	 * ANY shallow boundary exists anywhere, even on a branch unrelated to
+	 * `startOid`, so it is used only as a fast path that decides whether the
+	 * precise boundary test below is worth running -- never as the
+	 * conclusion itself. A shallow graft hides a commit's parent from
+	 * traversal (`rev-list`) but `cat-file` still reports the object's true
+	 * `parent` header, so the walked chain's last visible commit is
+	 * re-inspected with `cat-file` before concluding `shallow`: a `parent`
+	 * header proves a hidden ancestor (genuine boundary); its absence proves
+	 * the chain actually ended at a true root commit, so absence over the
+	 * entire first-parent history is proven despite an unrelated shallow
+	 * boundary existing elsewhere in the same repository.
 	 */
 	async pathExistsInFirstParentHistory(startOid: string, path: string): Promise<PathHistoryResult> {
 		const listOutcome = await this.executor.execIn(this.root, ['rev-list', '--first-parent', startOid])
@@ -495,12 +579,32 @@ class GitRepositoryImpl implements GitRepository {
 		const shallowOutcome = await this.executor.execIn(this.root, ['rev-parse', '--is-shallow-repository'])
 		if (!shallowOutcome.ok)
 			return toGitUnavailable(shallowOutcome.failure)
-		if (shallowOutcome.result.exitCode === 0 && shallowOutcome.result.stdout.toString('utf8')
-			.trim() === 'true') {
+		const repositoryHasAnyShallowBoundary = shallowOutcome.result.exitCode === 0 && shallowOutcome.result.stdout.toString('utf8')
+			.trim() === 'true'
+		if (!repositoryHasAnyShallowBoundary)
+			return { kind: 'not-found' }
+
+		const lastVisibleOid = oids[oids.length - 1]
+		if (lastVisibleOid === undefined) {
+			// No commit was even walked; nothing to re-inspect, so defer to
+			// the repo-wide flag conservatively.
 			return { kind: 'shallow' }
 		}
 
-		return { kind: 'not-found' }
+		const boundaryOutcome = await this.executor.execIn(this.root, ['cat-file', '-p', lastVisibleOid])
+		if (!boundaryOutcome.ok)
+			return toGitUnavailable(boundaryOutcome.failure)
+		if (boundaryOutcome.result.exitCode !== 0) {
+			// Cannot re-inspect a commit rev-list itself just reported;
+			// treat conservatively as an unproven (shallow) boundary.
+			return { kind: 'shallow' }
+		}
+		const text = boundaryOutcome.result.stdout.toString('utf8')
+		const headerEnd = text.indexOf('\n\n')
+		const header = headerEnd === -1 ? text : text.slice(0, headerEnd)
+		const hiddenParent = header.split('\n')
+			.some(line => line.startsWith('parent '))
+		return hiddenParent ? { kind: 'shallow' } : { kind: 'not-found' }
 	}
 
 	async diffTrees(beforeOid: string, afterOid: string): Promise<DiffTreesResult> {

@@ -181,6 +181,29 @@ describe('computeInitPlan', () => {
 			.toEqual({ ok: false, reason: 'git-unavailable', message: 'git is not installed' })
 	})
 
+	// FINDING A regression: a fatal ref-resolution probe failure (Git ran but
+	// could not conclusively determine whether `integration_ref` exists --
+	// distinct from `git-unavailable`, where Git could not even be run) must
+	// make the plan incomplete, not be silently treated as though the ref
+	// simply does not exist (which would let bootstrap proceed by assumption
+	// instead of reporting incomplete, per 09-validation.md "An inaccessible
+	// ref ... makes the operation incomplete rather than eligible by
+	// assumption").
+	it('rejects with history-incomplete (not accepting-by-assumption) when the ref-resolution probe reports an execution error', async () => {
+		const deps: ComputeInitPlanDeps = {
+			findWorktreeRoot: async () => ({ kind: 'found', root: tempDir }),
+			resolveRef: async () => ({ kind: 'error', message: 'git show-ref --verify --quiet exited with status 128.' }),
+			pathExistsInFirstParentHistory: () => { throw new Error('must not be called') },
+		}
+		const result = await computeInitPlan({ targetRoot: tempDir, values: BASE_VALUES }, deps)
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('history-incomplete')
+		expect(result.ok === false && result.message)
+			.toContain(BASE_VALUES.integrationRef)
+	})
+
 	it('propagates git-unavailable from the first-parent history check', async () => {
 		await fs.writeFile(path.join(tempDir, 'README.md'), '# Test\n')
 		commitAll(tempDir, 'seed commit')

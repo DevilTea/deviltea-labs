@@ -93,10 +93,23 @@ export interface SnapshotValidationResult {
 	 * `false` when a parse/identity/layout condition prevents ANY query
 	 * result over this snapshot from being complete and trustworthy
 	 * (10-query-and-trace.md "Invalid Graph and Partial Results"): an
-	 * Artifact file failed to decode, an ID is ambiguous (duplicate or
-	 * PROJECT-singleton), or a layout entry could itself be an unparsed
-	 * Artifact (`EF-FS-003`). Callers building a `QueryContext` gate every
-	 * query kind -- including exact lookup -- on this.
+	 * Artifact file failed to decode, a layout entry could itself be an
+	 * unparsed Artifact (`EF-FS-003`), or one of the identity findings whose
+	 * ID/graph-membership consequence is untrustworthy rather than merely
+	 * cosmetic -- `EF-ID-001`/`002`/`003` (the declared ID itself is
+	 * malformed, wrong-prefix, or non-canonical, so whatever this file
+	 * contributes to the graph is keyed on a fact that is not truly its ID),
+	 * `EF-ID-004`/`006` (duplicate ID / PROJECT-singleton ambiguity), or
+	 * `EF-ID-007`/`008` (PROJECT missing, or present under the wrong ID, so
+	 * required project context is absent from the graph exactly as if no
+	 * PROJECT existed). `EF-ID-005` (filename does not match ID) and
+	 * `EF-ID-014` (file outside its canonical directory) do NOT gate: the
+	 * declared ID itself is unique and decoded correctly in both cases, so
+	 * `byId` and its dependent indexes remain trustworthy even though the
+	 * file/layout convention is violated (that violation is reported on its
+	 * own merits, independent of query trustworthiness). Callers building a
+	 * `QueryContext` gate every query kind -- including exact lookup -- on
+	 * this.
 	 */
 	graphTrustworthy: boolean
 }
@@ -155,6 +168,32 @@ function fileStateFor(kind: SnapshotEntryKind | undefined): LocalResourceFileSta
 
 function isExternalLocation(location: string): boolean {
 	return location.startsWith('http://') || location.startsWith('https://')
+}
+
+/**
+ * Whether `location` is a syntactically valid LOCAL Resource location
+ * (06-resources.md "Location classification"/"Local path resolution"): not
+ * an external HTTP(S) URL, no other URI scheme, no backslash, does not
+ * escape the project root, and has no empty/`.`/`..` path segment. Narrowly
+ * mirrors `domain/resources.ts`'s own `analyzeLocation` local-valid branch --
+ * duplicated as a small yes/no predicate here (rather than imported) because
+ * this module only needs the local-ownership question, not that function's
+ * full classification result.
+ *
+ * 06-resources.md "External URLs do not have exclusive ownership. The same
+ * URL MAY appear once in each of multiple Artifacts.": only a location this
+ * predicate accepts may participate in cross-Artifact ownership tracking
+ * (`EF-RES-009`) below.
+ */
+function isValidLocalLocation(location: string): boolean {
+	if (location.length === 0 || isExternalLocation(location))
+		return false
+	if (location.includes(':') || location.includes('\\'))
+		return false
+	if (location.startsWith('/') || location.startsWith('~'))
+		return false
+	return !location.split('/')
+		.some(segment => segment === '' || segment === '.' || segment === '..')
 }
 
 /**
@@ -335,7 +374,14 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 			if (resource.location.length === 0)
 				continue
 			declaredLocations.add(resource.location)
-			ownershipEntries.push({ artifactId: outcome.envelope.id, path: outcome.path, location: resource.location })
+			// Only a syntactically valid LOCAL location is exclusively owned
+			// (06-resources.md); an external URL, or the same URL declared by
+			// several Artifacts, must not be reported as EF-RES-009. The
+			// within-one-Artifact duplicate-location check (`EF-RES-008`)
+			// already covers every location -- local or external -- inside
+			// `validateResourceDescriptors` and is unaffected by this filter.
+			if (isValidLocalLocation(resource.location))
+				ownershipEntries.push({ artifactId: outcome.envelope.id, path: outcome.path, location: resource.location })
 			localFileEntries.push({ artifactId: outcome.envelope.id, path: outcome.path, location: resource.location })
 		}
 	}
@@ -371,9 +417,28 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	const symlinkFacts: SymlinkFact[] = symlinkPaths.map(p => ({ path: p, isSymlink: snapshot.entryKinds.get(p) === 'symlink' }))
 	diagnostics.push(...checkManagedSymlinks(symlinkFacts))
 
+	// 11-filesystem-and-config.md "exact filesystem case": resolve each
+	// declared local Resource location to its discovered case-preserving path
+	// -- already captured, verbatim from the walked filesystem, as
+	// `snapshot.entryKinds`' keys -- so `checkPathNormalization` can compare
+	// declared case against actual case and report `EF-FS-006` for a
+	// wrong-case descriptor, instead of that mismatch only ever surfacing (if
+	// at all) as an ordinary EF-RES-006 "missing" finding. Artifact files
+	// need no such resolution: `snapshot.artifacts[].path` already IS the
+	// walked, case-preserving path used to read them.
+	const discoveredPathsByLowercase = new Map<string, string>()
+	for (const discoveredPath of snapshot.entryKinds.keys()) {
+		const key = discoveredPath.toLowerCase()
+		if (!discoveredPathsByLowercase.has(key))
+			discoveredPathsByLowercase.set(key, discoveredPath)
+	}
+	function resolveActualPath(location: string): string | undefined {
+		return discoveredPathsByLowercase.get(location.toLowerCase())
+	}
+
 	const pathNormalizationEntries: PathNormalizationEntry[] = [
 		...snapshot.artifacts.map(a => ({ path: a.path })),
-		...localResourceLocations.map(location => ({ path: location })),
+		...localResourceLocations.map(location => ({ path: location, actualPath: resolveActualPath(location) })),
 	]
 	diagnostics.push(...checkPathNormalization(pathNormalizationEntries))
 
@@ -391,13 +456,45 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 
 	// 10-query-and-trace.md "Invalid Graph and Partial Results": a query
 	// result is untrustworthy whenever an error condition prevented an
-	// Artifact file from being decoded (`hasUndecodedArtifact`), made an ID
-	// ambiguous (`EF-ID-004`; `EF-ID-006` for the analogous PROJECT-singleton
-	// case), or flagged a layout entry that could itself be an unparsed
-	// Artifact (`EF-FS-003`). Every other diagnostic (body-schema, resource,
-	// ordering warnings, ...) leaves every already-decoded Artifact in the
-	// graph and does not affect this.
-	const hasBlockingIdentityOrLayoutFinding = diagnostics.some(d => d.code === 'EF-ID-004' || d.code === 'EF-ID-006' || d.code === 'EF-FS-003')
+	// Artifact file from being decoded (`hasUndecodedArtifact`), flagged a
+	// layout entry that could itself be an unparsed Artifact (`EF-FS-003`),
+	// or made the graph's identity/membership facts themselves untrustworthy:
+	//
+	// - `EF-ID-004` (duplicate ID) / `EF-ID-006` (more than one PROJECT):
+	//   ambiguity -- graph validation deliberately excludes the colliding
+	//   ID from `byId` rather than picking one file, so any query result
+	//   naming or omitting it would be a guess.
+	// - `EF-ID-007` (no PROJECT Artifact) / `EF-ID-008` (PROJECT declares an
+	//   ID other than `PROJECT`): required PROJECT context is absent from the
+	//   graph. Without this, `lookup PROJECT` would return the ordinary
+	//   `complete: true, found: false` result and `list`/`search` would
+	//   return an otherwise-"complete" collection, even though mandatory
+	//   project context never loaded.
+	// - `EF-ID-001`/`002`/`003` (ID missing/malformed, wrong type prefix, or
+	//   non-canonical numeric component): the file's own declared identity is
+	//   defective, so whatever it contributed to `byId`/relation/supersession
+	//   indexes is keyed on a fact that was never truly its ID -- the same
+	//   graph-membership untrustworthiness `EF-ID-004`/`006` already gate on.
+	//
+	// `EF-ID-005` (filename does not match ID) and `EF-ID-014` (file outside
+	// its canonical directory) are deliberately excluded: in both cases the
+	// declared ID itself is unique and decoded correctly, so `byId` and every
+	// dependent index remain trustworthy even though the file/layout
+	// convention is violated -- that violation is reported on its own merits
+	// and does not need to block every query kind. Every other diagnostic
+	// (body-schema, resource, ordering warnings, ...) likewise leaves every
+	// already-decoded Artifact in the graph and does not affect this.
+	const BLOCKING_IDENTITY_OR_LAYOUT_CODES = new Set<string>([
+		'EF-ID-001',
+		'EF-ID-002',
+		'EF-ID-003',
+		'EF-ID-004',
+		'EF-ID-006',
+		'EF-ID-007',
+		'EF-ID-008',
+		'EF-FS-003',
+	])
+	const hasBlockingIdentityOrLayoutFinding = diagnostics.some(d => BLOCKING_IDENTITY_OR_LAYOUT_CODES.has(d.code))
 	const graphTrustworthy = !hasUndecodedArtifact && !hasBlockingIdentityOrLayoutFinding
 
 	return {
