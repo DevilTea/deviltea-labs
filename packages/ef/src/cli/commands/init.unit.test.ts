@@ -370,6 +370,66 @@ describe('runInitCommand', () => {
 			.toBe(true)
 	})
 
+	it('suggests the resolved target root\'s current branch, not the CWD\'s, when --project points to a different worktree (two-worktree regression)', async () => {
+		// 13-cli-contract.md "Project Initialization": interactive init MAY
+		// suggest the currently checked-out branch _of the target_, and MUST
+		// display the full `refs/heads/...` value. With `ef init --project B`
+		// invoked while CWD is A, the branch-suggestion probe must run
+		// against resolved target root B, not process CWD A -- otherwise A's
+		// branch name could be suggested and persisted into B's
+		// immutable-after-bootstrap `integration_ref`.
+		git(root, ['checkout', '-q', '-b', 'branch-a'])
+		await fs.writeFile(path.join(root, 'a.txt'), 'a\n')
+		git(root, ['add', '-A'])
+		git(root, ['commit', '-q', '-m', 'commit on branch-a'])
+
+		const otherRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-init-other-')))
+		try {
+			execFileSync('git', ['init', '-q', '-b', 'branch-b', otherRoot])
+			await fs.writeFile(path.join(otherRoot, 'b.txt'), 'b\n')
+			git(otherRoot, ['add', '-A'])
+			git(otherRoot, ['commit', '-q', '-m', 'commit on branch-b'])
+
+			let suggestionMessage: string | undefined
+			const prompts: Prompts = {
+				intro: () => {},
+				outro: () => {},
+				note: () => {},
+				text: async () => { throw new Error('unexpected text prompt') },
+				confirm: async (opts) => {
+					if (opts.message.includes('integration ref')) {
+						suggestionMessage = opts.message
+						return true
+					}
+					if (opts.message.includes('Terminology'))
+						return false
+					throw new Error(`unexpected confirm prompt: ${opts.message}`)
+				},
+				confirmMutation: async () => true,
+			}
+
+			const outcome = await runInitCommand(
+				{ format: 'human', noColor: true, noInput: false, dryRun: false, yes: false, project: otherRoot, values: { ...VALUES, integrationRef: undefined } },
+				{ cwd: root, executor: createGitExecutor(), prompts },
+			)
+
+			expect(outcome.exitCode)
+				.toBe(0)
+			expect(suggestionMessage)
+				.toContain('refs/heads/branch-b')
+			expect(suggestionMessage)
+				.not.toContain('branch-a')
+			await expect(fs.stat(path.join(otherRoot, '.engineering', 'ef.yaml'))).resolves.toBeTruthy()
+			const persistedConfig = await fs.readFile(path.join(otherRoot, '.engineering', 'ef.yaml'), 'utf8')
+			expect(persistedConfig)
+				.toContain('refs/heads/branch-b')
+			await expect(fs.stat(path.join(root, '.engineering'))).rejects.toThrow()
+		}
+		finally {
+			await fs.rm(otherRoot, { recursive: true, force: true })
+		}
+	})
+
 	// ---- Terminology collection edge cases ---------------------------------------
 
 	it('skips the Terminology prompt entirely when terminology is already provided, and preserves it verbatim', async () => {
@@ -436,6 +496,43 @@ describe('runInitCommand', () => {
 			.toBe('EF-VAL-006')
 		expect(json.diagnostics[0].message)
 			.toContain('stub: git unavailable')
+	})
+
+	it('exits 2 with EF-VAL-007 (history-incomplete) for a real shallow clone whose visible history hides an earlier .engineering/ef.yaml', async () => {
+		// 09-validation.md Bootstrap exception: an inaccessible/incomplete
+		// history makes the operation incomplete, not eligible by
+		// assumption. Build a real shallow clone (not a stub) so the
+		// regression exercises the actual shallow-repository detection: an
+		// early commit had `.engineering/ef.yaml`, a later commit removed
+		// it, and only that later commit is fetched by the shallow clone.
+		await fs.mkdir(path.join(root, '.engineering'), { recursive: true })
+		await fs.writeFile(path.join(root, '.engineering', 'ef.yaml'), 'schema: ef/config@1\n')
+		git(root, ['add', '-A'])
+		git(root, ['commit', '-q', '-m', 'bootstrap (hidden ancestor)'])
+		git(root, ['rm', '-rq', '.engineering'])
+		git(root, ['commit', '-q', '-m', 'remove ef.yaml before the shallow boundary'])
+
+		const shallowDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-init-shallow-')))
+		await fs.rm(shallowDir, { recursive: true, force: true })
+		execFileSync('git', ['clone', '-q', '--depth', '1', `file://${root}`, shallowDir], { stdio: 'pipe' })
+
+		try {
+			const outcome = await runInitCommand(
+				baseOptions({ yes: true, project: shallowDir }),
+				{ cwd: shallowDir, executor: createGitExecutor(), prompts: neverPrompts() },
+			)
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-007')
+			expect(await fs.stat(path.join(shallowDir, '.engineering'))
+				.then(() => true, () => false))
+				.toBe(false)
+		}
+		finally {
+			await fs.rm(shallowDir, { recursive: true, force: true })
+		}
 	})
 
 	it('exits 2 (missing-value) when title is non-blank but contains a newline', async () => {

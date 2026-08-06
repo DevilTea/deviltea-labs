@@ -116,6 +116,7 @@ export type ComputeInitPlanFailureReason
 		| 'not-a-worktree-root'
 		| 'git-unavailable'
 		| 'history-contains-ef-state'
+		| 'history-incomplete'
 		| 'invalid-plan'
 
 export interface ComputeInitPlanFailure {
@@ -258,6 +259,13 @@ export async function computeInitPlan(input: ComputeInitPlanInput, deps: Compute
 		const historyResult = await deps.pathExistsInFirstParentHistory(refResult.oid, '.engineering/ef.yaml')
 		if (historyResult.kind === 'git-unavailable')
 			return { ok: false, reason: 'git-unavailable', message: historyResult.message }
+		if (historyResult.kind === 'shallow') {
+			return {
+				ok: false,
+				reason: 'history-incomplete',
+				message: `'${values.integrationRef}' resolves in a shallow repository; its first-parent history cannot be completely inspected for '.engineering/ef.yaml', so absence cannot be established.`,
+			}
+		}
 		if (historyResult.kind === 'found') {
 			return {
 				ok: false,

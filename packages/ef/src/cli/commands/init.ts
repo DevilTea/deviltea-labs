@@ -105,7 +105,7 @@ async function detectCurrentBranch(executor: GitExecutor, root: string): Promise
 	return name.length > 0 ? name : undefined
 }
 
-async function collectValuesInteractively(options: InitCommandOptions, deps: InitCommandDeps): Promise<InitValues | undefined> {
+async function collectValuesInteractively(options: InitCommandOptions, deps: InitCommandDeps, targetRoot: string): Promise<InitValues | undefined> {
 	const collected: Partial<InitValues> = { ...options.values }
 
 	for (const field of REQUIRED_FIELDS) {
@@ -113,7 +113,7 @@ async function collectValuesInteractively(options: InitCommandOptions, deps: Ini
 			continue
 
 		if (field === 'integrationRef') {
-			const branch = await detectCurrentBranch(deps.executor, deps.cwd)
+			const branch = await detectCurrentBranch(deps.executor, targetRoot)
 			if (branch !== undefined) {
 				const fullRef = `refs/heads/${branch}`
 				const confirmed = await deps.prompts.confirm({ message: `Use '${fullRef}' as the integration ref?`, initialValue: false })
@@ -190,7 +190,7 @@ export async function runInitCommand(options: InitCommandOptions, deps: InitComm
 	}
 	else {
 		deps.prompts.intro('ef init')
-		const collected = await collectValuesInteractively(options, deps)
+		const collected = await collectValuesInteractively(options, deps, targetRoot)
 		if (collected === undefined) {
 			deps.prompts.outro('Cancelled.')
 			return earlyFailure(options, 2, 'EF-VAL-001', 'Interactive initialization was cancelled.')
@@ -210,6 +210,8 @@ export async function runInitCommand(options: InitCommandOptions, deps: InitComm
 				return earlyFailure(options, 2, 'EF-VAL-006', planResult.message)
 			case 'history-contains-ef-state':
 				return earlyFailure(options, 1, 'EF-VAL-009', planResult.message)
+			case 'history-incomplete':
+				return earlyFailure(options, 2, 'EF-VAL-007', planResult.message)
 			case 'invalid-plan':
 				return mutationOutcome(options, 1, {
 					complete: true,

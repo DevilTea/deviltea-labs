@@ -237,6 +237,9 @@ async function checkNoPriorEfState(git: GitRepository, startOid: string): Promis
 		return { kind: 'incomplete', code: 'EF-VAL-006', message: `Git is unavailable while checking bootstrap history: ${result.message}` }
 	if (result.kind === 'unresolved')
 		return { kind: 'incomplete', code: 'EF-VAL-011', message: `Commit '${startOid}' could not be walked to establish the bootstrap history condition.` }
+	if (result.kind === 'shallow') {
+		return { kind: 'incomplete', code: 'EF-VAL-007', message: `Commit '${startOid}' is in a shallow repository; its first-parent history cannot be completely inspected to establish the bootstrap history condition.` }
+	}
 	if (result.kind === 'found')
 		return { kind: 'found', commitOid: result.commitOid }
 	return { kind: 'not-found' }

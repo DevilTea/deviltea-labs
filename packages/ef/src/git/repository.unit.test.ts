@@ -629,6 +629,48 @@ describe('gitRepository', () => {
 			expect(result)
 				.toEqual({ kind: 'not-found' })
 		})
+
+		it('reports shallow (not not-found) when the path is absent from the visible history of a shallow clone but was present in a hidden ancestor', async () => {
+			// The bootstrap history condition (09-validation.md "Bootstrap
+			// exception") requires proving absence over *complete* history. A
+			// shallow clone's visible first-parent chain silently stops at the
+			// shallow boundary: the path existed in an early commit that the
+			// shallow clone never fetched, and was removed before the tip, so
+			// the visible history alone would wrongly look clean.
+			const source = initRepo()
+			writeTrackedFile(source, '.engineering/ef.yaml', 'schema: ef/config@1\n')
+			commitAll(source, 'bootstrap (hidden ancestor)')
+			execFileSync('git', ['rm', '-q', '.engineering/ef.yaml'], { cwd: source })
+			const head = commitAll(source, 'remove ef.yaml before the shallow boundary')
+
+			const shallowDir = mkdtempSync(join(tmpdir(), 'ef-git-shallow-path-'))
+			rmSync(shallowDir, { recursive: true, force: true })
+			execFileSync('git', ['clone', '-q', '--depth', '1', `file://${source}`, shallowDir], { stdio: 'pipe' })
+			tempDirs.push(shallowDir)
+			tempDirs.push(source)
+
+			const result = await repo(shallowDir)
+				.pathExistsInFirstParentHistory(head, '.engineering/ef.yaml')
+			expect(result)
+				.toEqual({ kind: 'shallow' })
+		})
+
+		it('still reports found in a shallow clone when the path is present in the visible tip tree (no need to consult hidden history)', async () => {
+			const source = initRepo()
+			writeTrackedFile(source, '.engineering/ef.yaml', 'schema: ef/config@1\n')
+			const head = commitAll(source, 'bootstrap')
+
+			const shallowDir = mkdtempSync(join(tmpdir(), 'ef-git-shallow-path-found-'))
+			rmSync(shallowDir, { recursive: true, force: true })
+			execFileSync('git', ['clone', '-q', '--depth', '1', `file://${source}`, shallowDir], { stdio: 'pipe' })
+			tempDirs.push(shallowDir)
+			tempDirs.push(source)
+
+			const result = await repo(shallowDir)
+				.pathExistsInFirstParentHistory(head, '.engineering/ef.yaml')
+			expect(result)
+				.toEqual({ kind: 'found', commitOid: head })
+		})
 	})
 
 	// -------------------------------------------------------------------------
@@ -873,6 +915,13 @@ describe('gitRepository', () => {
 
 		it('pathExistsInFirstParentHistory propagates git-unavailable from an in-loop ls-tree call', async () => {
 			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), unavailableOutcome('no git')]))
+				.pathExistsInFirstParentHistory('main', 'x')
+			expect(result)
+				.toEqual({ kind: 'git-unavailable', message: 'no git' })
+		})
+
+		it('pathExistsInFirstParentHistory propagates git-unavailable from the post-loop shallow check', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('abc123\n'), okOutcome('', 1), unavailableOutcome('no git')]))
 				.pathExistsInFirstParentHistory('main', 'x')
 			expect(result)
 				.toEqual({ kind: 'git-unavailable', message: 'no git' })
