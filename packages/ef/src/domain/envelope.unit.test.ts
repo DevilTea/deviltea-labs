@@ -901,7 +901,12 @@ resources: []
 	})
 
 	describe('duplicate mapping keys (owned upstream by EF-ENV-005, not this module)', () => {
-		it('uses the last value for a duplicated core field without emitting its own diagnostic', () => {
+		it('uses the first value for a duplicated core field without emitting its own diagnostic', () => {
+			// First-occurrence-wins so this module's own field selection agrees
+			// with `snapshot-raw-fields.ts#rawArrayField`'s duplicate-key
+			// selection (also first-match), rather than the two silently
+			// disagreeing about which declared value/array is authoritative
+			// (fifth-round Finding 5).
 			const source = `schema: ef/requirement@1
 type: requirement
 id: REQ-031
@@ -916,9 +921,37 @@ resources: []
 			const { envelope, diagnostics } = decode(source)
 
 			expect(envelope?.status)
-				.toBe('active')
+				.toBe('draft')
 			expect(diagnostics)
 				.toEqual([])
+		})
+
+		it('agrees with rawArrayField\'s first-match selection for a duplicated relations array', () => {
+			// Regression for Finding 5: before the fix, `collectFields` kept the
+			// LAST 'relations' key while `rawArrayField` (snapshot-raw-fields.ts)
+			// reads the FIRST matching pair -- so the decoded envelope
+			// (projected verbatim by lookup/list/search) and the raw array fed to
+			// `validateRelationEntries`/graph-index construction disagreed about
+			// which declared array was authoritative.
+			const source = `schema: ef/requirement@1
+type: requirement
+id: REQ-031
+title: Search Result Filtering
+status: active
+summary: Search results must support filtering by supported criteria.
+tags: []
+relations:
+  - type: references
+    target: FIRST-TARGET
+relations:
+  - type: references
+    target: SECOND-TARGET
+resources: []
+`
+			const { envelope } = decode(source)
+
+			expect(envelope?.relations)
+				.toEqual([{ type: 'references', target: 'FIRST-TARGET', extensions: {} }])
 		})
 	})
 

@@ -149,6 +149,56 @@ describe('discoverProject (isolated, fake git)', () => {
 			.toEqual({ kind: 'not-project-worktree-root', root: tempDir })
 	})
 
+	// FINDING 1 (discovery.ts): `pathExists` only proves an entry exists via
+	// `lstat`; the previous implementation then called `readFile` on
+	// `ef.yaml`'s path, which follows a symlink at the final component. A
+	// project whose `.engineering/ef.yaml` is a symlink to a file outside the
+	// project root would have that external file's content silently decoded
+	// and used for worktree/linked-repository association, before the
+	// (separate) snapshot validator could ever report `EF-FS-004`.
+	describe('a symlinked ef.yaml pointing outside the project root', () => {
+		let outsideDir: string
+		let outsideConfigPath: string
+
+		beforeEach(async () => {
+			outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-outside-')))
+			outsideConfigPath = path.join(outsideDir, 'config.yaml')
+			await fs.writeFile(outsideConfigPath, SINGLE_REPO_YAML)
+		})
+
+		afterEach(async () => {
+			await fs.rm(outsideDir, { recursive: true, force: true })
+		})
+
+		it('refuses to follow it and read the external config (explicit discovery)', async () => {
+			const engineeringDir = path.join(tempDir, '.engineering')
+			await fs.mkdir(engineeringDir, { recursive: true })
+			await fs.symlink(outsideConfigPath, path.join(engineeringDir, 'ef.yaml'))
+			const deps: DiscoverProjectDeps = { findWorktreeRoot: async () => foundAt(tempDir) }
+
+			const result = await discoverProject({ cwd: tempDir, explicitRoot: tempDir }, deps)
+
+			expect(result.kind)
+				.toBe('read-error')
+			expect(result.kind === 'resolved')
+				.toBe(false)
+		})
+
+		it('refuses to follow it and read the external config (implicit discovery)', async () => {
+			const engineeringDir = path.join(tempDir, '.engineering')
+			await fs.mkdir(engineeringDir, { recursive: true })
+			await fs.symlink(outsideConfigPath, path.join(engineeringDir, 'ef.yaml'))
+			const deps: DiscoverProjectDeps = { findWorktreeRoot: async () => foundAt(tempDir) }
+
+			const result = await discoverProject({ cwd: tempDir }, deps)
+
+			expect(result.kind)
+				.toBe('read-error')
+			expect(result.kind === 'resolved')
+				.toBe(false)
+		})
+	})
+
 	it('propagates git-unavailable from the project-root worktree check', async () => {
 		const engineeringDir = path.join(tempDir, '.engineering')
 		await fs.mkdir(engineeringDir, { recursive: true })

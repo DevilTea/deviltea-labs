@@ -44,6 +44,8 @@ import {
 	validateResourceOwnership,
 } from '../domain/resources'
 import { resolveCurrent, validateSupersessionGraph } from '../domain/supersession'
+import { splitFrontmatter } from '../parsing/frontmatter'
+import { detectInvalidUtf8 } from '../platform/text-checks'
 import { checkManagedSymlinks, managedSymlinkPaths } from '../repository/symlinks'
 import { checkPathNormalization, checkTextNormalization } from '../repository/text-normalization'
 import { rawArrayField } from './snapshot-raw-fields'
@@ -137,6 +139,18 @@ export interface SnapshotValidationResult {
 	 * `relationExtensionLossArtifactIds` and folded into
 	 * `projectionLossArtifactIds` instead.
 	 *
+	 * Also includes an Artifact whose top-level `relations` key (or a key
+	 * nested within one `relations[i]` entry) is duplicated (`EF-ENV-005`,
+	 * duplicate-key trust-scope adjudication): the file declares two
+	 * conflicting candidate arrays for its own outgoing relations, and
+	 * 01-artifact-envelope.md forbids resolving to either, so the actual
+	 * outgoing edge set this Artifact declares could not be reliably
+	 * determined -- the same graph-traversal-untrustworthy fact as an entry
+	 * sanitized away by `validateRelationEntries` itself, gated the same
+	 * direction-aware way (unlike an `id`/`type` duplicate, which makes the
+	 * Artifact's own IDENTITY uncertain and so blocks `graphTrustworthy`
+	 * project-wide instead -- see `envelopeStructuralLossArtifactIds`'s doc).
+	 *
 	 * `EF-REL-003` (dangling relation target) is deliberately NOT one of the
 	 * codes tracked here either: it is a graph-integrity finding about a
 	 * PRESENT, fully-sanitized entry whose target does not exist, already
@@ -178,6 +192,19 @@ export interface SnapshotValidationResult {
 	 */
 	tagLossArtifactIds: ReadonlySet<string>
 	/**
+	 * Artifact IDs with an `EF-ENV-007` (top-level `x-*` extension: an
+	 * unnamespaced field name, entirely dropped rather than kept -- see
+	 * `domain/envelope.ts`'s unknown-field classification -- or a non-finite
+	 * numeric value) or `EF-RES-019` (a Resource `x-*` extension or unknown
+	 * field with the same two failure modes) finding. A non-finite number is
+	 * preserved verbatim in memory (`nodeToPlainValue`'s doc), but every
+	 * JSON-based consumer of a query result -- the CLI's own output --
+	 * silently launders it to `null` at serialization time (`JSON.stringify`),
+	 * so this Artifact's projection is untrustworthy either way (seventh-round
+	 * Finding 7).
+	 */
+	extensionValueLossArtifactIds: ReadonlySet<string>
+	/**
 	 * Artifact IDs with an envelope-wide loss that can corrupt any of its
 	 * core fields (not only relations/resources/tags): `EF-ENV-005` (a
 	 * duplicate mapping key anywhere in the frontmatter -- the parser keeps
@@ -192,18 +219,143 @@ export interface SnapshotValidationResult {
 	 */
 	envelopeWideLossArtifactIds: ReadonlySet<string>
 	/**
+	 * Artifact IDs (by their own declared, first-occurrence-selected `id`)
+	 * whose frontmatter has an `EF-ENV-005` duplicate mapping key on `id` or
+	 * `type` -- the two fields that determine this file's own identity and
+	 * graph membership. `domain/envelope.ts`'s field selection is
+	 * deterministic (first occurrence wins, matching `rawArrayField`'s own
+	 * selection -- fifth-round Finding 5), but the file itself remains invalid
+	 * regardless of which declared value wins: "MUST NOT resolve to either"
+	 * per 01-artifact-envelope.md ("Duplicate mapping keys are invalid even if
+	 * a YAML parser would otherwise select one of the values"). Because a
+	 * duplicate on `id` or `type` means this file's own declared identity --
+	 * which Artifact ID it even IS, or what type it declares itself as -- was
+	 * never reliably known (the file could equally be read as declaring
+	 * either alternative), this is treated exactly like
+	 * `EF-ID-001`/`002`/`003` (`graphTrustworthy`'s doc, identity-uncertain):
+	 * it blocks `graphTrustworthy` project-wide rather than being merely this
+	 * one Artifact's own concern, since an Agent looking up either candidate
+	 * ID could otherwise be silently misled.
+	 *
+	 * A duplicate key on any OTHER field is deliberately EXCLUDED from this
+	 * set (duplicate-key trust-scope adjudication, following fifth-round
+	 * Finding 5): the file's OWN identity is not in question there, only some
+	 * other fact it declares, so each is folded into the narrower,
+	 * already-existing bucket that fact's own uncertainty belongs to instead
+	 * of a project-wide gate -- a duplicate `relations` key (including nested
+	 * within one `relations[i]` entry) is folded into `edgeLossArtifactIds`
+	 * (this Artifact's own outgoing edge set could not be reliably determined,
+	 * gated the same direction-aware way as any other edge-loss cause), a
+	 * duplicate `status` key is folded into `statusInvalidArtifactIds` (this
+	 * Artifact's own lifecycle-status fact could not be reliably determined,
+	 * consumed by `impact`/`resolve-current`), and a duplicate
+	 * `resources`/`tags`/`schema`/`title`/`summary`/any-other-field key is
+	 * left to `envelopeWideLossArtifactIds` alone (folded into
+	 * `projectionLossArtifactIds`), which fires unconditionally for ANY
+	 * `EF-ENV-005` regardless of field and so is always ALSO true whenever
+	 * this set is -- this Artifact's own `lookup`/`list`/`search` projection
+	 * is gated the same way no matter which of these buckets its duplicate
+	 * key falls into.
+	 */
+	envelopeStructuralLossArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs whose raw file bytes contain invalid UTF-8 (`EF-FS-005`,
+	 * already reported by `checkTextNormalization`): the best-effort decode
+	 * `platform/text-checks.ts`'s callers rely on (`TextDecoder(...,
+	 * {fatal:false})`) replaces the offending byte(s) with U+FFFD, so any
+	 * text derived from this Artifact -- `title`, `summary`, tag/relation/
+	 * Resource string fields, or the Markdown body -- can silently embed a
+	 * replacement character in place of content the file never actually
+	 * declared. Folded into `projectionLossArtifactIds` (seventh-round Finding
+	 * 7): `lookup`/`list`/`search` must not report `complete: true` while
+	 * projecting or indexing that text as though it were faithful.
+	 */
+	byteDecodingLossArtifactIds: ReadonlySet<string>
+	/**
 	 * The union of every artifact-loss set above (`edgeLossArtifactIds`,
 	 * `relationExtensionLossArtifactIds`, `resourceLossArtifactIds`,
-	 * `tagLossArtifactIds`, `envelopeWideLossArtifactIds`): any Artifact whose
-	 * raw decoded envelope -- the object `lookup`/`list`/`search` project
-	 * verbatim (`query-projection.ts`), not the sanitized graph-index subset
-	 * -- silently discarded or coerced some structured content, whether or
-	 * not a graph edge was also lost. A `lookup`/`list`/`search` result that
-	 * would project this specific Artifact's envelope must not report
-	 * `complete: true` while doing so (Finding A).
+	 * `tagLossArtifactIds`, `envelopeWideLossArtifactIds`,
+	 * `extensionValueLossArtifactIds`, `byteDecodingLossArtifactIds`): any
+	 * Artifact whose raw decoded envelope
+	 * -- the object `lookup`/`list`/`search` project verbatim
+	 * (`query-projection.ts`), not the sanitized graph-index subset -- silently
+	 * discarded or coerced some structured content, whether or not a graph
+	 * edge was also lost. A `lookup`/`list`/`search` result that would project
+	 * this specific Artifact's envelope must not report `complete: true` while
+	 * doing so (Finding A). `envelopeStructuralLossArtifactIds` is deliberately
+	 * NOT unioned in here again (it is already a subset of
+	 * `envelopeWideLossArtifactIds`, whose EF-ENV-005 detection is
+	 * field-unscoped).
 	 */
 	projectionLossArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs (the SOURCE side) with a relation entry that is shape-valid
+	 * and vocabulary-known but semantically invalid per `validateRelationGraph`
+	 * (04-relations.md): `EF-REL-004` (source/target type incompatible for
+	 * that relation type) or `EF-REL-008` (the entry participates in a
+	 * `derived-from` cycle). Deliberately NOT folded into
+	 * `projectionLossArtifactIds`: the entry is fully present and faithfully
+	 * reflects the file's declared `(type, target)` pair in the raw projection
+	 * -- nothing is dropped or coerced -- so this is a graph-TRUST fact, not a
+	 * projection-loss fact (sixth-round Finding 6). A graph-traversal query
+	 * kind that would otherwise walk this edge as though it were a
+	 * trustworthy, semantically valid relation must not do so silently.
+	 */
+	semanticEdgeLossArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs whose decoded `status` failed `validateStatus`
+	 * (03-lifecycle.md): `EF-LIFE-001` (not a member of the status vocabulary)
+	 * or `EF-LIFE-002` (a known status not allowed for this Artifact's type).
+	 * The raw projection still faithfully reflects the file's declared
+	 * `status` string either way (nothing is dropped/coerced), so this is NOT
+	 * folded into `projectionLossArtifactIds`; it is a graph-TRUST fact
+	 * consumed specifically by algorithms that branch on `status` --
+	 * `impact`'s current-candidate pruning and `resolve-current`'s traversal
+	 * (sixth-round Finding 6) -- which must not silently treat an invalid
+	 * status as though it were a legitimate non-active/non-current value.
+	 *
+	 * Also includes an Artifact whose `status` key is duplicated
+	 * (`EF-ENV-005`, duplicate-key trust-scope adjudication): the file
+	 * declares two conflicting candidate status values, and
+	 * 01-artifact-envelope.md forbids resolving to either, so the actual
+	 * lifecycle-status fact this Artifact declares could not be reliably
+	 * determined -- the same branch-on-an-unverified-status untrustworthiness
+	 * as `EF-LIFE-001`/`002` (unlike an `id`/`type` duplicate, which makes the
+	 * Artifact's own IDENTITY uncertain and so blocks `graphTrustworthy`
+	 * project-wide instead -- see `envelopeStructuralLossArtifactIds`'s doc).
+	 */
+	statusInvalidArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs (the SOURCE side) with at least one `superseded-by` target
+	 * of a different Artifact type (`EF-SUP-003`, 05-supersession.md).
+	 * `domain/supersession.ts#resolveCurrent`'s own traversal does not check
+	 * type compatibility (only existence, status, and cycles), so a cross-type
+	 * replacement can otherwise be silently followed as though it were a
+	 * legitimate supersession. NOT folded into `projectionLossArtifactIds`
+	 * (the declared edge is faithfully reflected, not lost); a graph-trust
+	 * fact consumed by `resolve-current` (and `impact`'s `resolve_current`
+	 * option) (sixth-round Finding 6).
+	 */
+	supersessionCrossTypeArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs whose raw `resources` array had at least one `EF-RES-001`
+	 * finding, reduced to exactly WHICH named Resource fields were affected
+	 * across every entry (`type`, `location`, `role`, `media_type`,
+	 * `normative`, `description`) rather than a single project-wide-opaque
+	 * "this Artifact has some Resource loss" boolean. An entry that was not a
+	 * mapping at all (entirely omitted from `envelope.resources`) is recorded
+	 * as losing every named field, since none of its declared content survived
+	 * decoding. Ninth-round Finding 9: `list`'s `resourceType`/`resourceRole`/
+	 * `resourceNormative` filters and `search`'s `resources.location`/
+	 * `resources.description` surfaces each only care about the specific
+	 * fields they actually read; a malformed `normative` field, for example,
+	 * must not gate a search that never reads `normative`.
+	 */
+	resourceFieldLossById: ReadonlyMap<string, ReadonlySet<ResourceFieldName>>
 }
+
+/** A Resource descriptor's named core fields (06-resources.md), for `resourceFieldLossById`'s per-field loss granularity (Finding 9). */
+export type ResourceFieldName = 'type' | 'location' | 'role' | 'media_type' | 'normative' | 'description'
 
 // ---------------------------------------------------------------------------
 // Diagnostic construction
@@ -247,6 +399,116 @@ function relationEntriesHaveEdgeLoss(diagnostics: readonly Diagnostic[]): boolea
 
 function relationEntriesHaveExtensionLoss(diagnostics: readonly Diagnostic[]): boolean {
 	return diagnostics.some(d => d.code === 'EF-REL-015')
+}
+
+// ---------------------------------------------------------------------------
+// Finding 5 (duplicate-key trust-scope adjudication): EF-ENV-005 field
+// classification
+//
+// A duplicate mapping key can land in one of three DIFFERENT trust buckets
+// depending on WHICH field it duplicates, rather than one blanket
+// project-wide gate for every graph-relevant field:
+//
+//   - `id`/`type`: this file's own declared IDENTITY is uncertain (it could
+//     equally be read as declaring either candidate value) -- folded into
+//     `envelopeStructuralLossArtifactIds`, the same identity-uncertain bucket
+//     as `EF-ID-001`/`002`/`003`, blocking `graphTrustworthy` project-wide.
+//   - `relations` (top-level, or nested within one `relations[i]` entry):
+//     only this Artifact's own OUTGOING EDGE SET is uncertain, not its
+//     identity -- folded into `edgeLossArtifactIds`, scoped by the query
+//     layer's existing direction-aware edge-trust gates exactly like any
+//     other edge-loss cause.
+//   - `status`: only this Artifact's own LIFECYCLE-STATUS FACT is uncertain
+//     -- folded into `statusInvalidArtifactIds`, consumed only by
+//     `impact`/`resolve-current` exactly like an `EF-LIFE-001`/`002` invalid
+//     status.
+//   - `resources`/`tags`/`schema`/`title`/`summary`/any other field: no
+//     graph fact this file contributes is uncertain (or the field is not
+//     graph-relevant at all); `envelopeWideLossArtifactIds` (which fires
+//     unconditionally for ANY `EF-ENV-005`, regardless of field) already
+//     covers this Artifact's own projection-loss concern -- no further
+//     bucket needed.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an `EF-ENV-005` diagnostic's `field` (the exact duplicated key
+ * path, e.g. `'relations'` for a duplicated top-level key or
+ * `'relations[2].type'` for a duplicated key nested inside one entry) names
+ * `name` itself or a path nested under it.
+ */
+function duplicateKeyFieldNames(field: string | undefined, name: string): boolean {
+	if (field === undefined)
+		return false
+	return field === name || field.startsWith(`${name}[`) || field.startsWith(`${name}.`)
+}
+
+/** `id`/`type`: the two fields whose duplication makes this file's own declared identity uncertain (folded into `envelopeStructuralLossArtifactIds`). */
+const IDENTITY_DUPLICATE_KEY_FIELDS = ['id', 'type']
+
+function isIdentityDuplicateKeyField(field: string | undefined): boolean {
+	return IDENTITY_DUPLICATE_KEY_FIELDS.some(name => duplicateKeyFieldNames(field, name))
+}
+
+// ---------------------------------------------------------------------------
+// Finding 7: byte-decoding loss and its frontmatter/body reach
+// ---------------------------------------------------------------------------
+
+/**
+ * The exact raw-byte offset at which `bytes`' authoritative body text begins
+ * (i.e. the length, in bytes, of the opening delimiter line through the
+ * closing `---` delimiter's line terminator), or `undefined` when `bytes`
+ * does not split into frontmatter/body at all. Decodes `bytes` as ISO-8859-1
+ * (a lossless one-byte-to-one-code-unit mapping, unlike the best-effort UTF-8
+ * decode `snapshot.ts` uses to build `SnapshotArtifactFile.text`) so the
+ * ASCII structural markers `splitFrontmatter` looks for (`-`, CR, LF) are
+ * recovered at their exact original byte positions even when `bytes` contains
+ * invalid UTF-8 elsewhere -- letting `detectInvalidUtf8`'s byte offset be
+ * compared directly against this boundary to tell whether the invalid byte
+ * falls within the frontmatter (where it could corrupt `id`/`type`/`status`/
+ * `relations`/`resources`/`tags`) or only within the Markdown body.
+ */
+function frontmatterByteLength(bytes: Uint8Array): number | undefined {
+	const latin1 = new TextDecoder('iso-8859-1')
+		.decode(bytes)
+	const split = splitFrontmatter(latin1)
+	if (!split.ok)
+		return undefined
+	return latin1.length - split.bodyText.length
+}
+
+// ---------------------------------------------------------------------------
+// Finding 9: per-named-field Resource loss
+// ---------------------------------------------------------------------------
+
+const RESOURCE_FIELD_NAMES: readonly ResourceFieldName[] = ['type', 'location', 'role', 'media_type', 'normative', 'description']
+const RESOURCE_FIELD_NAME_SET: ReadonlySet<string> = new Set(RESOURCE_FIELD_NAMES)
+const RESOURCE_ENTRY_FIELD_PATTERN = /^resources\[\d+\](?:\.(.+))?$/
+
+/**
+ * Records which named Resource field(s) one `EF-RES-001` diagnostic affects
+ * for `artifactId` into `target`: the exact sub-field named by the
+ * diagnostic's `field` (e.g. `'resources[0].normative'` -> `'normative'`)
+ * when there is one, or -- when the diagnostic instead names the whole entry
+ * (`'resources[0]'`, "must be a mapping") -- every named field, since none of
+ * that entry's declared content survived decoding at all. Ignores every other
+ * diagnostic code and any `field` that does not match a `resources[i]` entry
+ * shape.
+ */
+function addResourceFieldLoss(target: Map<string, Set<ResourceFieldName>>, artifactId: string, diagnostic: Diagnostic): void {
+	if (diagnostic.code !== 'EF-RES-001' || diagnostic.field === undefined)
+		return
+	const match = RESOURCE_ENTRY_FIELD_PATTERN.exec(diagnostic.field)
+	if (!match)
+		return
+	const subField = match[1]
+	const set = target.get(artifactId) ?? new Set<ResourceFieldName>()
+	if (subField !== undefined && RESOURCE_FIELD_NAME_SET.has(subField)) {
+		set.add(subField as ResourceFieldName)
+	}
+	else {
+		for (const name of RESOURCE_FIELD_NAMES) set.add(name)
+	}
+	target.set(artifactId, set)
 }
 
 /** Structured-location identity, ignoring message text (mirrors `diagnostics.ts`'s own dedup key, minus `code`). */
@@ -361,6 +623,15 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	const resourceLossArtifactIds = new Set<string>()
 	const tagLossArtifactIds = new Set<string>()
 	const envelopeWideLossArtifactIds = new Set<string>()
+	// Finding 5/6/7/9 fact tracking -- see each field's doc on
+	// `SnapshotValidationResult`.
+	const envelopeStructuralLossArtifactIds = new Set<string>()
+	const byteDecodingLossArtifactIds = new Set<string>()
+	const semanticEdgeLossArtifactIds = new Set<string>()
+	const statusInvalidArtifactIds = new Set<string>()
+	const supersessionCrossTypeArtifactIds = new Set<string>()
+	const resourceFieldLossById = new Map<string, Set<ResourceFieldName>>()
+	const extensionValueLossArtifactIds = new Set<string>()
 
 	for (const artifact of snapshot.artifacts) {
 		if (!artifact.frontmatter.ok) {
@@ -385,7 +656,55 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 
 		diagnostics.push(...validateIdSyntax({ type: envelope.type, id: envelope.id }, artifact.path))
 		diagnostics.push(...validateFilename({ type: envelope.type, id: envelope.id }, artifact.path))
-		diagnostics.push(...validateStatus({ type: envelope.type, status: envelope.status, id: envelope.id }, artifact.path))
+
+		const statusDiagnostics = validateStatus({ type: envelope.type, status: envelope.status, id: envelope.id }, artifact.path)
+		diagnostics.push(...statusDiagnostics)
+		if (statusDiagnostics.length > 0)
+			statusInvalidArtifactIds.add(envelope.id)
+
+		// Finding 7: invalid UTF-8 anywhere in the file's raw bytes (already
+		// reported as `EF-FS-005` below, by the text-normalization pass) means
+		// the best-effort decode this Artifact's `text`/`envelope`/`sections`
+		// were all built from replaced at least one malformed byte with
+		// U+FFFD. When that byte falls within the frontmatter block (rather
+		// than only the Markdown body), WHICH field it corrupted cannot be
+		// narrowed down the way an `EF-ENV-005` diagnostic's `field` can be, so
+		// -- unlike the duplicate-key case above, which is scoped per field
+		// (Finding 5 adjudication) -- any frontmatter-range corruption is
+		// conservatively treated as though it could have corrupted `id`/`type`
+		// themselves, folding this Artifact into
+		// `envelopeStructuralLossArtifactIds` the same identity-uncertain way.
+		const invalidUtf8 = detectInvalidUtf8(artifact.bytes)
+		if (invalidUtf8) {
+			byteDecodingLossArtifactIds.add(envelope.id)
+			const bodyStartByte = frontmatterByteLength(artifact.bytes)
+			if (bodyStartByte === undefined || invalidUtf8.offset < bodyStartByte)
+				envelopeStructuralLossArtifactIds.add(envelope.id)
+		}
+
+		// Finding 5 (duplicate-key trust-scope adjudication): a duplicate
+		// mapping key is folded into a DIFFERENT trust bucket depending on
+		// which field it duplicates -- see the "Finding 5" section comment
+		// above `isIdentityDuplicateKeyField`'s definition for the full
+		// rationale.
+		const duplicateKeyDiagnostics = artifact.document!.diagnostics.filter(d => d.code === 'EF-ENV-005')
+		// `id`/`type`: this file's own declared identity is uncertain --
+		// `envelopeStructuralLossArtifactIds`'s doc, same bucket as
+		// `EF-ID-001`/`002`/`003`.
+		if (duplicateKeyDiagnostics.some(d => isIdentityDuplicateKeyField(d.field)))
+			envelopeStructuralLossArtifactIds.add(envelope.id)
+		// `relations` (top-level or nested within one entry): only this
+		// Artifact's own outgoing edge set is uncertain -- fold into
+		// `edgeLossArtifactIds`'s doc, gated the same direction-aware way as
+		// any other edge-loss cause instead of blocking `graphTrustworthy`
+		// project-wide.
+		if (duplicateKeyDiagnostics.some(d => duplicateKeyFieldNames(d.field, 'relations')))
+			edgeLossArtifactIds.add(envelope.id)
+		// `status`: only this Artifact's own lifecycle-status fact is
+		// uncertain -- fold into `statusInvalidArtifactIds`'s doc, consumed
+		// only by `impact`/`resolve-current`.
+		if (duplicateKeyDiagnostics.some(d => duplicateKeyFieldNames(d.field, 'status')))
+			statusInvalidArtifactIds.add(envelope.id)
 
 		const mapping = artifact.document!.mapping
 		const rawRelations = mapping ? rawArrayField(mapping, 'relations') : []
@@ -403,6 +722,13 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		diagnostics.push(...resourceDiagnostics)
 		if (resourceDiagnostics.some(d => d.code === 'EF-RES-001'))
 			resourceLossArtifactIds.add(envelope.id)
+		for (const d of resourceDiagnostics)
+			addResourceFieldLoss(resourceFieldLossById, envelope.id, d)
+
+		// Finding 7: `EF-ENV-007` (top-level extension) and `EF-RES-019`
+		// (Resource extension) findings -- `extensionValueLossArtifactIds`'s doc.
+		if (envelopeResult.diagnostics.some(d => d.code === 'EF-ENV-007') || resourceDiagnostics.some(d => d.code === 'EF-RES-019'))
+			extensionValueLossArtifactIds.add(envelope.id)
 
 		// A non-string tag entry is silently skipped by `decodeEnvelope` (never
 		// appended to `envelope.tags`), unlike an invalid-pattern or duplicate
@@ -466,7 +792,17 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		relations: withoutAmbiguousTargets(o.relations),
 	}))
 	const relationById = new Map(relationGraphArtifacts.map(a => [a.id, a] as const))
-	diagnostics.push(...validateRelationGraph(relationGraphArtifacts, relationById))
+	const relationGraphDiagnostics = validateRelationGraph(relationGraphArtifacts, relationById)
+	diagnostics.push(...relationGraphDiagnostics)
+	// Finding 6: an edge that is shape-valid and vocabulary-known but
+	// semantically incompatible (`EF-REL-004`) or part of a `derived-from`
+	// cycle (`EF-REL-008`) still exists as a graph edge -- both diagnostics
+	// carry the SOURCE Artifact's own `artifactId`, which is exactly the fact
+	// a traversal that walks this edge as trustworthy is missing.
+	for (const d of relationGraphDiagnostics) {
+		if ((d.code === 'EF-REL-004' || d.code === 'EF-REL-008') && d.artifactId !== undefined)
+			semanticEdgeLossArtifactIds.add(d.artifactId)
+	}
 
 	const supersessionFacts: SupersessionGraphFact[] = resolvedOutcomes
 		.filter(o => o.envelope.type !== 'change')
@@ -478,7 +814,15 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 				.filter(r => r.type === 'superseded-by')
 				.map(r => r.target),
 		}))
-	diagnostics.push(...validateSupersessionGraph(supersessionFacts))
+	const supersessionGraphDiagnostics = validateSupersessionGraph(supersessionFacts)
+	diagnostics.push(...supersessionGraphDiagnostics)
+	// Finding 6: `EF-SUP-003` (cross-type replacement) carries the SOURCE
+	// Artifact's own `artifactId` -- `resolveCurrent`'s own traversal never
+	// checks type compatibility, so this fact must be supplied here instead.
+	for (const d of supersessionGraphDiagnostics) {
+		if (d.code === 'EF-SUP-003' && d.artifactId !== undefined)
+			supersessionCrossTypeArtifactIds.add(d.artifactId)
+	}
 
 	const incomingRelations = new Map<string, IncomingRelationEdge[]>()
 	for (const artifact of relationGraphArtifacts) {
@@ -657,7 +1001,16 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		'EF-FS-003',
 	])
 	const hasBlockingIdentityOrLayoutFinding = diagnostics.some(d => BLOCKING_IDENTITY_OR_LAYOUT_CODES.has(d.code))
-	const graphTrustworthy = !hasUndecodedArtifact && !hasBlockingIdentityOrLayoutFinding
+	// Finding 5 (duplicate-key trust-scope adjudication): a duplicate mapping
+	// key on `id`/`type` (`envelopeStructuralLossArtifactIds`'s doc) is not
+	// detected by a fixed diagnostic-code bucket the way the codes above are
+	// -- `EF-ENV-005` also fires for a duplicate `relations`/`status`/
+	// `resources`/`tags`/`schema`/`title`/`summary`, none of which gate here
+	// (each is folded into a narrower, non-blocking bucket instead -- see the
+	// "Finding 5" section comment above `isIdentityDuplicateKeyField`'s
+	// definition) -- so it is folded in directly as its own precisely-scoped
+	// fact rather than added to `BLOCKING_IDENTITY_OR_LAYOUT_CODES`.
+	const graphTrustworthy = !hasUndecodedArtifact && !hasBlockingIdentityOrLayoutFinding && envelopeStructuralLossArtifactIds.size === 0
 
 	const projectionLossArtifactIds = new Set<string>([
 		...edgeLossArtifactIds,
@@ -665,6 +1018,8 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		...resourceLossArtifactIds,
 		...tagLossArtifactIds,
 		...envelopeWideLossArtifactIds,
+		...byteDecodingLossArtifactIds,
+		...extensionValueLossArtifactIds,
 	])
 
 	return {
@@ -681,7 +1036,14 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		resourceLossArtifactIds,
 		tagLossArtifactIds,
 		envelopeWideLossArtifactIds,
+		extensionValueLossArtifactIds,
+		envelopeStructuralLossArtifactIds,
+		byteDecodingLossArtifactIds,
 		projectionLossArtifactIds,
+		semanticEdgeLossArtifactIds,
+		statusInvalidArtifactIds,
+		supersessionCrossTypeArtifactIds,
+		resourceFieldLossById,
 	}
 }
 

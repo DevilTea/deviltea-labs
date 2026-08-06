@@ -27,13 +27,13 @@ import type {
 	ExtractedSections,
 	ParseBodyResult,
 } from '../parsing/markdown'
-import type { WalkEntry } from '../platform/fs-facts'
+import type { FileIdentity, ReadRegularFileNoFollowResult, WalkEntry } from '../platform/fs-facts'
 import type { DecodeConfigResult } from '../repository/config'
 import path from 'pathe'
 import { decodeEnvelope } from '../domain/envelope'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
 import { extractSections, parseBody } from '../parsing/markdown'
-import { isDirectory, isSymlink, readFileBytes, walkDirectory } from '../platform/fs-facts'
+import { isDirectory, isSymlink, readRegularFileNoFollow, walkDirectory } from '../platform/fs-facts'
 import { decodeConfig } from '../repository/config'
 import { listArtifactFiles } from '../repository/layout'
 
@@ -46,7 +46,15 @@ const RESOURCE_ROOT_PREFIX = '.engineering/resources/'
 // Shape
 // ---------------------------------------------------------------------------
 
-export type SnapshotEntryKind = 'file' | 'directory' | 'symlink'
+/**
+ * `other` covers an entry that is beneath `.engineering` but is none of the
+ * three recognized kinds: a working-tree FIFO, socket, or device, or a Git
+ * tree entry of `type: 'commit'` (a gitlink/submodule). Neither is ever a
+ * readable Artifact/control-file blob, so any candidate path of this kind is
+ * a canonical-layout violation (`EF-FS-003`, `repository/layout.ts`) rather
+ * than something readable as file content.
+ */
+export type SnapshotEntryKind = 'file' | 'directory' | 'symlink' | 'other'
 
 export type SnapshotSource
 	= | { kind: 'working-tree', projectRoot: string }
@@ -152,21 +160,44 @@ export interface SnapshotFsDeps {
 	isDirectory: (target: string) => Promise<boolean>
 	isSymlink: (target: string) => Promise<boolean>
 	walkDirectory: (root: string) => Promise<WalkEntry[]>
-	readFileBytes: (target: string) => Promise<Uint8Array>
+	readRegularFileNoFollow: (target: string, expectedIdentity?: FileIdentity) => Promise<ReadRegularFileNoFollowResult>
 }
 
 /** Real filesystem access via `platform/fs-facts.ts`. */
-export const defaultSnapshotFsDeps: SnapshotFsDeps = { isDirectory, isSymlink, walkDirectory, readFileBytes }
+export const defaultSnapshotFsDeps: SnapshotFsDeps = { isDirectory, isSymlink, walkDirectory, readRegularFileNoFollow }
 
-async function tryReadFileBytes(deps: SnapshotFsDeps, target: string): Promise<Uint8Array | undefined> {
-	try {
-		return await deps.readFileBytes(target)
+/**
+ * Read one file this load already observed via `walkDirectory` (`walkEntry`),
+ * binding the read to that exact `lstat` observation
+ * (`walkEntry.identity`) through `deps.readRegularFileNoFollow`.
+ *
+ * `walkEntry === undefined` means the walk never observed anything at this
+ * path at all: a genuine, ordinary absence (e.g. no `.engineering/ef.yaml`),
+ * not a race -- `undefined` is returned exactly as before.
+ *
+ * Once something WAS observed, though, no discrepancy is tolerated silently
+ * (Finding 2): if the walk recorded a non-regular-file kind, or the
+ * subsequent identity-bound read reports anything other than `ok` (the entry
+ * vanished, changed kind, or was replaced by a different file at the
+ * identical path before the read could complete), this throws -- converting
+ * the whole snapshot load into `read-error` rather than silently treating a
+ * raced file as though it were never there (which would let it vanish from
+ * `snapshot.artifacts`/`configBytes`/`gitignoreBytes` without ever setting
+ * `hasUndecodedArtifact` or any other incomplete marker downstream).
+ */
+async function readObservedFile(deps: SnapshotFsDeps, absoluteTarget: string, engineeringRelativePath: string, walkEntry: WalkEntry | undefined): Promise<Uint8Array | undefined> {
+	if (walkEntry === undefined)
+		return undefined
+
+	if (!walkEntry.isRegularFile) {
+		throw new Error(`'${ENGINEERING_DIR}/${engineeringRelativePath}' was observed as a non-regular-file entry during this load and cannot be read as a file.`)
 	}
-	catch (error) {
-		if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-			return undefined
-		throw error
-	}
+
+	const result = await deps.readRegularFileNoFollow(absoluteTarget, walkEntry.identity)
+	if (result.kind === 'ok')
+		return result.bytes
+
+	throw new Error(`'${ENGINEERING_DIR}/${engineeringRelativePath}' was observed as a regular file during this load (kind '${result.kind}' on re-read) but could not be read as the same file afterward; treating this snapshot load as incomplete rather than silently omitting it.`)
 }
 
 /**
@@ -186,22 +217,39 @@ export async function loadSnapshotFromWorkingTree(projectRoot: string, deps: Sna
 
 		const entryKinds = new Map<string, SnapshotEntryKind>()
 		entryKinds.set(ENGINEERING_DIR, (await deps.isSymlink(engineeringPath)) ? 'symlink' : 'directory')
+		const walkEntryByRelativePath = new Map<string, WalkEntry>()
 		for (const entry of walked) {
-			const kind: SnapshotEntryKind = entry.isSymlink ? 'symlink' : entry.isDirectory ? 'directory' : 'file'
+			const kind: SnapshotEntryKind = entry.isSymlink ? 'symlink' : entry.isDirectory ? 'directory' : entry.isRegularFile ? 'file' : 'other'
 			entryKinds.set(`${ENGINEERING_DIR}/${entry.relativePath}`, kind)
+			walkEntryByRelativePath.set(entry.relativePath, entry)
 		}
 
 		const { artifactFiles, diagnostics: layoutDiagnostics } = listArtifactFiles(walked)
 
-		const configBytes = await tryReadFileBytes(deps, path.join(projectRoot, CONFIG_PATH))
+		const readObserved = (engineeringRelativePath: string) => readObservedFile(
+			deps,
+			path.join(projectRoot, ENGINEERING_DIR, engineeringRelativePath),
+			engineeringRelativePath,
+			walkEntryByRelativePath.get(engineeringRelativePath),
+		)
+
+		const configBytes = await readObserved('ef.yaml')
 		const config = configBytes !== undefined ? decodeConfig(decodeUtf8(configBytes), CONFIG_PATH) : { config: null, diagnostics: [] }
-		const gitignoreBytes = await tryReadFileBytes(deps, path.join(projectRoot, GITIGNORE_PATH))
+		const gitignoreBytes = await readObserved('.gitignore')
 
 		const artifacts: SnapshotArtifactFile[] = []
 		for (const relativePath of artifactFiles) {
-			const bytes = await tryReadFileBytes(deps, path.join(projectRoot, relativePath))
-			if (bytes === undefined)
+			const engineeringRelativePath = relativePath.slice(ENGINEERING_DIR.length + 1)
+			const bytes = await readObserved(engineeringRelativePath)
+			if (bytes === undefined) {
+				// `artifactFiles` is derived from `walked` and only ever contains
+				// paths `listArtifactFiles` saw as regular-file entries, so a walk
+				// observation always exists here; `readObserved` only returns
+				// `undefined` when none does. Kept as a guard rather than an
+				// assertion so a future change to that invariant fails safe
+				// (silently excluding, as before) instead of crashing.
 				continue
+			}
 			artifacts.push(buildArtifactFile(relativePath, bytes))
 		}
 
@@ -245,10 +293,30 @@ class GitUnavailableError extends Error {}
  */
 class GitReadError extends Error {}
 
+/**
+ * FINDING 3: a `type: 'commit'` tree entry is a gitlink (Git submodule
+ * reference), never readable as a blob. The previous implementation folded
+ * every non-`tree` type into `'file'`, so a gitlink named exactly like a
+ * canonical Artifact path (e.g. `.engineering/req/REQ-001.md`) was reported
+ * as a regular-file Artifact candidate by `listArtifactFiles`, then silently
+ * dropped by `readBlobOrThrow` (`blobEntries` only ever contains
+ * `type: 'blob'` entries, so the gitlink was never in it, and
+ * `readBlobOrThrow(git, undefined)` returns `undefined` -- indistinguishable
+ * from the path genuinely not existing). Reporting `'other'` here instead
+ * makes `isRegularFile` false for the synthesized `WalkEntry` below, so
+ * `listArtifactFiles` reports it as a canonical-layout violation
+ * (`EF-FS-003`: "any entry that is not an Artifact file under this scope ...
+ * violates the canonical layout", 11-filesystem-and-config.md) instead of
+ * treating it as a readable candidate at all.
+ */
 function entryKindOf(entry: GitTreeEntry): SnapshotEntryKind {
 	if (entry.mode === '120000')
 		return 'symlink'
-	return entry.type === 'tree' ? 'directory' : 'file'
+	if (entry.type === 'tree')
+		return 'directory'
+	if (entry.type === 'commit')
+		return 'other'
+	return 'file'
 }
 
 async function readBlobOrThrow(git: GitRepository, entry: GitTreeEntry | undefined): Promise<Uint8Array | undefined> {

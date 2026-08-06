@@ -162,11 +162,26 @@ describe('listArtifactFiles', () => {
 				])
 		})
 
-		it('does not treat PROJECT.md as unexpected when it is a directory or symlink (a different owning check applies)', () => {
+		// FINDING 3 (layout.ts): the PROJECT.md branch used to `continue`
+		// without reporting anything when the entry was not a regular file --
+		// unlike every other canonical-path branch in this function, which
+		// always calls `reportUnexpected` for the wrong kind. A directory,
+		// symlink, FIFO, socket, device, or Git gitlink named exactly
+		// `.engineering/PROJECT.md` would vanish from both `artifactFiles` and
+		// `diagnostics` with no trace at all.
+		it('reports EF-FS-003 for a PROJECT.md entry that is not a regular file (directory, symlink, or other non-blob kind)', () => {
 			expect(listArtifactFiles([dir('PROJECT.md')]).diagnostics)
-				.toEqual([])
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-003', path: '.engineering/PROJECT.md' }),
+				])
 			expect(listArtifactFiles([symlink('PROJECT.md')]).diagnostics)
-				.toEqual([])
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-003', path: '.engineering/PROJECT.md' }),
+				])
+			expect(listArtifactFiles([{ relativePath: 'PROJECT.md', isRegularFile: false, isDirectory: false, isSymlink: false }]).diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-003', path: '.engineering/PROJECT.md' }),
+				])
 			expect(listArtifactFiles([dir('PROJECT.md')]).artifactFiles)
 				.toEqual([])
 		})

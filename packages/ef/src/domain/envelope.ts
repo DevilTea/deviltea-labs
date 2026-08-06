@@ -148,7 +148,7 @@ function nodeToPlainValue(node: unknown): unknown {
 }
 
 // ---------------------------------------------------------------------------
-// Field collection (last-value-wins, first-insertion-order; EF-ENV-005
+// Field collection (first-occurrence-wins, first-insertion-order; EF-ENV-005
 // duplicate-key detection itself is owned upstream by the parsing module)
 // ---------------------------------------------------------------------------
 
@@ -157,11 +157,27 @@ interface FieldEntry {
 	valueNode: unknown
 }
 
+/**
+ * Collects each top-level field's key/value nodes, keeping the FIRST
+ * occurrence of a duplicated key. This MUST match
+ * `snapshot-raw-fields.ts#rawArrayField`'s own duplicate-key selection (it
+ * uses `Array#find`, i.e. the first matching pair) -- both modules read the
+ * same parsed mapping to describe the same file, so picking different
+ * occurrences of a duplicated `relations`/`resources`/`tags` key between them
+ * would let the decoded `Envelope` (used by projections) and the raw array
+ * `domain/relations.ts`/`domain/resources.ts` validate (used to build graph
+ * indexes) silently disagree about which declared array is authoritative. A
+ * duplicate key is independently invalid regardless of which occurrence wins
+ * here (`EF-ENV-005`, reported upstream); this only fixes which one wins so
+ * every consumer of this file's parsed mapping agrees.
+ */
 function collectFields(mapping: YAMLMap<unknown, unknown>): Map<string, FieldEntry> {
 	const fields = new Map<string, FieldEntry>()
 	for (const pair of mapping.items) {
 		const name = scalarStringValue(pair.key)
 		if (name === undefined)
+			continue
+		if (fields.has(name))
 			continue
 		fields.set(name, { keyNode: pair.key, valueNode: pair.value })
 	}

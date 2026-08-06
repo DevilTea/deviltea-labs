@@ -306,6 +306,42 @@ Exercises EF-QRY-008 (invalid-graph).
 - N/A.
 `
 
+/**
+ * An edge-lossy Artifact (EF-REL-002, via an unrelated discarded entry) whose
+ * one VALID relation targets REQ-001 directly -- i.e. the root of the
+ * `max_depth: 0` regression below -- so the pre-Finding-8 "adjacent via a
+ * known-valid edge into the visited set" bug would have falsely gated even
+ * the strictest possible case: max_depth 0, where no Artifact's outgoing
+ * array (not even the root's own) is ever read at all.
+ */
+const REQ_951_TARGETS_ROOT = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-951
+title: Bad Relation Requirement Targeting The Trace Root
+status: active
+summary: A requirement whose relations array contains a shape-invalid entry, and whose one valid relation targets REQ-001 (the trace root in the max_depth zero regression), for Finding 8's lossy-incoming-neighbor and max-depth-zero regressions.
+tags: []
+relations:
+  - type: derived-from
+    target: REQ-001
+  - not-a-mapping
+resources: []
+---
+
+## Requirement
+
+Exercises Finding 8: an edge-lossy Artifact whose valid edge targets the exact node a max_depth:0 outgoing trace roots at must not falsely gate that trace, since max_depth:0 reads no Artifact's outgoing array at all.
+
+## Rationale
+
+Finding 8 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
 const REQ_BAD_RELATION = `---
 schema: ef/requirement@1
 type: requirement
@@ -328,6 +364,34 @@ Exercises EF-REL-002 discarding a relation entry from both the sanitized graph i
 ## Rationale
 
 Exercises Finding A's discarded-relation-data gate.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+const REQ_EXT_ONLY_LOSS = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-700
+title: Extension Only Loss
+status: active
+summary: A requirement whose only relation-data loss is an invalid extension field (EF-REL-015), for Finding C's not-blocking regression.
+tags: []
+relations:
+  - type: derived-from
+    target: PRD-001
+    foo: bar
+resources: []
+---
+
+## Requirement
+
+Exercises EF-REL-015 (invalid extension field) not blocking any graph query kind.
+
+## Rationale
+
+Finding C: extension-only loss can never hide a graph edge, since graph edges are (source, type, target) only.
 
 ## Acceptance Criteria
 
@@ -435,7 +499,14 @@ function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRe
 		resourceLossArtifactIds: new Set(),
 		tagLossArtifactIds: new Set(),
 		envelopeWideLossArtifactIds: new Set(),
+		extensionValueLossArtifactIds: new Set(),
+		envelopeStructuralLossArtifactIds: new Set(),
+		byteDecodingLossArtifactIds: new Set(),
 		projectionLossArtifactIds: new Set(),
+		semanticEdgeLossArtifactIds: new Set(),
+		statusInvalidArtifactIds: new Set(),
+		supersessionCrossTypeArtifactIds: new Set(),
+		resourceFieldLossById: new Map(),
 	}
 	return { snapshot, validation }
 }
@@ -856,35 +927,140 @@ describe('executeQuery', () => {
 		})
 	})
 
+	describe('duplicate-key trust-scope adjudication (EF-ENV-005 field classification, Finding 5 review)', () => {
+		/**
+		 * Duplicates REQ-001's own top-level 'relations' key: the FIRST (real)
+		 * array -- derived-from PRD-001, governed-by POL-001 -- is still what
+		 * `decodeEnvelope`/`rawArrayField` both select (first-occurrence-wins),
+		 * but the file itself is invalid regardless (01-artifact-envelope.md),
+		 * so REQ-001's own outgoing edge set could not be reliably determined.
+		 */
+		async function contextWithDuplicateRelationsKey(): Promise<QueryContext> {
+			const duplicated = REQ_001.replace(
+				'resources:\n  - type: reference',
+				'relations:\n  - type: references\n    target: PROJECT\nresources:\n  - type: reference',
+			)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicated)
+			return reloadContext()
+		}
+
+		it('duplicate relations key: sets edgeLossArtifactIds for REQ-001 only, leaves envelopeStructuralLossArtifactIds empty, and does not flip graphTrustworthy', async () => {
+			const dup = await contextWithDuplicateRelationsKey()
+			expect([...dup.validation.edgeLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(dup.validation.envelopeStructuralLossArtifactIds.size)
+				.toBe(0)
+			expect(dup.validation.graphTrustworthy)
+				.toBe(true)
+		})
+
+		it('gates an outgoing relations/trace query that consults REQ-001\'s own (now-uncertain) outgoing array', async () => {
+			const dup = await contextWithDuplicateRelationsKey()
+
+			const relations = await executeQuery(dup, { kind: 'relations', id: 'REQ-001', direction: 'outgoing' })
+			expect(relations.complete)
+				.toBe(false)
+			expect(relations.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const trace = await executeQuery(dup, { kind: 'trace', roots: ['REQ-001'], types: ['derived-from'], direction: 'outgoing', maxDepth: 1 })
+			expect(trace.complete)
+				.toBe(false)
+			expect(trace.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates lookup REQ-001 itself (own projection loss, via envelopeWideLossArtifactIds), but leaves an unrelated lookup/list untouched', async () => {
+			const dup = await contextWithDuplicateRelationsKey()
+
+			const lookupSelf = await executeQuery(dup, { kind: 'lookup', id: 'REQ-001' })
+			expect(lookupSelf.complete)
+				.toBe(false)
+			expect(lookupSelf.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			// An unrelated, clean Artifact's exact lookup must still succeed: the
+			// duplicate-relations-key fact is REQ-001's own edge/projection
+			// concern, not a project-wide gate (adjudicated ruling).
+			const lookupOther = await executeQuery(dup, { kind: 'lookup', id: 'REQ-002' })
+			expect(lookupOther.complete)
+				.toBe(true)
+			expect(lookupOther.data?.found)
+				.toBe(true)
+
+			// REQ-001 is a 'requirement', not a 'decision': excluded by this type
+			// filter entirely, so the returned collection is untouched by its loss.
+			const list = await executeQuery(dup, { kind: 'list', type: ['decision'] })
+			expect(list.complete)
+				.toBe(true)
+			expect(list.data!.artifacts.some(a => a.id === 'REQ-001'))
+				.toBe(false)
+		})
+
+		it('duplicate id key (EF-ENV-005, single file) blocks graphTrustworthy project-wide, exactly like a cross-file EF-ID-004 collision', async () => {
+			const duplicated = REQ_002.replace('id: REQ-002\n', 'id: REQ-002\nid: REQ-777\n')
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', duplicated)
+			const dup = await reloadContext()
+			expect(dup.validation.graphTrustworthy)
+				.toBe(false)
+
+			const lookup = await executeQuery(dup, { kind: 'lookup', id: 'REQ-001' })
+			expect(lookup.complete)
+				.toBe(false)
+			expect(lookup.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const list = await executeQuery(dup, { kind: 'list' })
+			expect(list.complete)
+				.toBe(false)
+			expect(list.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('duplicate status key on a supersession-chain member gates resolve-current once its traversal reaches it, but leaves an unrelated lookup untouched', async () => {
+			const duplicated = supersessionReq('REQ-011', 'superseded', 'REQ-012')
+				.replace('status: superseded\n', 'status: superseded\nstatus: draft\n')
+			await writeFile(tempDir, '.engineering/req/REQ-011.md', duplicated)
+			const dup = await reloadContext()
+			expect([...dup.validation.statusInvalidArtifactIds])
+				.toEqual(['REQ-011'])
+			expect(dup.validation.graphTrustworthy)
+				.toBe(true)
+
+			const resolveCurrent = await executeQuery(dup, { kind: 'resolve-current', id: 'REQ-010' })
+			expect(resolveCurrent.complete)
+				.toBe(false)
+			expect(resolveCurrent.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const lookup = await executeQuery(dup, { kind: 'lookup', id: 'REQ-001' })
+			expect(lookup.complete)
+				.toBe(true)
+		})
+
+		it('duplicate status key on an impact-traversal candidate gates impact once its traversal reaches it (depth > 0), but leaves an unrelated lookup untouched', async () => {
+			const duplicated = ADR_001.replace('status: active\n', 'status: active\nstatus: draft\n')
+			await writeFile(tempDir, '.engineering/adr/ADR-001.md', duplicated)
+			const dup = await reloadContext()
+			expect([...dup.validation.statusInvalidArtifactIds])
+				.toEqual(['ADR-001'])
+			expect(dup.validation.graphTrustworthy)
+				.toBe(true)
+
+			// ADR-001 is reached at depth 1 from REQ-001 via its 'addresses' edge.
+			const impact = await executeQuery(dup, { kind: 'impact', roots: ['REQ-001'], maxDepth: 1 })
+			expect(impact.complete)
+				.toBe(false)
+			expect(impact.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const lookup = await executeQuery(dup, { kind: 'lookup', id: 'REQ-002' })
+			expect(lookup.complete)
+				.toBe(true)
+		})
+	})
+
 	describe('graph query edge-loss scoping (Finding C: 10-query-and-trace.md "Invalid Graph and Partial Results")', () => {
-		const REQ_EXT_ONLY_LOSS = `---
-schema: ef/requirement@1
-type: requirement
-id: REQ-700
-title: Extension Only Loss
-status: active
-summary: A requirement whose only relation-data loss is an invalid extension field (EF-REL-015), for Finding C's not-blocking regression.
-tags: []
-relations:
-  - type: derived-from
-    target: PRD-001
-    foo: bar
-resources: []
----
-
-## Requirement
-
-Exercises EF-REL-015 (invalid extension field) not blocking any graph query kind.
-
-## Rationale
-
-Finding C: extension-only loss can never hide a graph edge, since graph edges are (source, type, target) only.
-
-## Acceptance Criteria
-
-- N/A.
-`
-
 		const PRD_ISLAND = `---
 schema: ef/prd@1
 type: prd
@@ -934,33 +1110,81 @@ Finding C: an edge-lossy Artifact outside a traversal's reachable component must
 - N/A.
 `
 
-		it('eF-REL-015-only loss (invalid extension field) does not block relations (any direction), trace, impact, or resolve-current -- even when the affected Artifact is the traversal root', async () => {
+		it('eF-REL-015-only loss (invalid extension field) never triggers EDGE-trust gating (any direction) -- an unrelated query that never embeds the affected Artifact as a node stays complete', async () => {
+			// Finding 4 (this round) distinguishes EDGE trust from PROJECTION
+			// trust: extension-only loss can never hide/alter a graph EDGE
+			// (`(source, type, target)` is unaffected), so it must never trigger
+			// `edgeTrustGlobalFailure`/`edgeTrustLocalFailure` project-wide --
+			// proven here via a query whose result never embeds REQ-700 as a
+			// node at all. See the next test for the separate, per-Artifact
+			// PROJECTION-trust gate that DOES apply once REQ-700 itself is
+			// embedded as a node.
 			await writeFile(tempDir, '.engineering/req/REQ-700.md', REQ_EXT_ONLY_LOSS)
 			const context = await reloadContext()
 			expect(context.validation.edgeLossArtifactIds.size)
 				.toBe(0)
+			expect(context.validation.semanticEdgeLossArtifactIds.size)
+				.toBe(0)
 			expect([...context.validation.relationExtensionLossArtifactIds])
 				.toEqual(['REQ-700'])
 
-			const relationsBoth = await executeQuery(context, { kind: 'relations', id: 'REQ-700' })
+			// ADR-001 (addresses REQ-001) never reaches or embeds REQ-700.
+			const relationsBoth = await executeQuery(context, { kind: 'relations', id: 'ADR-001' })
 			expect(relationsBoth.complete)
 				.toBe(true)
+			expect(relationsBoth.data!.nodes.map(n => n.id))
+				.not.toContain('REQ-700')
 
-			const relationsOutgoing = await executeQuery(context, { kind: 'relations', id: 'REQ-700', direction: 'outgoing' })
+			const relationsOutgoing = await executeQuery(context, { kind: 'relations', id: 'ADR-001', direction: 'outgoing' })
 			expect(relationsOutgoing.complete)
 				.toBe(true)
 
-			const trace = await executeQuery(context, { kind: 'trace', roots: ['REQ-700'], types: ['derived-from'], direction: 'both', maxDepth: 1 })
+			const trace = await executeQuery(context, { kind: 'trace', roots: ['ADR-001'], types: ['addresses'], direction: 'both', maxDepth: 1 })
 			expect(trace.complete)
 				.toBe(true)
 
-			const impact = await executeQuery(context, { kind: 'impact', roots: ['PRD-001'], maxDepth: 1 })
+			const impact = await executeQuery(context, { kind: 'impact', roots: ['REQ-002'], maxDepth: 1 })
 			expect(impact.complete)
 				.toBe(true)
+			expect(impact.data!.impact.nodes.map(n => n.artifact.id))
+				.not.toContain('REQ-700')
+
+			const resolveCurrent = await executeQuery(context, { kind: 'resolve-current', id: 'REQ-002' })
+			expect(resolveCurrent.complete)
+				.toBe(true)
+		})
+
+		it('finding 4: relations/trace/impact/resolve-current DO gate on PROJECTION loss once the extension-lossy Artifact is itself embedded as an output node, separately from (and even though) edge trust is unaffected', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-700.md', REQ_EXT_ONLY_LOSS)
+			const context = await reloadContext()
+			expect([...context.validation.projectionLossArtifactIds])
+				.toContain('REQ-700')
+
+			const relationsBoth = await executeQuery(context, { kind: 'relations', id: 'REQ-700' })
+			expect(relationsBoth.complete)
+				.toBe(false)
+			expect(relationsBoth.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const trace = await executeQuery(context, { kind: 'trace', roots: ['REQ-700'], types: ['derived-from'], direction: 'both', maxDepth: 1 })
+			expect(trace.complete)
+				.toBe(false)
+			expect(trace.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			// REQ-700 (active, derived-from -> PRD-001) is a depth-1 impact
+			// candidate for root PRD-001, so it is embedded as an impact node too.
+			const impact = await executeQuery(context, { kind: 'impact', roots: ['PRD-001'], maxDepth: 1 })
+			expect(impact.complete)
+				.toBe(false)
+			expect(impact.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
 
 			const resolveCurrent = await executeQuery(context, { kind: 'resolve-current', id: 'REQ-700' })
 			expect(resolveCurrent.complete)
-				.toBe(true)
+				.toBe(false)
+			expect(resolveCurrent.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
 		})
 
 		it('an edge-lossy Artifact in a disconnected component does not block an outgoing-only relations/trace/resolve-current reachable only from a clean root', async () => {
@@ -1007,16 +1231,100 @@ Finding C: an edge-lossy Artifact outside a traversal's reachable component must
 				.toBe('EF-QRY-013')
 		})
 
-		it('an outgoing-only traversal IS blocked when the edge-lossy Artifact\'s own known-valid edge touches the traversal\'s visited set (not a no-op scoping)', async () => {
-			// REQ-950's one valid relation (derived-from -> PRD-001) targets the
-			// same PRD-001 that REQ-001's own outgoing traversal reaches.
+		// Eighth-round Finding 8: an outgoing-only traversal must scope edge
+		// trust to exactly the source records whose own outgoing array it
+		// actually read -- NOT every Artifact merely adjacent to the result via
+		// a known-valid edge in either direction. REQ-950 (edge-lossy elsewhere,
+		// via an unrelated discarded entry) also declares one valid, unrelated
+		// relation `derived-from -> PRD-001`, the same PRD-001 that REQ-001's
+		// own outgoing traversal reaches; a purely outgoing traversal from
+		// REQ-001 never reads REQ-950's outgoing array at all (REQ-950 is not
+		// one of REQ-001's own targets), so REQ-950's unrelated loss cannot
+		// affect this result.
+		it('a lossy-incoming-neighbor (an edge-lossy Artifact with a known-valid edge INTO the visited set) does NOT block an outgoing-only traversal that never reads its own outgoing array', async () => {
 			await writeFile(tempDir, '.engineering/req/REQ-950.md', REQ_BAD_RELATION)
 			const context = await reloadContext()
+			expect([...context.validation.edgeLossArtifactIds])
+				.toEqual(['REQ-950'])
 
 			const relationsOutgoing = await executeQuery(context, { kind: 'relations', id: 'REQ-001', direction: 'outgoing' })
 			expect(relationsOutgoing.complete)
+				.toBe(true)
+			expect(relationsOutgoing.data!.nodes.map(n => n.id))
+				.not.toContain('REQ-950')
+
+			const traceOutgoing = await executeQuery(context, { kind: 'trace', roots: ['REQ-001'], types: ['derived-from', 'governed-by'], direction: 'outgoing', maxDepth: 5 })
+			expect(traceOutgoing.complete)
+				.toBe(true)
+		})
+
+		it('max_depth: 0 is contractually roots-only with no edges, so an outgoing trace never reads ANY Artifact\'s outgoing array -- not even the root\'s own, and not an edge-lossy neighbor\'s whose valid edge targets the root directly', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-951.md', REQ_951_TARGETS_ROOT)
+			const context = await reloadContext()
+			expect([...context.validation.edgeLossArtifactIds])
+				.toEqual(['REQ-951'])
+
+			const traceZero = await executeQuery(context, { kind: 'trace', roots: ['REQ-001'], types: ['derived-from'], direction: 'outgoing', maxDepth: 0 })
+			expect(traceZero.complete)
+				.toBe(true)
+			expect(traceZero.data!.nodes)
+				.toEqual([{ artifact: expect.objectContaining({ id: 'REQ-001' }), depth: 0 }])
+			expect(traceZero.data!.edges)
+				.toEqual([])
+		})
+	})
+
+	describe('finding 7: extension-value loss (EF-ENV-007 non-finite numbers) against actual JSON output', () => {
+		it('a non-finite (YAML \'.inf\') top-level extension value gates lookup with EF-QRY-013 rather than returning complete: true with a value that would silently JSON.stringify to null', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-960.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-960
+title: Non-Finite Extension Value
+status: active
+summary: A requirement whose top-level extension value is non-finite (EF-ENV-007), for Finding 7's regression against actual JSON output.
+tags: []
+relations: []
+resources: []
+x-acme-score: .inf
+---
+
+## Requirement
+
+Exercises EF-ENV-007 non-finite extension values.
+
+## Rationale
+
+Finding 7 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+			const context = await reloadContext()
+			expect([...context.validation.extensionValueLossArtifactIds])
+				.toEqual(['REQ-960'])
+			expect([...context.validation.projectionLossArtifactIds])
+				.toContain('REQ-960')
+
+			// The value survives verbatim in memory (`nodeToPlainValue`'s doc) --
+			// proving the hazard the gate below prevents from ever reaching a
+			// `complete: true` result: `JSON.stringify` (what the CLI's own JSON
+			// output ultimately does to every query result) silently launders a
+			// non-finite number to `null`, with no diagnostic of its own at that
+			// point.
+			const record = context.validation.byId.get('REQ-960')!
+			expect(record.envelope.extensions['x-acme-score'])
+				.toBe(Infinity)
+			expect(JSON.parse(JSON.stringify({ score: record.envelope.extensions['x-acme-score'] })))
+				.toEqual({ score: null })
+
+			const result = await executeQuery(context, { kind: 'lookup', id: 'REQ-960' })
+			expect(result.complete)
 				.toBe(false)
-			expect(relationsOutgoing.diagnostics[0]!.code)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-013')
 		})
 	})
@@ -1219,6 +1527,104 @@ Finding C: an edge-lossy Artifact outside a traversal's reachable component must
 			expect(result.data!.artifacts.map(a => a.id))
 				.toEqual(['REQ-001'])
 		})
+
+		// Ninth-round Finding 9: field-level loss tracking + "already excluded
+		// by a trustworthy predicate" precision.
+
+		it('a tag-loss policy does not gate a type=requirement + tags request: its trusted \'type\' field already excludes it, so its tag loss cannot have changed membership', async () => {
+			await writeFile(tempDir, '.engineering/pol/POL-900.md', `---
+schema: ef/policy@1
+type: policy
+id: POL-900
+title: Tag Loss Policy
+status: active
+summary: A policy whose tags array drops a non-string entry, for Finding 9's already-excluded-by-a-trustworthy-predicate regression.
+tags:
+  - alpha
+relations: []
+resources: []
+---
+
+## Policy Statement
+
+Statement text.
+
+## Rationale
+
+Rationale text.
+`.replace('tags:\n  - alpha\n', 'tags:\n  - alpha\n  - 123\n'))
+			const withLoss = await reloadContext()
+			expect([...withLoss.validation.tagLossArtifactIds])
+				.toEqual(['POL-900'])
+
+			const result = await executeQuery(withLoss, { kind: 'list', type: ['requirement'], tagsAny: ['alpha'] })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.artifacts.map(a => a.id))
+				.not.toContain('POL-900')
+		})
+
+		it('relation-extension-only loss (EF-REL-015) never gates a relation_type/relation_target filter: the (type, target) pair is unaffected regardless of match', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-700.md', REQ_EXT_ONLY_LOSS)
+			const withLoss = await reloadContext()
+			expect(withLoss.validation.edgeLossArtifactIds.size)
+				.toBe(0)
+			expect([...withLoss.validation.relationExtensionLossArtifactIds])
+				.toEqual(['REQ-700'])
+
+			// A filter REQ-700 does not match at all (it only declares
+			// 'derived-from -> PRD-001'): before the fix, extension-only loss was
+			// unconditionally added to the membership-risk set whenever ANY
+			// relation filter was requested, gating this unrelated query too.
+			const result = await executeQuery(withLoss, { kind: 'list', relationType: 'governed-by', relationTarget: 'POL-001' })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.artifacts.map(a => a.id))
+				.toEqual(['REQ-001'])
+		})
+
+		it('an EF-RES-001 confined to \'normative\' gates a resource_normative filter (the exact lossy field this filter reads)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-970.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-970
+title: Malformed Normative Field
+status: active
+summary: A requirement whose Resource 'normative' field is malformed, for Finding 9's per-field loss regression.
+tags: []
+relations: []
+resources:
+  - type: reference
+    location: .engineering/resources/REQ-970/notes.md
+    role: reference
+    media_type: text/markdown
+    normative: "yes"
+    description: Notes.
+---
+
+## Requirement
+
+Exercises EF-RES-001 confined to the 'normative' field.
+
+## Rationale
+
+Finding 9 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+			await writeFile(tempDir, '.engineering/resources/REQ-970/notes.md', '# Notes\n')
+			const withLoss = await reloadContext()
+			expect([...(withLoss.validation.resourceFieldLossById.get('REQ-970') ?? [])])
+				.toEqual(['normative'])
+
+			const result = await executeQuery(withLoss, { kind: 'list', resourceNormative: false })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
 	})
 
 	describe('search', () => {
@@ -1258,6 +1664,52 @@ Finding C: an edge-lossy Artifact outside a traversal's reachable component must
 				.toBe('EF-QRY-002')
 			expect(result.diagnostics[0]!.message)
 				.toContain('\'limit\' must be a positive integer or null')
+		})
+
+		// Ninth-round Finding 9: an EF-RES-001 confined to a field search never
+		// reads ('normative'/'type'/'role') must not gate search, unlike an
+		// EF-RES-001 that actually touches 'location'/'description'.
+		it('an EF-RES-001 confined to \'normative\' (location/description intact) does not gate search', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-970.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-970
+title: Malformed Normative Field
+status: active
+summary: A requirement whose Resource 'normative' field is malformed, for Finding 9's per-field loss regression.
+tags: []
+relations: []
+resources:
+  - type: reference
+    location: .engineering/resources/REQ-970/notes.md
+    role: reference
+    media_type: text/markdown
+    normative: "yes"
+    description: Notes.
+---
+
+## Requirement
+
+Exercises EF-RES-001 confined to the 'normative' field.
+
+## Rationale
+
+Finding 9 regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+			await writeFile(tempDir, '.engineering/resources/REQ-970/notes.md', '# Notes\n')
+			const withLoss = await reloadContext()
+			expect([...(withLoss.validation.resourceFieldLossById.get('REQ-970') ?? [])])
+				.toEqual(['normative'])
+
+			const result = await executeQuery(withLoss, { kind: 'search', terms: ['filtering'] })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.results.some(r => r.artifact.id === 'REQ-970'))
+				.toBe(false)
 		})
 	})
 
@@ -1660,10 +2112,21 @@ Finding C: an edge-lossy Artifact outside a traversal's reachable component must
 
 			const realGit = createGitRepository(tempDir, createGitExecutor())
 			// REQ-001.md exists as a real blob at `tipOid`'s tree (proven by the
-			// real `readTree` call this override still delegates to); only the
-			// content fetch is forced to fail, distinct from a genuine absence.
+			// real `readTree` call this override still delegates to); only that
+			// specific blob's content fetch is forced to fail, distinct from a
+			// genuine absence. `computeHistory` also reads `.engineering/ef.yaml`'s
+			// own blob to validate the bootstrap boundary; that read must still
+			// succeed for real or the walk never reaches bootstrap at all, so the
+			// override is scoped to the REQ-001.md blob oid specifically rather
+			// than failing every `readBlob` call unconditionally.
+			const treeResult = await realGit.readTree(tipOid)
+			if (treeResult.kind !== 'resolved')
+				throw new Error(`expected tree to resolve, got ${treeResult.kind}`)
+			const req001Entry = treeResult.entries.find(entry => entry.path === '.engineering/req/REQ-001.md')
+			if (!req001Entry)
+				throw new Error('expected .engineering/req/REQ-001.md to be present in the tree')
 			const brokenGit = wrapGitRepository(realGit, {
-				readBlob: async () => ({ kind: 'missing' }),
+				readBlob: async (blobOid: string) => (blobOid === req001Entry.oid ? { kind: 'missing' } : realGit.readBlob(blobOid)),
 			})
 			const historyContext: QueryContext = {
 				...context,

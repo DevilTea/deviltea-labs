@@ -154,6 +154,17 @@ export interface GitTreeEntry {
 	path: string
 	mode: string
 	oid: string
+	/**
+	 * `blob` (an ordinary file's content) and `tree` (a subdirectory) are
+	 * readable through this adapter's own `readBlob`/`readTree`. `commit` is a
+	 * gitlink (a Git submodule reference, mode `160000`): `oid` names a commit
+	 * in a DIFFERENT repository entirely, never a blob this repository can
+	 * read. A caller classifying entries by this field must not fold `commit`
+	 * into the same bucket as `blob` -- doing so would treat a gitlink as a
+	 * readable file candidate that then has no corresponding blob to read
+	 * (`application/snapshot.ts`'s `entryKindOf` gives it its own `'other'`
+	 * kind for exactly this reason).
+	 */
 	type: 'blob' | 'tree' | 'commit'
 }
 
