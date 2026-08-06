@@ -118,6 +118,34 @@ describe('writeInitMarker / readInitMarker', () => {
 			.toEqual({ outcome: 'invalid' })
 	})
 
+	it('reports invalid when the parsed JSON value is not an object at all (e.g. a bare string)', async () => {
+		const target = path.join(tempRoot, 'init-state.json')
+		fs.writeFileSync(target, JSON.stringify('just-a-string'))
+		const result = await readInitMarker(target)
+		expect(result)
+			.toEqual({ outcome: 'invalid' })
+	})
+
+	it('reports invalid when the parsed JSON value is the literal null', async () => {
+		const target = path.join(tempRoot, 'init-state.json')
+		fs.writeFileSync(target, 'null')
+		const result = await readInitMarker(target)
+		expect(result)
+			.toEqual({ outcome: 'invalid' })
+	})
+
+	it('reports a non-ENOENT read failure distinctly rather than as missing', async () => {
+		const target = path.join(tempRoot, 'a-directory')
+		fs.mkdirSync(target)
+		const result = await readInitMarker(target)
+		expect(result.outcome)
+			.toBe('failed')
+		if (result.outcome === 'failed') {
+			expect(result.error.code)
+				.toBe('EISDIR')
+		}
+	})
+
 	it('writeInitMarker reports already-exists rather than overwriting a marker from another invocation', async () => {
 		const target = path.join(tempRoot, 'init-state.json')
 		const firstNonce = generateNonce()

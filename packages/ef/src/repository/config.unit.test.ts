@@ -187,6 +187,20 @@ extra: true
 				.toBe(true)
 		})
 
+		it('silently ignores a non-string top-level mapping key (not registered as a field name)', () => {
+			const yaml = `${SINGLE_REPO_YAML}123: extra\n`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.diagnostics)
+				.toEqual([])
+			expect(result.config)
+				.toEqual({
+					schema: 'ef/config@1',
+					repository: { integrationRef: 'refs/heads/main' },
+					linkedRepositories: [],
+					schemas: { artifactWriteMajor: 1 },
+				})
+		})
+
 		it('warns (not errors) on non-canonical top-level field order', () => {
 			const yaml = `schema: ef/config@1
 linked_repositories: []
@@ -210,6 +224,56 @@ schemas:
 				.toBeNull()
 			expect(result.diagnostics.some(d => d.code === 'EF-FS-001' && d.field === 'schema'))
 				.toBe(true)
+		})
+
+		it('rejects a schema value that is not a string at all', () => {
+			const yaml = SINGLE_REPO_YAML.replace('schema: ef/config@1', 'schema: 1')
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-001', field: 'schema', message: 'Field \'schema\' must be exactly \'ef/config@1\'.' }),
+				])
+		})
+	})
+
+	describe('structural edge cases', () => {
+		it('treats an entirely empty document as missing the required top-level mapping', () => {
+			const result = decodeConfig('', PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({
+						code: 'EF-FS-001',
+						message: 'Configuration must contain exactly one top-level YAML mapping.',
+						location: { line: 1, column: 1 },
+					}),
+				])
+		})
+
+		it('computes diagnostic locations correctly across CRLF line endings', () => {
+			const yaml = SINGLE_REPO_YAML
+				.replace('refs/heads/main', 'not-a-valid-ref')
+				.replace(/\n/g, '\r\n')
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			const diagnostic = result.diagnostics.find(d => d.field === 'repository.integration_ref')
+			expect(diagnostic?.location)
+				.toEqual({ line: 3, column: 20 })
+		})
+
+		it('does not fail when an explicit-key mapping entry has no value node at all', () => {
+			const yaml = `${SINGLE_REPO_YAML}? extra\n`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-001', field: 'extra', message: 'Unknown top-level field \'extra\'.' }),
+				])
 		})
 	})
 
@@ -251,9 +315,142 @@ schemas:
 			expect(result.diagnostics.some(d => d.code === 'EF-FS-001' && d.field === 'repository.extra'))
 				.toBe(true)
 		})
+
+		it('rejects repository being a non-mapping scalar value', () => {
+			const yaml = `schema: ef/config@1
+repository: not-a-map
+linked_repositories: []
+schemas:
+  artifact_write_major: 1
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-001', field: 'repository', message: 'Field \'repository\' must be a mapping.' }),
+				])
+		})
+
+		it('silently ignores a non-string mapping key inside repository (not registered as a field name)', () => {
+			const yaml = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/main
+  123: extra
+linked_repositories: []
+schemas:
+  artifact_write_major: 1
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.diagnostics)
+				.toEqual([])
+			expect(result.config?.repository)
+				.toEqual({ integrationRef: 'refs/heads/main' })
+		})
 	})
 
 	describe('linked_repositories rules', () => {
+		it('rejects linked_repositories being a non-array scalar value', () => {
+			const yaml = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/main
+linked_repositories: not-a-seq
+schemas:
+  artifact_write_major: 1
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-001', field: 'linked_repositories', message: 'Field \'linked_repositories\' must be an array.' }),
+				])
+		})
+
+		it('rejects a linked_repositories entry that is not a mapping', () => {
+			const yaml = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/main
+linked_repositories:
+  - oops
+schemas:
+  artifact_write_major: 1
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-001', field: 'linked_repositories[0]', message: 'linked_repositories[0] must be a mapping.' }),
+				])
+		})
+
+		it('silently ignores a non-string mapping key inside a linked_repositories entry', () => {
+			const yaml = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/main
+linked_repositories:
+  - id: backend
+    path: repos/be
+    role: implementation
+    required: true
+    123: extra
+schemas:
+  artifact_write_major: 1
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.diagnostics)
+				.toEqual([])
+			expect(result.config?.linkedRepositories)
+				.toEqual([{ id: 'backend', path: 'repos/be', role: 'implementation', required: true }])
+		})
+
+		it('reports every missing required field on an entirely empty entry', () => {
+			const yaml = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/main
+linked_repositories:
+  - id: backend
+    path: repos/be
+    role: implementation
+    required: true
+  - {}
+schemas:
+  artifact_write_major: 1
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-001', field: 'linked_repositories[1].id' }),
+					expect.objectContaining({ code: 'EF-FS-001', field: 'linked_repositories[1].path' }),
+					expect.objectContaining({ code: 'EF-FS-001', field: 'linked_repositories[1].required' }),
+					expect.objectContaining({ code: 'EF-FS-001', field: 'linked_repositories[1].role' }),
+				])
+		})
+
+		it('rejects a path value that is not a string at all', () => {
+			const yaml = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/main
+linked_repositories:
+  - id: backend
+    path: 123
+    role: implementation
+    required: true
+schemas:
+  artifact_write_major: 1
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-001', field: 'linked_repositories[0].path', message: 'Field \'linked_repositories[0].path\' must be a string.' }),
+				])
+		})
+
 		it('rejects an invalid id', () => {
 			const yaml = COMPOSITE_YAML.replace('id: backend', 'id: Backend')
 			const result = decodeConfig(yaml, PATH)
@@ -474,6 +671,38 @@ schemas:
 				.toBeNull()
 			expect(result.diagnostics.some(d => d.code === 'EF-FS-001' && d.field === 'schemas.extra'))
 				.toBe(true)
+		})
+
+		it('silently ignores a non-string mapping key inside schemas', () => {
+			const yaml = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/main
+linked_repositories: []
+schemas:
+  artifact_write_major: 1
+  123: extra
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.diagnostics)
+				.toEqual([])
+			expect(result.config?.schemas)
+				.toEqual({ artifactWriteMajor: 1 })
+		})
+
+		it('rejects an entirely empty schemas mapping as missing artifact_write_major', () => {
+			const yaml = `schema: ef/config@1
+repository:
+  integration_ref: refs/heads/main
+linked_repositories: []
+schemas: {}
+`
+			const result = decodeConfig(yaml, PATH)
+			expect(result.config)
+				.toBeNull()
+			expect(result.diagnostics)
+				.toEqual([
+					expect.objectContaining({ code: 'EF-FS-001', field: 'schemas.artifact_write_major', message: 'Missing required field \'schemas.artifact_write_major\'.' }),
+				])
 		})
 	})
 

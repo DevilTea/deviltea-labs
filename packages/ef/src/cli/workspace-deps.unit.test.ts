@@ -71,6 +71,18 @@ describe('createWorkspaceDeps', () => {
 			.toBe('mismatched-root')
 	})
 
+	it('reports git-unavailable rather than not-a-worktree when the git executable cannot be run', async () => {
+		const unavailableExecutor = createGitExecutor({ gitPath: path.join(root, 'definitely-not-a-git-binary') })
+		const deps = createWorkspaceDeps(root, unavailableExecutor)
+		const association = await deps.checkWorktreeAssociation('repos/plain')
+		expect(association.kind)
+			.toBe('git-unavailable')
+		if (association.kind === 'git-unavailable') {
+			expect(association.message)
+				.toContain('definitely-not-a-git-binary')
+		}
+	})
+
 	it('reports not-a-worktree for a plain directory outside any Git repository', async () => {
 		const nonGitRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-workspace-nogit-')))
 		try {

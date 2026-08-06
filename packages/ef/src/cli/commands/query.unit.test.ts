@@ -244,4 +244,45 @@ describe('runQueryCommand', () => {
 		expect(json.diagnostics[0].code)
 			.toBe('EF-QRY-010')
 	})
+
+	it('establishes history context and reports the bootstrap commit when the integration ref resolves', async () => {
+		await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
+		await writeFile(root, '.engineering/.gitignore', GITIGNORE)
+		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
+		const bootstrapOid = commitAll(root, 'bootstrap')
+
+		const outcome = await runQueryCommand({ kind: 'history', id: 'PROJECT' }, { format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(0)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(true)
+		expect(json.data.artifact_id)
+			.toBe('PROJECT')
+		expect(json.data.commits)
+			.toEqual([{ oid: bootstrapOid, changed_paths: expect.arrayContaining(['.engineering/PROJECT.md']) }])
+	})
+
+	it('reports EF-QRY-013 (project-resolution failure envelope) when the project snapshot cannot be loaded', async () => {
+		await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
+		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
+		// `.gitignore` is read unconditionally by `loadSnapshotFromWorkingTree`
+		// but never inspected by project discovery/resolution, so replacing it
+		// with a directory lets `resolveProject` succeed while the snapshot load
+		// itself fails with `read-error`, folding into the same envelope as an
+		// unresolvable project (10-query-and-trace.md "Invalid Graph and Partial
+		// Results").
+		await fs.mkdir(path.join(root, '.engineering', '.gitignore'))
+
+		const outcome = await runQueryCommand({ kind: 'lookup', id: 'PROJECT' }, { format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.data)
+			.toBeNull()
+		expect(json.diagnostics[0].code)
+			.toBe('EF-QRY-013')
+	})
 })

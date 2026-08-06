@@ -1,4 +1,4 @@
-import type { Table } from './markdown'
+import type { Heading, ListItem, Paragraph, Root, RootContent, Table } from './markdown'
 import { describe, expect, it } from 'vitest'
 import { severityOf } from '../domain/diagnostic-codes'
 import {
@@ -180,6 +180,20 @@ describe('extractSections', () => {
 			.toBe(3)
 	})
 
+	it('defaults headingLine to 0 for a hand-built H2 heading with no position data', () => {
+		// extractSections accepts any Root-shaped value, not only parseBody's
+		// output; a hand-built heading without a `position` field exercises the
+		// `?? 0` fallback that real parsed headings never take.
+		const heading: Heading = { type: 'heading', depth: 2, children: [{ type: 'text', value: 'No Position' }] }
+		const root: Root = { type: 'root', children: [heading] }
+
+		const { sections } = extractSections(root)
+		expect(sections)
+			.toHaveLength(1)
+		expect(sections[0]!.headingLine)
+			.toBe(0)
+	})
+
 	it('does not treat headings inside a fenced code block or inline code as body-section headings', () => {
 		const root = parseOk([
 			'## Requirement',
@@ -234,6 +248,55 @@ describe('isMeaningful', () => {
 			'|---|---|---|',
 		].join('\n'))
 		const { sections } = extractSections(root)
+		expect(isMeaningful(sections[0]!.nodes))
+			.toBe(true)
+	})
+
+	it('is false for a hand-built HTML node whose value is only whitespace', () => {
+		// A whitespace-only `html` value cannot occur in real parseBody output
+		// (an html node is only ever produced from actual tag/comment source
+		// text), but isMeaningful accepts any RootContent array, so this
+		// exercises the blank-content fallback directly.
+		const whitespaceHtml: RootContent = { type: 'html', value: '   ' }
+		expect(isMeaningful([whitespaceHtml]))
+			.toBe(false)
+	})
+
+	it('is true when a hard line break precedes real text within the same paragraph', () => {
+		// A hard break on its own contributes no meaningful content, but the
+		// paragraph as a whole is still meaningful because of the text that
+		// follows it. Starting the paragraph with a backslash line break (no
+		// preceding text) puts the break node first, so its own (non-meaningful)
+		// check actually runs before the text node settles the paragraph's result.
+		const root = parseOk('## Requirement\n\n\\\nSecond line.\n')
+		const { sections } = extractSections(root)
+		expect(sections[0]!.nodes[0]!.type)
+			.toBe('paragraph')
+		expect(isMeaningful(sections[0]!.nodes))
+			.toBe(true)
+	})
+
+	it('is true for a section whose only content is a thematic break', () => {
+		const root = parseOk('## Requirement\n\n***\n')
+		const { sections } = extractSections(root)
+		expect(sections[0]!.nodes.map(node => node.type))
+			.toEqual(['thematicBreak'])
+		expect(isMeaningful(sections[0]!.nodes))
+			.toBe(true)
+	})
+
+	it('is true for a lone reference-style image', () => {
+		const root = parseOk('## Requirement\n\n![alt][ref]\n\n[ref]: /image.png\n')
+		const { sections } = extractSections(root)
+		expect(isMeaningful(sections[0]!.nodes))
+			.toBe(true)
+	})
+
+	it('defaults to true for a section whose only content is a link-reference definition (an unhandled leaf node type with no children)', () => {
+		const root = parseOk('## Requirement\n\n[ref]: /image.png "title"\n')
+		const { sections } = extractSections(root)
+		expect(sections[0]!.nodes.map(node => node.type))
+			.toEqual(['definition'])
 		expect(isMeaningful(sections[0]!.nodes))
 			.toBe(true)
 	})
@@ -309,6 +372,20 @@ describe('isPlaceholderOnly', () => {
 		expect(isPlaceholderOnly([]))
 			.toBe(false)
 	})
+
+	it('is true when an inline image precedes the placeholder text (the image itself is ignored for placeholder-text purposes)', () => {
+		const root = parseOk('## Requirement\n\n![alt](image.png) TODO\n')
+		const { sections } = extractSections(root)
+		expect(isPlaceholderOnly(sections[0]!.nodes))
+			.toBe(true)
+	})
+
+	it('is true when the placeholder text is wrapped in raw inline HTML tags', () => {
+		const root = parseOk('## Requirement\n\n<b>TODO</b>\n')
+		const { sections } = extractSections(root)
+		expect(isPlaceholderOnly(sections[0]!.nodes))
+			.toBe(true)
+	})
 })
 
 describe('listItems', () => {
@@ -341,6 +418,16 @@ describe('listItems', () => {
 		expect(items)
 			.toHaveLength(2)
 	})
+
+	it('defaults line/column to 0 for a hand-built list item with no position data', () => {
+		const item: ListItem = {
+			type: 'listItem',
+			children: [{ type: 'paragraph', children: [{ type: 'text', value: 'Real item' }] }],
+		}
+		const result = listItems([item])
+		expect(result)
+			.toEqual([{ item, line: 0, column: 0 }])
+	})
 })
 
 describe('firstNonEmptyParagraphText', () => {
@@ -367,6 +454,31 @@ describe('firstNonEmptyParagraphText', () => {
 		const { sections } = extractSections(root)
 		expect(firstNonEmptyParagraphText(sections[0]!.nodes))
 			.toBeUndefined()
+	})
+
+	it('collapses a hard line break to no separator in the extracted plain text', () => {
+		const root = parseOk('## Verification\n\nFirst part.  \nSecond part.\n')
+		const { sections } = extractSections(root)
+		const paragraph = firstNonEmptyParagraphText(sections[0]!.nodes)
+		expect(paragraph?.text)
+			.toBe('First part.Second part.')
+	})
+
+	it('skips a paragraph whose only content is a blank/comment HTML node and returns the next real paragraph', () => {
+		// Wrapping the comment in emphasis keeps it inside a `paragraph` node
+		// (a bare leading HTML comment becomes its own block-level `html` node
+		// instead, which a different, already-covered check skips).
+		const root = parseOk('*<!-- pending -->*\n\nResult: passed\n')
+		const paragraph = firstNonEmptyParagraphText(root.children)
+		expect(paragraph?.text)
+			.toBe('Result: passed')
+	})
+
+	it('defaults line/column to 0 for a hand-built paragraph with no position data', () => {
+		const paragraph: Paragraph = { type: 'paragraph', children: [{ type: 'text', value: 'No position text' }] }
+		const result = firstNonEmptyParagraphText([paragraph])
+		expect(result)
+			.toEqual({ node: paragraph, text: 'No position text', line: 0, column: 0 })
 	})
 })
 
@@ -426,5 +538,44 @@ describe('firstMeaningfulNode and readGfmTable (PROJECT Terminology table)', () 
 		const node = firstMeaningfulNode(sections[0]!.nodes)
 		expect(node?.type)
 			.toBe('paragraph')
+	})
+
+	it('reads an inline-code-only cell as its plain code text', () => {
+		const root = parseOk([
+			'## Terminology',
+			'',
+			'| Term | Definition | Avoid or aliases |',
+			'|---|---|---|',
+			'| `flag` | A boolean setting. | - |',
+		].join('\n'))
+		const { sections } = extractSections(root)
+		const table = readGfmTable(firstMeaningfulNode(sections[0]!.nodes) as Table)
+		expect(table.rows[0]!.map(cell => cell.text))
+			.toEqual(['flag', 'A boolean setting.', '-'])
+	})
+
+	it('returns an empty header and no rows for a hand-built table with no rows at all', () => {
+		const table: Table = { type: 'table', children: [] }
+		expect(readGfmTable(table))
+			.toEqual({ node: table, line: 0, column: 0, header: [], rows: [] })
+	})
+
+	it('defaults table, header-cell, and data-cell line/column to 0 when position data is absent throughout', () => {
+		const table: Table = {
+			type: 'table',
+			children: [
+				{ type: 'tableRow', children: [{ type: 'tableCell', children: [{ type: 'text', value: 'Term' }] }] },
+				{ type: 'tableRow', children: [{ type: 'tableCell', children: [{ type: 'text', value: 'Foo' }] }] },
+			],
+		}
+		const info = readGfmTable(table)
+		expect(info.line)
+			.toBe(0)
+		expect(info.column)
+			.toBe(0)
+		expect(info.header)
+			.toEqual([{ text: 'Term', line: 0, column: 0 }])
+		expect(info.rows)
+			.toEqual([[{ text: 'Foo', line: 0, column: 0 }]])
 	})
 })

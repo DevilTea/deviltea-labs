@@ -385,9 +385,12 @@ Text.
 			.toBe('EF-QRY-002')
 	})
 
-	// ---- No command recognized: action never ran, outcome stays unset -----------
+	// ---- Group command with no matching leaf: Commander outputs help then throws ---
+	// (caught as a CommanderError in runCli's try/catch, not the `outcome ?? ...`
+	// fallback -- `query`'s own Command has no .action(), so Commander's
+	// exitOverride rejects before any leaf action can call setOutcome.)
 
-	it('ef query with no subcommand falls through to "no command was recognized": exit 2', async () => {
+	it('ef query with no subcommand rejects as invalid invocation via Commander\'s own exitOverride: exit 2', async () => {
 		const outcome = await runCli(['query'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(2)

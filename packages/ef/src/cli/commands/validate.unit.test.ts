@@ -1,3 +1,4 @@
+import type { GitExecOutcome, GitExecutor } from '../../git/executor'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -5,6 +6,18 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runValidateCommand } from './validate'
+
+/** Wraps a real executor, forcing failure for `execIn` calls matching `shouldFail`; every other call passes through unchanged. */
+function withSelectiveFailure(base: GitExecutor, shouldFail: (args: readonly string[]) => boolean, message: string): GitExecutor {
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: (root, args, options): Promise<GitExecOutcome> => {
+			if (shouldFail(args))
+				return Promise.resolve({ ok: false, failure: { kind: 'unavailable', message } })
+			return base.execIn(root, args, options)
+		},
+	}
+}
 
 const GIT_TEST_ENV = {
 	GIT_AUTHOR_NAME: 'EF Test',
@@ -514,5 +527,172 @@ describe('runValidateCommand', () => {
 			.toBe(true)
 		expect(json.valid)
 			.toBe(true)
+	})
+
+	it('bootstrap scope with --workspace and an unresolvable proposed commit still folds in an (empty) workspace check', async () => {
+		// `proposedConfig` stays `undefined` (the proposed commit never resolved),
+		// so the workspace check must fall back to an empty
+		// `linked_repositories` list rather than throwing.
+		await writeMinimalProject(root)
+		commitAll(root, 'x')
+
+		const outcome = await runValidateCommand({ scope: 'bootstrap', proposed: 'f'.repeat(40), strict: false, warningsAsErrors: false, workspace: true, format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.workspace)
+			.toBe(true)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-011')
+	})
+
+	it('bootstrap scope succeeds when the integration ref already resolves, as long as its history never contained EF state', async () => {
+		// 09-validation.md's bootstrap exception permits *either* the ref not
+		// resolving yet *or* resolving only to commits that never contained
+		// '.engineering/ef.yaml'. This exercises the second, less obvious half:
+		// `main` already has a prior (non-EF) commit before the bootstrap
+		// candidate branches off it.
+		await writeFile(root, 'README.md', '# not an EF project yet\n')
+		const baseCommit = commitAll(root, 'pre-existing non-EF history')
+		git(root, ['checkout', '-q', '-b', 'bootstrap-branch'])
+		await writeMinimalProject(root)
+		const proposed = commitAll(root, 'bootstrap candidate')
+
+		const outcome = await runValidateCommand({ scope: 'bootstrap', proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(0)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.valid)
+			.toBe(true)
+		expect(json.expected_ref_oid)
+			.toBe(baseCommit)
+	})
+
+	// ---- Snapshot scope: project-snapshot load failure and unconfigured project ----
+
+	it('snapshot scope reports EF-VAL-001 (not EF-VAL-006) when the snapshot itself fails to load with a read-error', async () => {
+		// `.gitignore` is read unconditionally by `loadSnapshotFromWorkingTree`
+		// but never inspected by project discovery/resolution, so replacing it
+		// with a directory lets `resolveProject` succeed while the snapshot load
+		// itself fails with `read-error` -- a reason `loadSnapshotFromWorkingTree`
+		// can actually produce, unlike `git-unavailable` (fs-only, no Git calls).
+		await writeMinimalProject(root)
+		await fs.rm(path.join(root, '.engineering', '.gitignore'))
+		await fs.mkdir(path.join(root, '.engineering', '.gitignore'))
+
+		const outcome = await runValidateCommand({ scope: 'snapshot', strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-001')
+	})
+
+	it('snapshot scope with --workspace falls back to null integration_ref and an empty linked-repositories list when ef.yaml is malformed', async () => {
+		await writeFile(root, '.engineering/ef.yaml', 'not: valid: yaml: [')
+		await writeFile(root, '.engineering/.gitignore', GITIGNORE)
+		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
+		commitAll(root, 'malformed config')
+
+		const outcome = await runValidateCommand({ scope: 'snapshot', strict: false, warningsAsErrors: false, workspace: true, format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(1)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.workspace)
+			.toBe(true)
+		expect(json.valid)
+			.toBe(false)
+		expect(json.integration_ref)
+			.toBeNull()
+		expect(json.diagnostics.some((d: { code: string }) => d.code === 'EF-FS-001'))
+			.toBe(true)
+	})
+
+	// ---- Transition scope: `peekConfigAt` (baseline config peek) edge cases ----
+
+	it('transition scope reports EF-VAL-006 when Git becomes unavailable while reading the baseline tree', async () => {
+		await writeMinimalProject(root)
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+		const baseline = commitAll(root, 'baseline')
+		git(root, ['checkout', '-q', '-b', 'feature'])
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+		await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: modifies, target: REQ-001 }]'))
+		const proposed = commitAll(root, 'proposed')
+		git(root, ['checkout', '-q', 'main'])
+
+		const flakyExecutor = withSelectiveFailure(createGitExecutor(), args => args[0] === 'ls-tree', 'stub: ls-tree transiently unavailable')
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('stub: ls-tree transiently unavailable')
+	})
+
+	it('transition scope reports EF-VAL-006 when Git becomes unavailable while reading a blob', async () => {
+		await writeMinimalProject(root)
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+		const baseline = commitAll(root, 'baseline')
+		git(root, ['checkout', '-q', '-b', 'feature'])
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+		await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: modifies, target: REQ-001 }]'))
+		const proposed = commitAll(root, 'proposed')
+		git(root, ['checkout', '-q', 'main'])
+
+		const flakyExecutor = withSelectiveFailure(createGitExecutor(), args => args[0] === 'cat-file' && args[1] === '-p', 'stub: cat-file -p transiently unavailable')
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor: flakyExecutor })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+		expect(json.diagnostics[0].message)
+			.toContain('stub: cat-file -p transiently unavailable')
+	})
+
+	it('transition scope reports EF-VAL-002 when the baseline commit predates .engineering entirely (no ef.yaml in its tree)', async () => {
+		await writeFile(root, 'README.md', '# not an EF project yet\n')
+		const baseline = commitAll(root, 'pre-EF history')
+		await writeMinimalProject(root)
+		const proposed = commitAll(root, 'proposed')
+
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.baseline_oid)
+			.toBe(baseline)
+		expect(json.diagnostics.some((d: { code: string }) => d.code === 'EF-VAL-007'))
+			.toBe(true)
+		expect(json.diagnostics.some((d: { code: string, message: string }) => d.code === 'EF-VAL-002' && d.message.includes('does not contain a valid authoritative EF snapshot')))
+			.toBe(true)
+	})
+
+	it('transition scope with --workspace falls back to an empty linked-repositories list when the proposed commit\'s ef.yaml is malformed', async () => {
+		await writeMinimalProject(root)
+		const baseline = commitAll(root, 'baseline')
+		git(root, ['checkout', '-q', '-b', 'feature'])
+		await writeFile(root, '.engineering/ef.yaml', 'not: valid: yaml: [')
+		const proposed = commitAll(root, 'proposed with malformed config')
+		git(root, ['checkout', '-q', 'main'])
+
+		const outcome = await runValidateCommand({ scope: 'transition', baseline, proposed, strict: false, warningsAsErrors: false, workspace: true, format: 'json', noColor: false }, deps())
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.workspace)
+			.toBe(true)
+		expect(json.proposed_oid)
+			.toBe(proposed)
+		// The proposed commit's own malformed config is reported on its own
+		// terms (EF-FS-001) rather than crashing the workspace fallback.
+		expect(json.diagnostics.some((d: { code: string }) => d.code === 'EF-FS-001'))
+			.toBe(true)
+		expect(json.valid)
+			.toBe(false)
+		expect(outcome.exitCode)
+			.toBe(1)
 	})
 })

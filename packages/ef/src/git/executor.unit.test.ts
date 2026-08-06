@@ -217,6 +217,49 @@ describe('createGitExecutor', () => {
 			.toEqual({ kind: 'output-limit-exceeded', stream: 'stdout', limitBytes: 3 })
 	})
 
+	it('reports output-limit-exceeded for stderr, independent of the stdout limit check', async () => {
+		const executor = createGitExecutor()
+		// A real, deterministic Git error: the "not a git command" message on
+		// stderr is comfortably longer than the 3-byte limit.
+		const outcome = await executor.exec(['not-a-real-git-subcommand'], { maxOutputBytes: 3 })
+
+		expect(outcome.ok)
+			.toBe(false)
+		if (outcome.ok)
+			return
+		expect(outcome.failure)
+			.toEqual({ kind: 'output-limit-exceeded', stream: 'stderr', limitBytes: 3 })
+	})
+
+	it('ignores stdout/stderr data that arrives after the outcome has already settled', async () => {
+		// Points the executor at a small standalone Node script (a real spawned
+		// process, using the documented `gitPath` override seam) that writes a
+		// first burst to stdout, then - after the executor has already settled
+		// on output-limit-exceeded and sent SIGTERM - ignores that signal and
+		// writes a second burst to both stdout and stderr before exiting on its
+		// own. The executor must still resolve exactly once, with only the
+		// first burst's outcome, proving the late data is safely dropped.
+		const script = [
+			'process.on(\'SIGTERM\', () => {})',
+			'process.stdout.write(\'A\'.repeat(5000))',
+			'setTimeout(() => {',
+			'  process.stdout.write(\'C\'.repeat(5000))',
+			'  process.stderr.write(\'D\'.repeat(5000))',
+			'  process.exit(0)',
+			'}, 30)',
+		].join('\n')
+		const executor = createGitExecutor({ gitPath: process.execPath })
+
+		const outcome = await executor.exec(['-e', script], { maxOutputBytes: 10 })
+
+		expect(outcome.ok)
+			.toBe(false)
+		if (outcome.ok)
+			return
+		expect(outcome.failure)
+			.toEqual({ kind: 'output-limit-exceeded', stream: 'stdout', limitBytes: 10 })
+	})
+
 	it('resolves aborted without spawning when the signal is already aborted', async () => {
 		const executor = createGitExecutor()
 		const controller = new AbortController()

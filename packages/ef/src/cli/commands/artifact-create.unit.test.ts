@@ -1,3 +1,4 @@
+import type { GitExecutor } from '../../git/executor'
 import type { Prompts } from '../prompts'
 import type { ArtifactCreateCommandOptions } from './artifact-create'
 import { execFileSync } from 'node:child_process'
@@ -7,6 +8,14 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runArtifactCreateCommand } from './artifact-create'
+
+/** Every `execIn` call fails; simulates Git becoming unavailable during project resolution. */
+function unavailableExecutor(message: string): GitExecutor {
+	return {
+		exec: async () => ({ ok: false, failure: { kind: 'unavailable', message } }),
+		execIn: async () => ({ ok: false, failure: { kind: 'unavailable', message } }),
+	}
+}
 
 const CONFIG_YAML = `schema: ef/config@1
 repository:
@@ -222,5 +231,144 @@ describe('runArtifactCreateCommand', () => {
 			.toContain('Interactive Title')
 		expect(written)
 			.toContain('Interactive summary sentence.')
+	})
+
+	// ---- Project resolution / snapshot-load failure reasons --------------------
+
+	it('reports EF-VAL-012 (incomplete-initialization) when .engineering exists without ef.yaml', async () => {
+		const bareDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-create-incomplete-')))
+		execFileSync('git', ['init', '-q', '-b', 'main', bareDir])
+		await fs.mkdir(path.join(bareDir, '.engineering'))
+		try {
+			const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), { cwd: bareDir, executor: createGitExecutor(), prompts: neverPrompts() })
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-012')
+		}
+		finally {
+			await fs.rm(bareDir, { recursive: true, force: true })
+		}
+	})
+
+	it('reports EF-VAL-006 (git-unavailable) when project resolution itself cannot use Git', async () => {
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), { cwd: root, executor: unavailableExecutor('stub: git unavailable'), prompts: neverPrompts() })
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-006')
+	})
+
+	it('reports EF-VAL-001 (not EF-VAL-006) when the project snapshot itself fails to load with a read-error', async () => {
+		// `.gitignore` is read unconditionally by `loadSnapshotFromWorkingTree`
+		// but never inspected by project discovery/resolution, so replacing it
+		// with a directory lets `resolveProject` succeed while the snapshot load
+		// itself fails with `read-error` -- the only failure reason that
+		// function can actually produce (it never calls Git).
+		await fs.rm(path.join(root, '.engineering', '.gitignore'))
+		await fs.mkdir(path.join(root, '.engineering', '.gitignore'))
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-001')
+	})
+
+	// ---- Non-interactive value collection: summary specifically ----------------
+
+	it('exits 2 naming only "summary" when title is present but summary is missing non-interactively', async () => {
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true, summary: undefined }), deps())
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].message)
+			.toBe('Missing required non-interactive value(s): summary.')
+	})
+
+	// ---- Interactive cancellation: title vs. summary ---------------------------
+
+	it('cancelling the interactive Title prompt aborts without writing, exit 2', async () => {
+		const prompts: Prompts = { ...neverPrompts(), text: async () => undefined }
+		const outcome = await runArtifactCreateCommand({ type: 'req', format: 'json', noColor: true, noInput: false, dryRun: false, yes: false }, deps(prompts))
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].message)
+			.toBe('Interactive Artifact creation was cancelled.')
+	})
+
+	it('cancelling the interactive Summary prompt (after a supplied Title) aborts without writing, exit 2', async () => {
+		const prompts: Prompts = {
+			...neverPrompts(),
+			text: async (opts) => {
+				if (opts.message === 'Summary')
+					return undefined
+				throw new Error(`unexpected text prompt: ${opts.message}`)
+			},
+		}
+		const outcome = await runArtifactCreateCommand({ type: 'req', title: 'Provided Title', format: 'json', noColor: true, noInput: false, dryRun: false, yes: false }, deps(prompts))
+		expect(outcome.exitCode)
+			.toBe(2)
+		await expect(fs.stat(path.join(root, '.engineering/req/REQ-001.md'))).rejects.toThrow()
+	})
+
+	// ---- applyCreatePlan outcomes: raced vs. a non-raced apply failure ---------
+
+	it('exits 1 (raced, EF-ID-004) when the target path is created concurrently between confirmation and publication', async () => {
+		// Simulates a genuine race: another process creates the exact
+		// next-allocated path during the async gap between the plan being
+		// computed and the interactive mutation confirmation resolving.
+		const prompts: Prompts = {
+			...neverPrompts(),
+			confirmMutation: async () => {
+				await fs.mkdir(path.join(root, '.engineering/req'), { recursive: true })
+				await fs.writeFile(path.join(root, '.engineering/req/REQ-001.md'), 'raced content')
+				return true
+			},
+		}
+		const outcome = await runArtifactCreateCommand(baseOptions({ format: 'json', noInput: false }), deps(prompts))
+		expect(outcome.exitCode)
+			.toBe(1)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(true)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-ID-004')
+		const content = await fs.readFile(path.join(root, '.engineering/req/REQ-001.md'), 'utf8')
+		expect(content)
+			.toBe('raced content')
+	})
+
+	it('exits 2 (incomplete, not raced) when the temporary file cannot be written (unwritable canonical directory)', async () => {
+		// The canonical type directory exists (so `ensureDirectory` and the
+		// initial target-existence check both succeed cleanly) but is
+		// unwritable, so `writeTempFileComplete` itself fails -- distinct from
+		// the already-exists ("raced") outcome, since the target path was
+		// never occupied.
+		await fs.mkdir(path.join(root, '.engineering/req'), { recursive: true })
+		await fs.chmod(path.join(root, '.engineering/req'), 0o555)
+		try {
+			const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(false)
+			expect(json.applied)
+				.toBe(false)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-001')
+			expect(json.diagnostics[0].message)
+				.toContain('Failed to write the temporary file')
+		}
+		finally {
+			await fs.chmod(path.join(root, '.engineering/req'), 0o755)
+		}
 	})
 })

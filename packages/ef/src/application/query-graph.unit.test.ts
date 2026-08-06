@@ -93,6 +93,18 @@ describe('dedupeSortEdges / dedupeSortIds', () => {
 		expect(dedupeSortIds(['REQ-002', 'REQ-001', 'REQ-001']))
 			.toEqual(['REQ-001', 'REQ-002'])
 	})
+
+	it('falls through to comparing target when source and type both tie', () => {
+		const edges = dedupeSortEdges([
+			{ source: 'A', type: 'derived-from', target: 'Z' },
+			{ source: 'A', type: 'derived-from', target: 'B' },
+		])
+		expect(edges)
+			.toEqual([
+				{ source: 'A', type: 'derived-from', target: 'B' },
+				{ source: 'A', type: 'derived-from', target: 'Z' },
+			])
+	})
 })
 
 describe('inducedEdges', () => {
@@ -105,6 +117,13 @@ describe('inducedEdges', () => {
 				{ source: 'REQ-002', type: 'derived-from', target: 'PRD-001' },
 				{ source: 'REQ-002', type: 'references', target: 'REQ-001' },
 			])
+	})
+
+	it('skips a node ID absent from byId instead of throwing', () => {
+		const { byId } = buildGraph()
+		const edges = inducedEdges(new Set(['REQ-001', 'GHOST', 'PRD-001']), new Set(['derived-from']), byId)
+		expect(edges)
+			.toEqual([{ source: 'REQ-001', type: 'derived-from', target: 'PRD-001' }])
 	})
 })
 
@@ -202,6 +221,23 @@ describe('traceGraph', () => {
 			.toBeUndefined()
 	})
 
+	it('stops expanding once a queued node\'s depth reaches max_depth', () => {
+		const { byId, incoming } = buildGraph()
+		// PRD-001 (depth 0) --incoming derived-from--> REQ-001/REQ-002/REQ-006
+		// (depth 1). With max_depth 1, those depth-1 nodes must be enqueued (for
+		// correct depth bookkeeping) but never expanded further.
+		const result = traceGraph(['PRD-001'], 'incoming', new Set(['derived-from']), 1, byId, incoming)
+		expect([...result!.depths.entries()].sort())
+			.toEqual([['PRD-001', 0], ['REQ-001', 1], ['REQ-002', 1], ['REQ-006', 1]])
+	})
+
+	it('tolerates a root Artifact ID absent from byId, discovering no neighbors for it', () => {
+		const { byId, incoming } = buildGraph()
+		const result = traceGraph(['GHOST-ROOT'], 'outgoing', new Set(['derived-from']), 2, byId, incoming)
+		expect(result)
+			.toEqual({ depths: new Map([['GHOST-ROOT', 0]]), edges: [] })
+	})
+
 	it('supports cyclic relation types (e.g. references) without infinite traversal', () => {
 		const byId = new Map<string, SnapshotArtifactRecord>([
 			['A', record('A', 'requirement', 'active', [rel('references', 'B')])],
@@ -275,6 +311,28 @@ describe('impactGraph', () => {
 		expect(result)
 			.toBeUndefined()
 	})
+
+	it('discovers a reconvergent node only once, via whichever path reaches it first', () => {
+		// Diamond: ROOT <-t- A <-t- COMMON, ROOT <-t- B <-t- COMMON. COMMON is
+		// reachable from ROOT via both A and B; the second arrival must not
+		// re-enqueue or overwrite its already-recorded depth.
+		const byId = new Map<string, SnapshotArtifactRecord>([
+			['ROOT', record('ROOT', 'policy', 'active')],
+			['A', record('A', 'requirement', 'active')],
+			['B', record('B', 'requirement', 'active')],
+			['COMMON', record('COMMON', 'requirement', 'active')],
+		])
+		const incoming = new Map<string, IncomingRelationEdge[]>([
+			['ROOT', [{ from: 'A', type: 'governed-by' }, { from: 'B', type: 'governed-by' }]],
+			['A', [{ from: 'COMMON', type: 'governed-by' }]],
+			['B', [{ from: 'COMMON', type: 'governed-by' }]],
+		])
+		const result = impactGraph(['ROOT'], new Set(['governed-by']), 4, false, byId, incoming)
+		expect(result)
+			.toBeDefined()
+		expect([...result!.depths.entries()].sort())
+			.toEqual([['A', 1], ['B', 1], ['COMMON', 2], ['ROOT', 0]])
+	})
 })
 
 describe('resolveCurrentForQuery / mergeResolveCurrentResults', () => {
@@ -298,6 +356,16 @@ describe('resolveCurrentForQuery / mergeResolveCurrentResults', () => {
 			expect(outcome.result.edges)
 				.toEqual([{ source: 'REQ-003', type: 'superseded-by', target: 'REQ-004' }])
 		}
+	})
+
+	it('reports invalid-graph (not unsupported-type) for a dangling supersession replacement', () => {
+		const byId = new Map<string, SnapshotArtifactRecord>([
+			['REQ-GHOST-SUP', record('REQ-GHOST-SUP', 'requirement', 'superseded', [rel('superseded-by', 'REQ-GHOST-REPLACEMENT')])],
+		])
+		const facts = buildSupersessionFacts(byId)
+		const outcome = resolveCurrentForQuery('REQ-GHOST-SUP', facts)
+		expect(outcome)
+			.toEqual({ ok: false, reason: 'invalid-graph' })
 	})
 
 	it('reports unsupported-type for a CHG root', () => {

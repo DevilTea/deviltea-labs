@@ -1,3 +1,4 @@
+import type { GitRepository } from '../git/repository'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -158,6 +159,33 @@ function commitAll(dir: string, message: string): string {
 function codesOf(diagnostics: readonly { code: string }[]): string[] {
 	return diagnostics.map(d => d.code)
 		.sort()
+}
+
+/** Writes a Git blob object (not a commit) and returns its OID, for "resolves to a non-commit object" fixtures. */
+function hashBlob(dir: string, content: string): string {
+	return execFileSync('git', ['-C', dir, 'hash-object', '-w', '--stdin'], { env: { ...process.env, ...GIT_TEST_ENV }, input: content, encoding: 'utf8' })
+		.trim()
+}
+
+/**
+ * Delegates every {@link GitRepository} method to `real` except the ones
+ * named in `overrides`, so a single low-level Git outcome can be forced
+ * (`git-unavailable`, `missing`, etc.) without spawning a real Git failure.
+ */
+function wrapGitRepository(real: GitRepository, overrides: Partial<GitRepository>): GitRepository {
+	return {
+		root: real.root,
+		findWorktreeRoot: overrides.findWorktreeRoot ?? real.findWorktreeRoot.bind(real),
+		getObjectFormat: overrides.getObjectFormat ?? real.getObjectFormat.bind(real),
+		resolveCommit: overrides.resolveCommit ?? real.resolveCommit.bind(real),
+		resolveRef: overrides.resolveRef ?? real.resolveRef.bind(real),
+		getFirstParent: overrides.getFirstParent ?? real.getFirstParent.bind(real),
+		readTree: overrides.readTree ?? real.readTree.bind(real),
+		readBlob: overrides.readBlob ?? real.readBlob.bind(real),
+		listFirstParentHistory: overrides.listFirstParentHistory ?? real.listFirstParentHistory.bind(real),
+		pathExistsInFirstParentHistory: overrides.pathExistsInFirstParentHistory ?? real.pathExistsInFirstParentHistory.bind(real),
+		diffTrees: overrides.diffTrees ?? real.diffTrees.bind(real),
+	}
 }
 
 describe('validateBootstrap', () => {
@@ -333,5 +361,253 @@ describe('validateBootstrap', () => {
 			.toBe(2)
 		expect(codesOf(result.diagnostics))
 			.toContain('EF-VAL-011')
+	})
+
+	it('reports EF-VAL-006 when git is unavailable while resolving the proposed commit', async () => {
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+
+		const git = wrapGitRepository(repo(), {
+			resolveCommit: async () => ({ kind: 'git-unavailable', message: 'simulated resolve failure' }),
+		})
+		const result = await validateBootstrap({ git, proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-006'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('simulated resolve failure')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.valid)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-011 for a proposed OID that is not a full commit OID (malformed)', async () => {
+		await writeMinimalProject(tempDir)
+		commitAll(tempDir, 'bootstrap')
+
+		const result = await validateBootstrap({ git: repo(), proposedOid: 'deadbeef', operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-011'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('is not a full commit OID')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-011 when the proposed OID resolves to a non-commit object (a blob)', async () => {
+		await writeMinimalProject(tempDir)
+		commitAll(tempDir, 'bootstrap')
+		const blobOid = hashBlob(tempDir, 'not a commit')
+
+		const result = await validateBootstrap({ git: repo(), proposedOid: blobOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-011'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('resolves to a blob, not a commit')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-006 when git is unavailable while materializing the proposed commit', async () => {
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+
+		const real = repo()
+		const git = wrapGitRepository(real, {
+			readTree: async oid => (oid === proposedOid ? { kind: 'git-unavailable', message: 'simulated readTree failure' } : real.readTree(oid)),
+		})
+		const result = await validateBootstrap({ git, proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-006'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('simulated readTree failure')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-011 when the proposed commit could not be materialized for a reason other than git-unavailable', async () => {
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+
+		const real = repo()
+		const git = wrapGitRepository(real, {
+			readTree: async oid => (oid === proposedOid ? { kind: 'missing' } : real.readTree(oid)),
+		})
+		const result = await validateBootstrap({ git, proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-011'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('could not be materialized')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-007 when the proposed tree has no ef.yaml to establish an integration_ref', async () => {
+		await writeFile(tempDir, '.engineering/.gitignore', GITIGNORE)
+		await writeFile(tempDir, '.engineering/PROJECT.md', PROJECT_MD)
+		const proposedOid = commitAll(tempDir, 'bootstrap without ef.yaml')
+
+		const result = await validateBootstrap({ git: repo(), proposedOid, operationStartRefState: { resolved: false } })
+
+		// The snapshot-level "no ef.yaml found" diagnostic and this function's own
+		// "does not name a valid integration_ref" diagnostic share the same code
+		// and location (no path/artifactId), so they dedupe to a single entry
+		// (domain/diagnostics.ts dedupeDiagnostics: code + location, excluding
+		// message text) -- the control-flow branch under test still runs either way.
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-007'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('No \'.engineering/ef.yaml\' configuration was found')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('is valid when the ref already resolves to a pre-existing non-EF commit that is the bootstrap commit\'s first parent', async () => {
+		await writeFile(tempDir, 'README.md', '# Ordinary pre-EF history\n')
+		const refTipOid = commitAll(tempDir, 'ordinary pre-EF commit')
+
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap on top of the resolved ref tip')
+
+		const result = await validateBootstrap({
+			git: repo(),
+			proposedOid,
+			operationStartRefState: { resolved: true, oid: refTipOid },
+		})
+
+		expect(result.diagnostics)
+			.toEqual([])
+		expect(result.complete)
+			.toBe(true)
+		expect(result.valid)
+			.toBe(true)
+		expect(result.exitCode)
+			.toBe(0)
+		expect(result.expectedRefOid)
+			.toBe(refTipOid)
+	})
+
+	it('reports EF-VAL-006 when git is unavailable while checking proposed parentage', async () => {
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+
+		const git = wrapGitRepository(repo(), {
+			getFirstParent: async () => ({ kind: 'git-unavailable', message: 'simulated parentage failure' }),
+		})
+		const result = await validateBootstrap({ git, proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-006'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('simulated parentage failure')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-011 when the ref was previously unresolved and the proposed commit has inapplicable parentage', async () => {
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+
+		const git = wrapGitRepository(repo(), {
+			getFirstParent: async () => ({ kind: 'missing' }),
+		})
+		const result = await validateBootstrap({ git, proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-011'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('has inapplicable parentage')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-006 when git is unavailable checking bootstrap history for a resolved ref', async () => {
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+		const refTipOid = 'd'.repeat(40)
+
+		const real = repo()
+		const git = wrapGitRepository(real, {
+			pathExistsInFirstParentHistory: async (startOid, p) => (startOid === refTipOid ? { kind: 'git-unavailable', message: 'simulated history-walk failure' } : real.pathExistsInFirstParentHistory(startOid, p)),
+		})
+		const result = await validateBootstrap({
+			git,
+			proposedOid,
+			operationStartRefState: { resolved: true, oid: refTipOid },
+		})
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-006'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('simulated history-walk failure')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+		expect(result.expectedRefOid)
+			.toBe(refTipOid)
+	})
+
+	it('reports EF-VAL-011 when an unresolved ref\'s prior-parent history cannot be walked', async () => {
+		await writeFile(tempDir, 'README.md', '# Ordinary pre-EF history\n')
+		const baseOid = commitAll(tempDir, 'ordinary pre-EF commit')
+
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap on top of ordinary history')
+
+		const real = repo()
+		const git = wrapGitRepository(real, {
+			pathExistsInFirstParentHistory: async (startOid, p) => (startOid === baseOid ? { kind: 'unresolved' } : real.pathExistsInFirstParentHistory(startOid, p)),
+		})
+		const result = await validateBootstrap({ git, proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-011'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('could not be walked to establish the bootstrap history condition')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-010 when the bootstrap tree is missing the required .engineering/.gitignore control file', async () => {
+		await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
+		await writeFile(tempDir, '.engineering/PROJECT.md', PROJECT_MD)
+		const proposedOid = commitAll(tempDir, 'bootstrap without .gitignore')
+
+		const result = await validateBootstrap({ git: repo(), proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toContain('EF-VAL-010')
+		expect(result.diagnostics.find(d => d.message.includes('.gitignore'))?.message)
+			.toContain('missing the required control file \'.engineering/.gitignore\'')
+		expect(result.complete)
+			.toBe(true)
+		expect(result.valid)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(1)
 	})
 })
