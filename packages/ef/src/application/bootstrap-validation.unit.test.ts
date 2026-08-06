@@ -592,6 +592,99 @@ describe('validateBootstrap', () => {
 			.toBe(2)
 	})
 
+	it('reports EF-VAL-007 (incomplete, not eligible-by-assumption) when the bootstrap history check reports a shallow repository for a resolved ref', async () => {
+		// 09-validation.md Bootstrap exception: "An inaccessible ref or
+		// required history makes the operation incomplete rather than
+		// eligible by assumption." A shallow repository's visible
+		// first-parent history cannot prove absence of a hidden
+		// `.engineering/ef.yaml` ancestor, so this must not be treated the
+		// same as a genuine not-found.
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap')
+		const refTipOid = 'd'.repeat(40)
+
+		const real = repo()
+		const git = wrapGitRepository(real, {
+			pathExistsInFirstParentHistory: async (startOid, p) => (startOid === refTipOid ? { kind: 'shallow' } : real.pathExistsInFirstParentHistory(startOid, p)),
+		})
+		const result = await validateBootstrap({
+			git,
+			proposedOid,
+			operationStartRefState: { resolved: true, oid: refTipOid },
+		})
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-007'])
+		expect(result.diagnostics[0]?.message)
+			.toContain('shallow repository')
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-007 when an unresolved ref\'s prior-parent history check reports a shallow repository', async () => {
+		await writeFile(tempDir, 'README.md', '# Ordinary pre-EF history\n')
+		const baseOid = commitAll(tempDir, 'ordinary pre-EF commit')
+
+		await writeMinimalProject(tempDir)
+		const proposedOid = commitAll(tempDir, 'bootstrap on top of ordinary history')
+
+		const real = repo()
+		const git = wrapGitRepository(real, {
+			pathExistsInFirstParentHistory: async (startOid, p) => (startOid === baseOid ? { kind: 'shallow' } : real.pathExistsInFirstParentHistory(startOid, p)),
+		})
+		const result = await validateBootstrap({ git, proposedOid, operationStartRefState: { resolved: false } })
+
+		expect(codesOf(result.diagnostics))
+			.toEqual(['EF-VAL-007'])
+		expect(result.complete)
+			.toBe(false)
+		expect(result.exitCode)
+			.toBe(2)
+	})
+
+	it('reports EF-VAL-007 for a real shallow clone whose visible history hides an earlier .engineering/ef.yaml (real-fixture regression for the shallow-history bootstrap exception)', async () => {
+		// Build a real shallow clone rather than stubbing
+		// `pathExistsInFirstParentHistory`, so the regression exercises the
+		// actual `git rev-parse --is-shallow-repository` detection end to
+		// end: an early commit had `.engineering/ef.yaml`, a later commit
+		// removed it, and only that later commit is fetched by the shallow
+		// clone -- the visible history alone would otherwise look like a
+		// clean, eligible bootstrap target.
+		await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
+		commitAll(tempDir, 'bootstrap (hidden ancestor)')
+		git(tempDir, ['rm', '-rq', '.engineering'])
+		const originTipOid = commitAll(tempDir, 'remove ef.yaml before the shallow boundary')
+
+		const shallowDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-bootstrap-shallow-')))
+		await fs.rm(shallowDir, { recursive: true, force: true })
+		execFileSync('git', ['clone', '-q', '--depth', '1', `file://${tempDir}`, shallowDir], { stdio: 'pipe' })
+
+		try {
+			await writeMinimalProject(shallowDir)
+			const proposedOid = commitAll(shallowDir, 'proposed bootstrap on top of the shallow tip')
+
+			const result = await validateBootstrap({
+				git: createGitRepository(shallowDir, createGitExecutor()),
+				proposedOid,
+				operationStartRefState: { resolved: true, oid: originTipOid },
+			})
+
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-007'])
+			expect(result.complete)
+				.toBe(false)
+			expect(result.valid)
+				.toBe(false)
+			expect(result.exitCode)
+				.toBe(2)
+		}
+		finally {
+			await fs.rm(shallowDir, { recursive: true, force: true })
+		}
+	})
+
 	it('reports EF-VAL-010 when the bootstrap tree is missing the required .engineering/.gitignore control file', async () => {
 		await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
 		await writeFile(tempDir, '.engineering/PROJECT.md', PROJECT_MD)

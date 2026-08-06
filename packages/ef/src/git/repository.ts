@@ -206,6 +206,8 @@ export type HistoryResult
 export type PathHistoryResult
 	= | { kind: 'found', commitOid: string }
 		| { kind: 'not-found' }
+		/** The repository is shallow and the path was not found within the visible history: absence cannot be concluded because hidden ancestors beyond the shallow boundary were never inspected. */
+		| { kind: 'shallow' }
 		| { kind: 'unresolved' }
 		| GitUnavailable
 
@@ -461,10 +463,15 @@ class GitRepositoryImpl implements GitRepository {
 	 * --first-parent`) and checks each commit's tree for the exact `path`
 	 * with `ls-tree <commit> -- <path>`, stopping at the first match. This is
 	 * a positive-existence bootstrap check ("has this path ever appeared"),
-	 * not a complete-history requirement, so unlike
-	 * {@link GitRepositoryImpl.listFirstParentHistory} it does not fail on a
-	 * shallow repository: a shallow clone simply limits how far back the
-	 * search can look before reporting `not-found`.
+	 * but a `not-found` conclusion is only sound over *complete* history: a
+	 * shallow clone's visible first-parent chain silently stops at the
+	 * shallow boundary, so an absent path there does not prove the path
+	 * never appeared in a hidden ancestor beyond it
+	 * (09-validation.md Bootstrap exception: "An inaccessible ref or
+	 * required history makes the operation incomplete rather than eligible
+	 * by assumption."). When no visible commit's tree contains `path`, the
+	 * repository's shallowness is checked before concluding absence: a
+	 * shallow repository reports `shallow` instead of `not-found`.
 	 */
 	async pathExistsInFirstParentHistory(startOid: string, path: string): Promise<PathHistoryResult> {
 		const listOutcome = await this.executor.execIn(this.root, ['rev-list', '--first-parent', startOid])
@@ -484,6 +491,15 @@ class GitRepositoryImpl implements GitRepository {
 			if (outcome.result.exitCode === 0 && outcome.result.stdout.length > 0)
 				return { kind: 'found', commitOid: oid }
 		}
+
+		const shallowOutcome = await this.executor.execIn(this.root, ['rev-parse', '--is-shallow-repository'])
+		if (!shallowOutcome.ok)
+			return toGitUnavailable(shallowOutcome.failure)
+		if (shallowOutcome.result.exitCode === 0 && shallowOutcome.result.stdout.toString('utf8')
+			.trim() === 'true') {
+			return { kind: 'shallow' }
+		}
+
 		return { kind: 'not-found' }
 	}
 

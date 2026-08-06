@@ -205,6 +205,54 @@ describe('computeInitPlan', () => {
 			.toBe(true)
 	})
 
+	it('rejects with history-incomplete (not accepting-by-assumption) when the history-absence check reports a shallow repository', async () => {
+		await fs.writeFile(path.join(tempDir, 'README.md'), '# Test\n')
+		commitAll(tempDir, 'seed commit')
+
+		const repo = repoDeps()
+		const deps: ComputeInitPlanDeps = {
+			findWorktreeRoot: p => repo.findWorktreeRoot(p),
+			resolveRef: r => repo.resolveRef(r),
+			pathExistsInFirstParentHistory: async () => ({ kind: 'shallow' }),
+		}
+		const result = await computeInitPlan({ targetRoot: tempDir, values: BASE_VALUES }, deps)
+		expect(result.ok)
+			.toBe(false)
+		expect(result.ok === false && result.reason)
+			.toBe('history-incomplete')
+	})
+
+	it('rejects with history-incomplete for a real shallow clone whose visible history hides an earlier .engineering/ef.yaml (bootstrap exception: inaccessible history is incomplete, not eligible by assumption)', async () => {
+		// Build a real shallow clone so the regression exercises the actual
+		// `git rev-parse --is-shallow-repository` detection, not a stub: the
+		// path was present in an early commit that a `--depth 1` clone never
+		// fetches, and was removed before the tip, so the visible history
+		// alone would otherwise look like a clean, eligible bootstrap target.
+		await fs.mkdir(path.join(tempDir, '.engineering'), { recursive: true })
+		await fs.writeFile(path.join(tempDir, '.engineering', 'ef.yaml'), 'schema: ef/config@1\n')
+		commitAll(tempDir, 'bootstrap (hidden ancestor)')
+		execFileSync('git', ['rm', '-q', '.engineering/ef.yaml'], { cwd: tempDir, env: { ...process.env, ...GIT_TEST_ENV } })
+		commitAll(tempDir, 'remove ef.yaml before the shallow boundary')
+
+		const shallowDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-init-shallow-')))
+		await fs.rm(shallowDir, { recursive: true, force: true })
+		execFileSync('git', ['clone', '-q', '--depth', '1', `file://${tempDir}`, shallowDir], { stdio: 'pipe' })
+
+		try {
+			const result = await computeInitPlan(
+				{ targetRoot: shallowDir, values: BASE_VALUES },
+				createGitRepository(shallowDir, createGitExecutor()),
+			)
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('history-incomplete')
+		}
+		finally {
+			await fs.rm(shallowDir, { recursive: true, force: true })
+		}
+	})
+
 	it('produces a complete, canonically sorted plan with the default header-only Terminology table', async () => {
 		const result = await computeInitPlan({ targetRoot: tempDir, values: BASE_VALUES }, repoDeps())
 		expect(result.ok)
