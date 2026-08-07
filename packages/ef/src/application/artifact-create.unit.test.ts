@@ -648,10 +648,16 @@ describe('applyCreatePlan', () => {
 		expect(result.applied === false && result.message)
 			.toBe(`Temporary file for '${plan.path}' was not written with the planned bytes.`)
 
+		// Finding 1 (P0, thirteenth round): no ownership witness of any kind
+		// exists yet at this failure path (it is established only AFTER this
+		// exact byte-content check passes) -- so this cleanup fails closed
+		// rather than deleting `tempPath` by pathname alone. The genuinely
+		// correct temporary file this invocation wrote is left behind rather
+		// than risk deleting a foreign replacement it can never prove it owns.
 		const leftoverTempFiles = (await fs.readdir(path.dirname(path.join(tempDir, plan.path))))
 			.filter(name => name.includes('.tmp-'))
-		expect(leftoverTempFiles)
-			.toEqual([])
+		expect(leftoverTempFiles.length)
+			.toBe(1)
 	})
 
 	it('reports incomplete when the read-back temporary file is the same length but different content than the planned bytes', async () => {
@@ -1494,6 +1500,82 @@ Placeholder.
 		})
 	})
 
+	// FINDING 1 (P0, thirteenth round): `safeUnlink` had no ownership proof at
+	// all -- it unlinked whatever currently occupied `tempPath` BY PATHNAME,
+	// even immediately after a `verifyManagedDirectoryChain` re-verification
+	// had just proven the chain no longer denotes what this invocation is
+	// bound to. Deterministic reproduction (no forced-identity aliasing
+	// needed here: the type directory is genuinely, physically replaced):
+	// this invocation's own temporary file is written and byte-verified, its
+	// `lstat` identity is captured, and ONLY THEN -- on the very next
+	// `directoryIdentity` observation of the type directory, the one
+	// `verifyManagedDirectoryChain`'s post-write re-check performs -- the
+	// entire type directory is replaced with a different real directory that
+	// already contains a foreign file at the EXACT temporary basename. The
+	// chain re-check correctly reports a mismatch (a different real directory
+	// instance), but the un-fixed code's very next step, `safeUnlink(tempPath)`,
+	// resolved that same pathname fresh, through the KNOWN replacement, and
+	// deleted the foreign file before ever reporting the rejection.
+	describe('ownership-proven temporary-file cleanup (Finding 1, thirteenth round)', () => {
+		it('leaves a foreign file at the exact temporary basename untouched when the type directory is replaced with a different real directory strictly after this invocation\'s own temporary file was written, verified, and identity-captured', async () => {
+			const plan = computePlanOrThrow()
+			const reqDirPath = path.join(tempDir, '.engineering/req')
+			const targetPath = path.join(tempDir, plan.path)
+			const fixedNonce = 'fixed-nonce-finding-1'
+			const tempBasename = `.${path.basename(plan.path)}.tmp-${fixedNonce}`
+			const foreignContent = 'foreign content at the exact temporary basename that this invocation never wrote'
+
+			let typeDirIdentityCalls = 0
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				generateNonce: () => fixedNonce,
+				directoryIdentity: async (target: string) => {
+					if (target === reqDirPath) {
+						typeDirIdentityCalls++
+						// Call #1: the very first pre-write chain check, before the
+						// type directory exists at all. Call #2: the chain check
+						// immediately after `ensureDirectory` creates it, still empty,
+						// still BEFORE the temporary file is written. Call #3: the
+						// post-write chain re-check, which runs only after this
+						// invocation's own temporary file has already been written,
+						// byte-verified, and had its `lstat` identity captured -- the
+						// exact point the review finding describes. Replace the type
+						// directory strictly at that point, before this call's own
+						// `lstat` observes it.
+						if (typeDirIdentityCalls === 3) {
+							const replacementDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-typedir-replacement-'))
+							await fs.writeFile(path.join(replacementDir, tempBasename), foreignContent)
+							await fs.rm(reqDirPath, { recursive: true, force: true })
+							await fs.rename(replacementDir, reqDirPath)
+						}
+					}
+					return realDirectoryIdentity(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The foreign file at the exact temporary basename must survive:
+			// its identity can never be bound back to the temporary file THIS
+			// invocation itself created and byte-verified, so ownership can
+			// never be proven, and the un-fixed pathname-based unlink must not
+			// have run against it.
+			const onDisk = await fs.readFile(path.join(reqDirPath, tempBasename), 'utf8')
+			expect(onDisk)
+				.toBe(foreignContent)
+
+			// The canonical target was never created either: publication was
+			// never even attempted, since the chain check failed first.
+			await expect(fs.stat(targetPath)).rejects.toThrow()
+		})
+	})
+
 	it('produces a draft file that validates as a draft under full snapshot validation', async () => {
 		const engineeringDir = path.join(tempDir, '.engineering')
 		await fs.mkdir(engineeringDir, { recursive: true })
@@ -1528,5 +1610,65 @@ Placeholder.
 			.toEqual([])
 		expect(validation.byId.get('REQ-001')?.status)
 			.toBe('draft')
+	})
+
+	// FINDING 2 (P1, thirteenth round): `captureContentGenerationWitness`
+	// builds `visibleIds` with `collectVisibleIds`, which intentionally skips
+	// any Artifact whose envelope never decoded -- the same reason
+	// `computeCreatePlan` and `verifyAllocationStillValid` both separately run
+	// `findIdentityUncertainArtifact` alongside it, never in its place. The
+	// FINAL post-publication verifier, `verifyPostPublicationGenerationWitness`,
+	// did not repeat that gate: a newly-visible malformed Artifact leaves
+	// `current.visibleIds` exactly equal to `plan.contentWitness.visibleIds +
+	// plan.id` (the one change publication itself is supposed to make), so the
+	// un-fixed function reported a plain, fully-verified success even though
+	// the allocator's own completeness proof could no longer be established at
+	// the actual publication point -- exactly the state `computeCreatePlan` and
+	// `verifyAllocationStillValid` both deliberately refuse instead of guessing
+	// past.
+	describe('post-publication allocation-completeness re-verification (Finding 2, thirteenth round)', () => {
+		it('retracts the publish (ownership-proven) and reports a typed race -- never a plain success -- when a newly-visible malformed Artifact is created from INSIDE publishViaHardLink, even though the managed chain and content-generation witness both otherwise match', async () => {
+			const plan = computePlanOrThrow()
+			expect(plan.id)
+				.toBe('REQ-001')
+			const reqDirPath = path.join(tempDir, '.engineering/req')
+			const targetPath = path.join(tempDir, plan.path)
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
+					// Triggered from INSIDE this dependency, BEFORE delegating to the
+					// real primitive: make a newly-visible Artifact file appear whose
+					// frontmatter never decodes at all. The real hard link below
+					// still succeeds; the managed chain identity and the published
+					// path's own inode are both completely unaffected -- only the
+					// set of visible Artifacts changed, in a way `collectVisibleIds`
+					// alone cannot see.
+					await fs.writeFile(path.join(reqDirPath, 'REQ-999.md'), 'not valid frontmatter at all\n')
+					return defaultApplyCreatePlanDeps.publishViaHardLink(tempPathArg, targetPathArg)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('raced')
+
+			// The retraction removed only the entry it could prove -- by inode
+			// AND byte content -- was its own just-published file; the malformed
+			// Artifact this invocation never authorized is left completely
+			// untouched.
+			await expect(fs.stat(targetPath)).rejects.toThrow()
+			const malformedOnDisk = await fs.readFile(path.join(reqDirPath, 'REQ-999.md'), 'utf8')
+			expect(malformedOnDisk)
+				.toBe('not valid frontmatter at all\n')
+
+			const leftoverTempFiles = (await fs.readdir(reqDirPath))
+				.filter(name => name.includes('.tmp-'))
+			expect(leftoverTempFiles)
+				.toEqual([])
+		})
 	})
 })

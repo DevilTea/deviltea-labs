@@ -736,19 +736,91 @@ async function verifyManagedDirectoryChain(deps: ApplyCreatePlanDeps, projectRoo
 }
 
 /**
- * Best-effort removal of the temporary file, reporting whether it actually
- * succeeded. Most call sites intentionally ignore the return value: the
- * outcome they already report does not depend on it (13-cli-contract.md's
- * eight-step protocol only requires the CANONICAL publication or the
- * pre-publication cleanup to be correct; a leftover uniquely-nonced temp file
- * from an already-failed or already-rejected attempt is not itself a
- * completeness failure). The one call site that DOES depend on it is the
- * verified-publish success path in `applyCreatePlan` (Finding 2): once
- * publication is confirmed byte-for-byte and identity-for-identity, cleanup
- * failing there must be surfaced as its own typed, non-silently-swallowed
- * outcome rather than folded into a plain, unqualified success.
+ * The exact-witness proof this invocation binds a later deletion of some
+ * regular file back to: the `lstat` identity captured immediately after this
+ * invocation itself wrote and byte-verified that file, together with the
+ * exact bytes it was verified against. Both halves are required for the same
+ * reason `application/init.ts`'s own `CreatedEntry`/`entrySafeToDelete` pair
+ * requires identity AND byte content for a tracked file, never identity
+ * alone: a filesystem that recycles a just-freed inode for a brand-new,
+ * unrelated file reports the identical `dev`/`ino` pair even though the
+ * file's actual content is now entirely foreign.
  */
-async function safeUnlink(deps: ApplyCreatePlanDeps, tempPath: string): Promise<boolean> {
+interface OwnedFileWitness {
+	identity: FileIdentity
+	bytes: Uint8Array
+}
+
+/**
+ * `true` iff `targetPath` right now denotes -- by BOTH `lstat` identity and
+ * byte-for-byte content -- the exact file `witness` was captured from. The
+ * single ownership-proof primitive every destructive deletion in
+ * `applyCreatePlan` re-checks immediately before actually deleting anything
+ * (Finding 1, thirteenth round): a present-name or identity-only check alone
+ * cannot tell a genuinely still-owned file apart from a same-name (or, after
+ * inode recycling, even same-identity) replacement.
+ */
+async function fileOwnershipProven(deps: ApplyCreatePlanDeps, targetPath: string, witness: OwnedFileWitness): Promise<boolean> {
+	const identity = await deps.fileIdentity(targetPath)
+	if (identity === undefined || !sameFileIdentity(identity, witness.identity))
+		return false
+	try {
+		const bytes = await deps.readFileBytes(targetPath)
+		return bytesEqual(bytes, witness.bytes)
+	}
+	catch {
+		return false
+	}
+}
+
+/**
+ * Ownership-proven removal of the temporary file this invocation itself
+ * wrote at `tempPath`, reporting whether it actually succeeded. Most call
+ * sites intentionally ignore the return value: the outcome they already
+ * report does not depend on it (13-cli-contract.md's eight-step protocol
+ * only requires the CANONICAL publication or the pre-publication cleanup to
+ * be correct; a leftover uniquely-nonced temp file from an already-failed or
+ * already-rejected attempt is not itself a completeness failure). The one
+ * call site that DOES depend on it is the verified-publish success path in
+ * `applyCreatePlan` (Finding 2, twelfth round): once publication is confirmed
+ * byte-for-byte and identity-for-identity, cleanup failing there must be
+ * surfaced as its own typed, non-silently-swallowed outcome rather than
+ * folded into a plain, unqualified success.
+ *
+ * Finding 1 (P0, thirteenth round): an earlier implementation deleted
+ * `tempPath` by PATHNAME alone, with no ownership proof whatsoever -- it
+ * unlinked whatever currently occupied that path. Several call sites invoke
+ * this BECAUSE a preceding `verifyManagedDirectoryChain` re-verification just
+ * reported a mismatch; at exactly that point the program already knows
+ * pathname resolution through the managed chain may no longer reach this
+ * invocation's own file, so the unique nonce in `tempPath`'s own name no
+ * longer proves the entry currently there IS the file this invocation
+ * created. Deterministic reproduction: this invocation's own temporary file
+ * is written and byte-verified, its `lstat` identity is captured, and only
+ * THEN is the type directory replaced with a different real directory that
+ * already contains a foreign file at the exact same temporary basename; the
+ * chain re-check correctly reports the mismatch, but the un-fixed pathname-
+ * based unlink resolved fresh through the replacement and deleted that
+ * foreign file before ever reporting the rejection.
+ *
+ * `witness` is `undefined` at every call site before this invocation has
+ * ESTABLISHED a usable ownership witness of its own temporary file at all
+ * (`deps.readFileBytes(tempPath)` failing, its bytes not matching
+ * `plan.bytes`, or `deps.fileIdentity(tempPath)` itself reporting
+ * `undefined`): at that point there is no witness of any kind to bind a
+ * deletion to, so this function fails closed WITHOUT ever calling
+ * `deps.unlink` at all, exactly like `application/init.ts`'s own "ownership
+ * was never established here, so nothing this invocation created can be
+ * identified: fail closed without any destructive cleanup" rule for a failed
+ * directory claim. A leftover, uniquely-nonced temp file from such an
+ * already-failed attempt is not itself a completeness failure; an unproven
+ * deletion that might destroy a foreign file is a correctness failure.
+ */
+async function deleteOwnedTempFile(deps: ApplyCreatePlanDeps, tempPath: string, witness: OwnedFileWitness | undefined): Promise<boolean> {
+	if (witness === undefined)
+		return false
+	if (!(await fileOwnershipProven(deps, tempPath, witness)))
+		return false
 	try {
 		await deps.unlink(tempPath)
 		return true
@@ -992,6 +1064,29 @@ async function verifyPostPublicationGenerationWitness(deps: ApplyCreatePlanDeps,
 		return { ok: false, proven: true, message: `The configuration, 'PROJECT.md', or complete visible Artifact ID set for '${plan.path}' does not match the project generation this plan was authorized against, immediately after publication; '.engineering' or its canonical directory chain may have been replaced with a different directory instance during publication.` }
 	}
 
+	// Finding 2 (P1, thirteenth round): `collectVisibleIds` -- and therefore
+	// `current.visibleIds` above -- intentionally skips any Artifact whose
+	// envelope never decoded (the same reason `computeCreatePlan` and
+	// `verifyAllocationStillValid` both separately run
+	// `findIdentityUncertainArtifact` ALONGSIDE their own visible-ID-set
+	// comparisons, never in place of them). A newly-visible malformed
+	// Artifact can leave `current.visibleIds` exactly equal to
+	// `expectedVisibleIds` above -- the ONE designed change publication
+	// itself makes, `plan.id`, and nothing else -- even though the
+	// allocator's own completeness proof can no longer be established at the
+	// actual publication point this plan was authorized against. Re-run that
+	// identical scan here, one final time, so a newly-visible
+	// identity-uncertain Artifact is treated as a PROVEN non-success -- fed
+	// into `applyCreatePlan`'s existing ownership-proven retraction path
+	// exactly like any other positively observed post-publication mismatch
+	// above -- rather than silently folded into a plain success merely
+	// because it happens not to change the one projected, decode-dependent
+	// summary `visibleIds` itself is.
+	const uncertainArtifact = findIdentityUncertainArtifact(reloaded.snapshot)
+	if (uncertainArtifact) {
+		return { ok: false, proven: true, message: `Cannot confirm '${plan.path}' was published into the exact project generation this plan was authorized against: '${uncertainArtifact.path}' does not have a decodable, identity-certain envelope immediately after publication.` }
+	}
+
 	return { ok: true }
 }
 
@@ -1075,11 +1170,14 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		writtenBytes = await deps.readFileBytes(tempPath)
 	}
 	catch (error) {
-		await safeUnlink(deps, tempPath)
+		// No ownership witness of any kind exists yet (Finding 1, thirteenth
+		// round): `deleteOwnedTempFile` fails closed and leaves `tempPath`
+		// untouched rather than deleting by pathname alone.
+		await deleteOwnedTempFile(deps, tempPath, undefined)
 		return { applied: false, outcome: 'incomplete', message: `Failed to verify the temporary file for '${plan.path}': ${(error as Error).message}` }
 	}
 	if (!bytesEqual(writtenBytes, plan.bytes)) {
-		await safeUnlink(deps, tempPath)
+		await deleteOwnedTempFile(deps, tempPath, undefined)
 		return { applied: false, outcome: 'incomplete', message: `Temporary file for '${plan.path}' was not written with the planned bytes.` }
 	}
 
@@ -1093,18 +1191,27 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	// here rather than only discovered afterward.
 	const tempIdentity = await deps.fileIdentity(tempPath)
 	if (tempIdentity === undefined) {
-		await safeUnlink(deps, tempPath)
+		// Still no usable witness (identity itself could not be established):
+		// fail closed exactly like the two branches above.
+		await deleteOwnedTempFile(deps, tempPath, undefined)
 		return { applied: false, outcome: 'incomplete', message: `Failed to verify the temporary file's identity for '${plan.path}'.` }
 	}
 
+	// The ownership witness every subsequent `deleteOwnedTempFile` call in
+	// this invocation binds its deletion to (Finding 1, thirteenth round):
+	// from this point on, `tempPath` is deleted only when BOTH its identity
+	// AND its byte content can still be re-proven immediately before the
+	// actual `unlink`, never by pathname alone.
+	const tempWitness: OwnedFileWitness = { identity: tempIdentity, bytes: writtenBytes }
+
 	chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, chainCheck.identity)
 	if (!chainCheck.ok) {
-		await safeUnlink(deps, tempPath)
+		await deleteOwnedTempFile(deps, tempPath, tempWitness)
 		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
 	}
 
 	if (await targetExists(deps, targetPath)) {
-		await safeUnlink(deps, tempPath)
+		await deleteOwnedTempFile(deps, tempPath, tempWitness)
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
 	}
 
@@ -1124,7 +1231,7 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	// straight through here rather than collapsed to a blanket `'raced'`.
 	const allocationCheck = await verifyAllocationStillValid(deps, projectRoot, plan)
 	if (!allocationCheck.ok) {
-		await safeUnlink(deps, tempPath)
+		await deleteOwnedTempFile(deps, tempPath, tempWitness)
 		return { applied: false, outcome: allocationCheck.outcome, message: allocationCheck.message }
 	}
 
@@ -1134,7 +1241,7 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	// target is created through it.
 	chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, chainCheck.identity)
 	if (!chainCheck.ok) {
-		await safeUnlink(deps, tempPath)
+		await deleteOwnedTempFile(deps, tempPath, tempWitness)
 		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
 	}
 
@@ -1165,7 +1272,7 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 			// this invocation report a plain, fully-verified success.
 			const postGeneration = await verifyPostPublicationGenerationWitness(deps, projectRoot, plan)
 			if (postGeneration.ok) {
-				const cleanedUp = await safeUnlink(deps, tempPath)
+				const cleanedUp = await deleteOwnedTempFile(deps, tempPath, tempWitness)
 				if (!cleanedUp) {
 					return { applied: true, outcome: 'cleanup-failed', path: plan.path, message: `'${plan.path}' was published and verified successfully, but its now-superfluous temporary file at '${tempPath}' could not be removed afterward.` }
 				}
@@ -1181,7 +1288,7 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 				// must not treat its own genuinely successful publish as
 				// grounds for deleting it on mere suspicion -- report the
 				// unverified publication honestly instead.
-				await safeUnlink(deps, tempPath)
+				await deleteOwnedTempFile(deps, tempPath, tempWitness)
 				return { applied: true, outcome: 'incomplete', path: plan.path, message: postGeneration.message }
 			}
 			// A PROVEN generation mismatch: fall through to the shared
@@ -1190,18 +1297,20 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		}
 
 		// A mismatch was found. Attempt recovery ONLY when ownership of the
-		// entry now at `targetPath` is freshly provable by inode identity --
-		// re-checked here, independently of `publishedIdentity` above, since
-		// state can keep changing right up to the moment of removal.
-		// Unlinking anything whose identity we cannot bind back to
-		// `tempIdentity` would risk deleting state this invocation never
-		// created (Finding 1 applies the identical ownership-proof rule to
+		// entry now at `targetPath` is freshly provable -- by BOTH inode
+		// identity AND byte content (Finding 1, thirteenth round: identity
+		// alone cannot rule out an inode-recycling replacement at this exact
+		// `targetPath`, the same ABA `fileOwnershipProven` closes for
+		// `tempPath` itself) -- re-checked here, independently of
+		// `publishedIdentity` above, since state can keep changing right up to
+		// the moment of removal. Unlinking anything whose ownership we cannot
+		// re-prove would risk deleting state this invocation never created
+		// (Finding 1 applies the identical ownership-proof rule to
 		// `.engineering` itself).
-		const recoveryIdentity = await deps.fileIdentity(targetPath)
-		if (recoveryIdentity !== undefined && sameFileIdentity(recoveryIdentity, tempIdentity)) {
+		if (await fileOwnershipProven(deps, targetPath, tempWitness)) {
 			try {
 				await deps.unlink(targetPath)
-				await safeUnlink(deps, tempPath)
+				await deleteOwnedTempFile(deps, tempPath, tempWitness)
 				return { applied: false, outcome: 'raced', message: `The managed directory chain, published identity, or project generation for '${plan.path}' no longer matched immediately after publication; the unverified publish was retracted.` }
 			}
 			catch {
@@ -1211,18 +1320,18 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 			}
 		}
 
-		await safeUnlink(deps, tempPath)
+		await deleteOwnedTempFile(deps, tempPath, tempWitness)
 		return { applied: true, outcome: 'incomplete', path: plan.path, message: `The published file for '${plan.path}' could not be verified intact immediately after publication and could not be safely retracted; recovery is an explicit operator action.` }
 	}
 	if (publishResult.outcome === 'target-exists') {
-		await safeUnlink(deps, tempPath)
+		await deleteOwnedTempFile(deps, tempPath, tempWitness)
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
 	}
 	if (publishResult.outcome === 'unsupported') {
-		await safeUnlink(deps, tempPath)
+		await deleteOwnedTempFile(deps, tempPath, tempWitness)
 		return { applied: false, outcome: 'unsupported', message: `The worktree filesystem does not support same-filesystem hard-link publication (${publishResult.error.code ?? 'unknown error'}).` }
 	}
 
-	await safeUnlink(deps, tempPath)
+	await deleteOwnedTempFile(deps, tempPath, tempWitness)
 	return { applied: false, outcome: 'incomplete', message: `Failed to publish '${plan.path}': ${publishResult.error.message}` }
 }
