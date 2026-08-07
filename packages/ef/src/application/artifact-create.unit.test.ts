@@ -773,6 +773,114 @@ describe('applyCreatePlan', () => {
 			.toEqual([])
 	})
 
+	// FINDING 2 (P1, ninth round): the pre-publication `targetExists` re-check
+	// alone proves only that THIS invocation's own candidate path is still
+	// unclaimed -- it says nothing about whether the requested prefix's
+	// ALLOCATION itself remains valid. Another writer can make a HIGHER
+	// same-prefix Artifact visible at a DIFFERENT path (never touching this
+	// invocation's own candidate target) strictly between plan computation and
+	// publication.
+	describe('allocation re-verification immediately before publication (Finding 2 regression, ninth round)', () => {
+		function reqRequirementMd(id: string): string {
+			return `---
+schema: ef/requirement@1
+type: requirement
+id: ${id}
+title: Competing Requirement
+status: draft
+summary: A competing requirement published between plan computation and the pre-publication allocation re-check.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+The system must do something specific and testable.
+
+## Rationale
+
+Because it is needed.
+
+## Acceptance Criteria
+
+- The system behaves as specified.
+`
+		}
+
+		it('rejects (raced) when a competing writer makes a higher same-prefix Artifact visible after planning but before the pre-publication allocation re-check', async () => {
+			// The plan is computed over a snapshot where REQ-001 already exists,
+			// so it selects REQ-002 -- exactly the review finding's reproduction.
+			// Before the pre-publication allocation re-check runs, a competing
+			// writer publishes a valid, identity-certain REQ-999: REQ-002 itself
+			// is still absent (a bare `targetExists` re-check alone would keep
+			// passing), but the TRUE next allocation is now REQ-1000, not
+			// REQ-002.
+			const snapshot = emptySnapshot()
+			snapshot.artifacts.push(fakeArtifactWithId('REQ-001'))
+			const plan = computePlanOrThrow({ snapshot })
+			expect(plan.id)
+				.toBe('REQ-002')
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				loadSnapshot: async (root: string) => {
+					await fs.mkdir(path.join(root, '.engineering/req'), { recursive: true })
+					await fs.writeFile(path.join(root, '.engineering/req/REQ-999.md'), reqRequirementMd('REQ-999'))
+					return defaultApplyCreatePlanDeps.loadSnapshot(root)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('raced')
+
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+
+			const leftoverTempFiles = (await fs.readdir(path.join(tempDir, '.engineering/req')))
+				.filter(name => name.includes('.tmp-'))
+			expect(leftoverTempFiles)
+				.toEqual([])
+		})
+
+		it('rejects (raced) when a competing writer makes an identity-uncertain same-prefix Artifact visible after planning but before the pre-publication allocation re-check', async () => {
+			// Same class as above, but the competing writer's file itself never
+			// decodes (malformed frontmatter) rather than declaring a higher,
+			// well-formed ID -- the allocation witness must refuse exactly as
+			// `computeCreatePlan` itself would have, rather than silently
+			// treating the now-uncertain file as though it were absent.
+			const plan = computePlanOrThrow()
+			expect(plan.id)
+				.toBe('REQ-001')
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				loadSnapshot: async (root: string) => {
+					await fs.mkdir(path.join(root, '.engineering/req'), { recursive: true })
+					await fs.writeFile(path.join(root, '.engineering/req/REQ-999.md'), 'not valid frontmatter at all\n')
+					return defaultApplyCreatePlanDeps.loadSnapshot(root)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('raced')
+
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+
+			const leftoverTempFiles = (await fs.readdir(path.join(tempDir, '.engineering/req')))
+				.filter(name => name.includes('.tmp-'))
+			expect(leftoverTempFiles)
+				.toEqual([])
+		})
+	})
+
 	// FINDING 2 (P0): pre-publication chain checks alone cannot catch a swap
 	// triggered from strictly INSIDE `writeTempFileComplete`/`publishViaHardLink`
 	// themselves -- by the time any pre-check runs again, the call has already

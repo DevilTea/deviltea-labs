@@ -27,19 +27,33 @@
  * `dev`/`ino` pair `claimDirectory` captured, even though the directory
  * instance is entirely different -- an identity-only check is fooled by this
  * ABA exactly like the classic lock-free-algorithm hazard of the same name.
- * `verifyClaimIntact` below therefore also requires every entry currently
- * present in the claimed directory to be one this invocation itself already
- * created; anything else (such as a victim's pre-existing file) proves the
- * directory instance changed regardless of what its identity reports. Cleanup
- * never performs a recursive/force removal: it deletes only the exact paths
- * this invocation tracked as having created, deepest first, via precise
- * `unlink`/non-recursive `rmdir` calls -- `rmdir` succeeds only on a directory
- * that is genuinely empty, so any unexpected content left behind by a swap is
- * never silently discarded; cleanup simply stops at the first such failure
- * and reports `incomplete`. It never re-runs project discovery or validation
- * while the marker exists, and a restarted process that meets a pre-existing
- * `.engineering` (complete or not) leaves it untouched via the same atomic
- * claim rejection.
+ * `verifyClaimIntact` below therefore requires an EXACT witness, not merely a
+ * one-directional "nothing unexpected is present" check: the claimed
+ * directory's current top-level entries must be set-EQUAL to the names this
+ * invocation has itself created so far (present-but-unexpected AND
+ * already-created-but-now-missing are both a failure), and every path this
+ * invocation has tracked as created -- at any depth, each with the `lstat`
+ * identity captured immediately after ITS OWN creation -- must still denote
+ * that exact entry. A one-directional check alone is fooled by a
+ * same-claimed-identity replacement directory that contains only a strict
+ * subset of the expected names (e.g. nothing but a copied-nonce marker):
+ * every name present is indeed one this invocation created, yet everything
+ * else it created has silently vanished. Cleanup never performs a
+ * recursive/force removal: it deletes only the exact paths this invocation
+ * tracked as having created, deepest first, via precise `unlink`/non-recursive
+ * `rmdir` calls, and -- immediately before each individual deletion -- re-proves
+ * that specific entry's identity against the one captured at its own creation,
+ * not merely the claimed directory's own identity; a same-name,
+ * different-identity foreign substitution at one already-tracked path would
+ * otherwise be deleted by a blind unlink/rmdir-by-path, since neither
+ * primitive can tell whether the path's current content is the one this
+ * invocation actually created there. `rmdir` also succeeds only on a
+ * directory that is genuinely empty, so any unexpected content left behind by
+ * a swap is never silently discarded either way; cleanup simply stops at the
+ * first such failure and reports `incomplete`. It never re-runs project
+ * discovery or validation while the marker exists, and a restarted process
+ * that meets a pre-existing `.engineering` (complete or not) leaves it
+ * untouched via the same atomic claim rejection.
  */
 
 import type { Diagnostic } from '../domain/diagnostics'
@@ -58,7 +72,7 @@ import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatt
 import { extractSections, parseBody } from '../parsing/markdown'
 import { claimDirectory } from '../platform/claim-directory'
 import { createExclusive, readInitMarker, writeInitMarker } from '../platform/exclusive-file'
-import { directoryIdentity, isDirectory, readFileBytes, sameFileIdentity } from '../platform/fs-facts'
+import { directoryIdentity, isDirectory, readFileBytes, regularFileIdentity, sameFileIdentity } from '../platform/fs-facts'
 import { generateNonce } from '../platform/nonce'
 import { isSameLocation } from '../platform/path-identity'
 import { decodeConfig, isValidIntegrationRef } from '../repository/config'
@@ -398,6 +412,8 @@ export interface ApplyInitPlanDeps {
 	generateNonce: () => string
 	/** `lstat`-derived identity of `path` iff it is right now a real, non-symlink directory; `undefined` otherwise. Used to bind every step after the claim to the exact directory instance claimed (see `verifyClaimIntact` in `applyInitPlan`). */
 	directoryIdentity: (path: string) => Promise<FileIdentity | undefined>
+	/** `lstat`-derived identity of `path` iff it is right now a real, non-symlink regular file; `undefined` otherwise. The regular-file counterpart of `directoryIdentity`, used to capture and re-verify the per-entry ownership witness of every planned FILE this invocation creates (see `verifyClaimIntact` and `abort` in `applyInitPlan`). */
+	regularFileIdentity: (path: string) => Promise<FileIdentity | undefined>
 }
 
 /** Real filesystem access, composed from `platform/*` primitives. */
@@ -420,6 +436,7 @@ export const defaultApplyInitPlanDeps: ApplyInitPlanDeps = {
 	readDirectory: async target => fsReaddir(target),
 	generateNonce,
 	directoryIdentity,
+	regularFileIdentity,
 }
 
 export type ApplyInitPlanResult
@@ -463,36 +480,57 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  *   regression this comment documents) reports the identical `dev`/`ino` pair
  *   `claimedIdentity` captured, even though the directory instance is
  *   entirely different -- an ABA hazard, not a mere timing coincidence.
- *   `verifyClaimIntact` therefore also lists `engineeringPath`'s current
- *   top-level entries and requires every one of them to be an entry this
- *   invocation itself already created; anything else (a victim's pre-existing
- *   file, for instance) proves the directory instance changed no matter what
- *   its identity reports. A same-inode replacement whose content is
- *   genuinely EMPTY is content-indistinguishable from the original claimed
- *   directory at that point in the protocol and causes no data loss either
- *   way, so it is accepted and treated as the same claim.
+ *   `verifyClaimIntact` therefore also requires an EXACT witness, not merely a
+ *   one-directional "nothing unexpected is present" check: `engineeringPath`'s
+ *   current top-level entries must be SET-EQUAL (both directions) to the
+ *   names this invocation has itself created so far, AND every path tracked
+ *   as created so far (at any depth, not only top-level names) must still
+ *   denote, by a fresh per-entry `lstat` identity re-check, the EXACT entry
+ *   this invocation created there. A one-directional "every present name is
+ *   allowed" check is fooled by a same-claimed-identity replacement directory
+ *   that contains only a SUBSET of the expected names (e.g. a directory
+ *   holding nothing but a copied-nonce `.tmp/init-state.json`): every present
+ *   name is indeed one this invocation created, yet everything else this
+ *   invocation created has silently vanished. Requiring set equality, plus a
+ *   fresh identity check of every individually tracked entry, closes both
+ *   directions: entries that vanished (undercounted at the top level, or
+ *   individually missing at any depth) and entries replaced in place by a
+ *   same-name, different-identity substitution are both detected. A
+ *   same-inode replacement whose content is genuinely EMPTY and whose tracked
+ *   descendants (there are none yet) all still match is
+ *   content-indistinguishable from the original claimed directory at that
+ *   point in the protocol and causes no data loss either way, so it is
+ *   accepted and treated as the same claim.
  * - It does NOT catch a swap that lands strictly INSIDE the narrow window
  *   between one `verifyClaimIntact` check and the single syscall it guards:
  *   in that instant the guarded operation is still pathname-based and can be
  *   directed at whatever the path currently resolves to. This package cannot
  *   close that window without an `openat`-equivalent Node does not expose.
  * - Because of the above, destructive cleanup (`abort` below) is
- *   ownership-proven immediately before any deletion via a fresh
- *   `directoryIdentity` re-check against the identity captured at claim
- *   time (and, once the marker exists, its nonce), and then removes ONLY the
- *   exact paths this invocation itself tracked as having created -- deepest
- *   first, via precise `unlink`/non-recursive `rmdir`, never a recursive or
- *   force removal. `rmdir` succeeds only on a directory that is genuinely
- *   empty, so this is itself part of the ownership proof: if
- *   `engineeringPath` (or anything tracked beneath it) still holds content
- *   this invocation did not itself create -- the inode-ABA case above, or a
- *   swapped-in real directory this invocation never created -- the
- *   corresponding `rmdir` fails and cleanup stops immediately, leaving that
- *   entry and everything at or above it in the deletion order completely
- *   untouched, and still reports `incomplete`. It never deletes state it
- *   cannot prove it owns. Recovery from that state is an explicit operator
- *   action (13-cli-contract.md), matching the "on failure, remove only paths
- *   whose ownership by that invocation is proven" step of the protocol.
+ *   ownership-proven immediately before any deletion: a fresh
+ *   `directoryIdentity` re-check of `engineeringPath` itself against the
+ *   identity captured at claim time (and, once the marker exists, its
+ *   nonce), AND -- per entry, immediately before that specific entry is
+ *   removed -- a fresh identity re-check against the identity captured when
+ *   THIS invocation created that exact entry. Re-proving `engineeringPath`'s
+ *   own identity alone is not enough: it says nothing about whether some
+ *   individual tracked path beneath it was itself swapped for a same-name,
+ *   different-identity foreign entry, which a blind `unlink`/`rmdir`-by-path
+ *   would otherwise delete without ever noticing the substitution. Cleanup
+ *   removes ONLY the exact paths this invocation itself tracked as having
+ *   created AND still provably owns -- deepest first, via precise
+ *   `unlink`/non-recursive `rmdir`, never a recursive or force removal.
+ *   `rmdir` succeeds only on a directory that is genuinely empty, so this is
+ *   itself part of the ownership proof: if `engineeringPath` (or anything
+ *   tracked beneath it) still holds content this invocation did not itself
+ *   create -- the inode-ABA case above, or a swapped-in real directory this
+ *   invocation never created -- the corresponding `rmdir` fails and cleanup
+ *   stops immediately, leaving that entry and everything at or above it in
+ *   the deletion order completely untouched, and still reports `incomplete`.
+ *   It never deletes state it cannot prove it owns. Recovery from that state
+ *   is an explicit operator action (13-cli-contract.md), matching the "on
+ *   failure, remove only paths whose ownership by that invocation is proven"
+ *   step of the protocol.
  * - The narrowest residual case -- a swap that fully restores the SAME
  *   original directory to the SAME path strictly inside one guarded window --
  *   still acts on the genuine claimed directory either way; the only
@@ -534,13 +572,30 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	const claimedIdentity = claim.identity
 
 	/**
+	 * One path this invocation has itself created, together with the
+	 * `lstat`-derived identity (`dev`/`ino`) captured immediately after that
+	 * creation succeeded -- the exact-witness proof that the entry currently
+	 * at `path` is still the very instance this invocation created there, not
+	 * merely an entry of the same name (Finding 1: a present-name check alone
+	 * cannot tell a genuinely materialized entry apart from a same-name
+	 * replacement).
+	 */
+	interface CreatedEntry {
+		path: string
+		kind: 'file' | 'directory'
+		identity: FileIdentity
+	}
+
+	/**
 	 * Every path this invocation has itself created so far, in creation
 	 * order, `engineeringPath` first -- the sole basis for both halves of the
-	 * ownership proof: the content check in `verifyClaimIntact` (via
-	 * `createdTopLevelNames`) and `abort`'s precise, non-recursive cleanup.
+	 * ownership proof: the exact-witness content check in `verifyClaimIntact`
+	 * (every tracked entry present with its captured identity, AND no
+	 * untracked entry present -- via `createdTopLevelNames`) and `abort`'s
+	 * precise, non-recursive, per-entry-ownership-proven cleanup.
 	 */
-	const createdStack: { path: string, kind: 'file' | 'directory' }[] = [
-		{ path: engineeringPath, kind: 'directory' },
+	const createdStack: CreatedEntry[] = [
+		{ path: engineeringPath, kind: 'directory', identity: claimedIdentity! },
 	]
 	/** Names of `engineeringPath`'s own direct children created by this invocation so far (see `verifyClaimIntact`). */
 	const createdTopLevelNames = new Set<string>()
@@ -557,21 +612,45 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 			.split('/')[0]!
 	}
 
+	/** The current `lstat`-derived identity of `entry.path`, read as the same kind (`file`/`directory`) this invocation created there. */
+	async function currentIdentityOf(entry: CreatedEntry): Promise<FileIdentity | undefined> {
+		return entry.kind === 'directory' ? deps.directoryIdentity(entry.path) : deps.regularFileIdentity(entry.path)
+	}
+
+	/** `true` iff `entry.path` still denotes, right now, the EXACT entry (by `lstat` identity) this invocation created there. */
+	async function entryOwnershipProven(entry: CreatedEntry): Promise<boolean> {
+		const current = await currentIdentityOf(entry)
+		return current !== undefined && sameFileIdentity(current, entry.identity)
+	}
+
 	/**
-	 * `true` iff `plan.targetRoot` and `engineeringPath` are both still real,
-	 * non-symlink directories with the identical identity captured above, AND
-	 * every entry `engineeringPath` currently contains is one this invocation
-	 * itself already created. The identity check alone is insufficient: see
-	 * `applyInitPlan`'s own documentation on the inode-ABA hazard this content
-	 * check exists to close. See also the residual-risk note on
-	 * `applyInitPlan` itself for what neither check can catch.
+	 * `true` iff ALL of the following hold:
+	 *
+	 * 1. `plan.targetRoot` is still a real, non-symlink directory with the
+	 *    identical identity captured above.
+	 * 2. `engineeringPath`'s current top-level entries are EXACTLY (set
+	 *    equality, both directions) the names this invocation has itself
+	 *    created so far -- not merely a subset. A one-directional "every
+	 *    present name is allowed" check proves nothing about entries this
+	 *    invocation already created that are no longer present (Finding 1: a
+	 *    same-claimed-identity replacement directory containing only a
+	 *    subset of the expected names, such as a copied-nonce marker alone,
+	 *    passed the old one-directional check).
+	 * 3. Every path tracked in `createdStack` -- not just top-level names --
+	 *    still denotes, by fresh `lstat` identity, the EXACT entry this
+	 *    invocation created there (`entryOwnershipProven`). This is the
+	 *    per-entry exact-witness half: a same-name substitution at an
+	 *    already-tracked path (different content, different `dev`/`ino`) is
+	 *    caught here even when the top-level name set is unchanged.
+	 *
+	 * The identity check alone is insufficient: see `applyInitPlan`'s own
+	 * documentation on the inode-ABA hazard this content check exists to
+	 * close. See also the residual-risk note on `applyInitPlan` itself for
+	 * what neither check can catch.
 	 */
 	async function verifyClaimIntact(): Promise<boolean> {
 		const currentRoot = await deps.directoryIdentity(plan.targetRoot)
 		if (currentRoot === undefined || !sameFileIdentity(currentRoot, targetRootIdentity!))
-			return false
-		const currentClaim = await deps.directoryIdentity(engineeringPath)
-		if (currentClaim === undefined || !sameFileIdentity(currentClaim, claimedIdentity!))
 			return false
 
 		let currentEntries: string[]
@@ -581,7 +660,19 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		catch {
 			return false
 		}
-		return currentEntries.every(name => createdTopLevelNames.has(name))
+		if (currentEntries.length !== createdTopLevelNames.size)
+			return false
+		for (const name of currentEntries) {
+			if (!createdTopLevelNames.has(name))
+				return false
+		}
+
+		for (const entry of createdStack) {
+			if (!(await entryOwnershipProven(entry)))
+				return false
+		}
+
+		return true
 	}
 
 	const claimIntactFailureMessage = `'${engineeringPath}' no longer denotes the directory this invocation claimed.`
@@ -619,16 +710,30 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 
 		// Remove only the exact paths tracked in `createdStack`, deepest first
 		// (`engineeringPath` itself last), via precise `unlink` / non-recursive
-		// `rmdir` -- never a recursive or force removal. `rmdir` succeeds only
-		// on a directory that is genuinely empty: if `engineeringPath` (or
-		// anything tracked beneath it) still holds content this invocation did
-		// not itself create -- an inode-ABA replacement (see `applyInitPlan`'s
-		// documentation) or a swapped-in real directory -- the corresponding
-		// `rmdir` fails and this loop stops immediately, leaving that entry and
-		// everything at or above it in this order completely untouched. No
-		// unexpected content is ever silently discarded.
+		// `rmdir` -- never a recursive or force removal, and never by pathname
+		// trust alone. `engineeringPath`'s own identity re-check above proves
+		// only the top-level claim is still intact; it does NOT prove that
+		// every individual tracked path beneath it still denotes the exact
+		// entry this invocation created there -- a same-name, different-content
+		// substitution at one already-tracked path (a foreign file swapped in
+		// under the identical name, with a genuinely different `dev`/`ino`)
+		// would otherwise be deleted by a blind `unlink`/`rmdir`-by-path, since
+		// neither primitive cares whether the path's current content is the one
+		// this invocation actually wrote there. Each entry is therefore
+		// re-`lstat`'d and its identity compared against the one captured
+		// immediately after THIS invocation created it; any mismatch (missing,
+		// or present but a different real entry) halts the loop immediately,
+		// before that entry -- or anything remaining above it in this
+		// deepest-first order -- is ever touched, leaving all of it completely
+		// untouched. `rmdir` also succeeds only on a directory that is
+		// genuinely empty: if `engineeringPath` (or anything tracked beneath
+		// it) still holds content this invocation did not itself create, the
+		// corresponding `rmdir` fails too, for the same reason. No unexpected
+		// content is ever silently discarded.
 		for (let i = createdStack.length - 1; i >= 0; i--) {
 			const entry = createdStack[i]!
+			if (!(await entryOwnershipProven(entry)))
+				return { applied: false, outcome: 'incomplete', message }
 			try {
 				if (entry.kind === 'file')
 					await deps.unlink(entry.path)
@@ -652,8 +757,20 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	catch (error) {
 		return abort(`Failed to create '${tmpPath}': ${(error as Error).message}`)
 	}
-	createdStack.push({ path: tmpPath, kind: 'directory' })
-	createdTopLevelNames.add('.tmp')
+	{
+		// The per-entry ownership witness is captured immediately after THIS
+		// invocation's own creation call succeeds -- not read back later from
+		// an independently racable observation -- exactly like `claimDirectory`
+		// establishes `engineeringPath`'s own identity. If it cannot even be
+		// captured here, materialization is unprovable: fail closed without
+		// tracking (and therefore without ever attempting to delete) an entry
+		// whose ownership was never established.
+		const identity = await deps.directoryIdentity(tmpPath)
+		if (identity === undefined)
+			return abort(`'${tmpPath}' could not be verified as a directory immediately after being created.`)
+		createdStack.push({ path: tmpPath, kind: 'directory', identity })
+		createdTopLevelNames.add('.tmp')
+	}
 
 	if (!(await verifyClaimIntact()))
 		return abort(claimIntactFailureMessage)
@@ -662,28 +779,41 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	if (markerResult.outcome !== 'created')
 		return abort(`Failed to create the initialization marker at '${markerPath}'.`)
 	markerCreated = true
-	createdStack.push({ path: markerPath, kind: 'file' })
+	{
+		const identity = await deps.regularFileIdentity(markerPath)
+		if (identity === undefined)
+			return abort(`'${markerPath}' could not be verified as a regular file immediately after being created.`)
+		createdStack.push({ path: markerPath, kind: 'file', identity })
+	}
 
 	for (const dir of plan.directories) {
 		if (!(await verifyClaimIntact()))
 			return abort(claimIntactFailureMessage)
+		const dirPath = path.join(plan.targetRoot, dir)
 		try {
-			await deps.mkdir(path.join(plan.targetRoot, dir))
+			await deps.mkdir(dirPath)
 		}
 		catch (error) {
 			return abort(`Failed to create directory '${dir}': ${(error as Error).message}`)
 		}
-		createdStack.push({ path: path.join(plan.targetRoot, dir), kind: 'directory' })
+		const identity = await deps.directoryIdentity(dirPath)
+		if (identity === undefined)
+			return abort(`'${dirPath}' could not be verified as a directory immediately after being created.`)
+		createdStack.push({ path: dirPath, kind: 'directory', identity })
 		createdTopLevelNames.add(topLevelChildName(dir))
 	}
 
 	for (const file of plan.files) {
 		if (!(await verifyClaimIntact()))
 			return abort(claimIntactFailureMessage)
-		const result = await deps.createExclusive(path.join(plan.targetRoot, file.path), file.bytes)
+		const filePath = path.join(plan.targetRoot, file.path)
+		const result = await deps.createExclusive(filePath, file.bytes)
 		if (result.outcome !== 'created')
 			return abort(`Failed to write '${file.path}'.`)
-		createdStack.push({ path: path.join(plan.targetRoot, file.path), kind: 'file' })
+		const identity = await deps.regularFileIdentity(filePath)
+		if (identity === undefined)
+			return abort(`'${filePath}' could not be verified as a regular file immediately after being created.`)
+		createdStack.push({ path: filePath, kind: 'file', identity })
 		createdTopLevelNames.add(topLevelChildName(file.path))
 	}
 
@@ -718,6 +848,14 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		return abort(claimIntactFailureMessage)
 
 	await deps.unlink(markerPath)
+	// The marker was just removed intentionally (not by `abort`'s cleanup):
+	// `createdStack` must stop tracking it as an entry `verifyClaimIntact`
+	// expects to still be present, or every subsequent check would spuriously
+	// fail simply because the marker this invocation itself just deleted is,
+	// correctly, no longer there.
+	const markerEntryIndex = createdStack.findIndex(entry => entry.path === markerPath)
+	if (markerEntryIndex !== -1)
+		createdStack.splice(markerEntryIndex, 1)
 
 	if (!(await verifyClaimIntact())) {
 		// The claim was swapped out from under us in the narrow window between

@@ -76,6 +76,21 @@ export async function directoryIdentity(target: string): Promise<FileIdentity | 
 }
 
 /**
+ * `lstat`-derived identity of `target` if and only if it is, right now, a
+ * real, non-symlink regular file; `undefined` for anything else (missing, a
+ * symlink, a directory, or any other entry kind). The regular-file
+ * counterpart of {@link directoryIdentity}, for a caller (`application/init.ts`)
+ * that must bind a per-entry ownership proof to whichever kind -- file or
+ * directory -- it created at a given tracked path.
+ */
+export async function regularFileIdentity(target: string): Promise<FileIdentity | undefined> {
+	const stats = await tryLstat(target)
+	if (stats === undefined || !stats.isFile())
+		return undefined
+	return identityOf(stats)
+}
+
+/**
  * Absolute paths of every directory strictly between `root` and `target`
  * (i.e. every path component of `target` relative to `root`, excluding
  * `target`'s own final component), nearest-`root` first. `undefined` when

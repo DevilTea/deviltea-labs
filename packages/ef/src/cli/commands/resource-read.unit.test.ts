@@ -105,6 +105,47 @@ Because it is needed.
 `
 }
 
+/**
+ * A requirement whose top-level `resources` key is declared TWICE: an empty
+ * array (which wins decoding, first-occurrence selection -- `EF-ENV-005`),
+ * followed by a second, discarded array declaring `hiddenLocation`. Used to
+ * reproduce Finding 3 (ninth round): `resourceOwnership` is built only from
+ * the decoded (winning) array, so it never sees the discarded one.
+ */
+function requirementMdWithDuplicateResourcesKey(id: string, hiddenLocation: string): string {
+	return `---
+schema: ef/requirement@1
+type: requirement
+id: ${id}
+title: Example Requirement
+status: active
+summary: A minimal example requirement used for CLI resource-read tests.
+tags: []
+relations: []
+resources: []
+resources:
+  - type: example
+    location: ${hiddenLocation}
+    role: evidence
+    media_type: application/json
+    normative: false
+    description: An example resource.
+---
+
+## Requirement
+
+The system must do something specific and testable.
+
+## Rationale
+
+Because it is needed.
+
+## Acceptance Criteria
+
+- The system behaves as specified.
+`
+}
+
 async function writeFile(root: string, relativePath: string, content: string | Uint8Array): Promise<void> {
 	const fullPath = path.join(root, relativePath)
 	await fs.mkdir(path.dirname(fullPath), { recursive: true })
@@ -205,6 +246,52 @@ describe('runResourceReadCommand', () => {
 		const outcome = await runResourceReadCommand('REQ-002', location, {}, deps())
 		expect(outcome.exitCode)
 			.toBe(2)
+	})
+
+	// ---- Finding 3 (ninth round): `resourceOwnership` is derived only from ---
+	// ---- decoded envelopes -- gate on the project-wide witness before -------
+	// ---- trusting it as authoritative ----------------------------------------
+
+	it('exits 1, empty stdout, when a second Artifact anywhere in the project has an undecodable envelope, even though resourceOwnership itself reports the location as uniquely owned', async () => {
+		// `REQ-002` is fully present in the bound snapshot but its frontmatter
+		// never decodes at all (no closing `---` delimiter), so
+		// `resourceOwnership` -- built only from decoded envelopes -- cannot see
+		// whatever it truly declares. Its raw, unparsed content could equally be
+		// declaring the exact same `location` `REQ-001` legitimately owns; this
+		// command must refuse rather than trust `resourceOwnership`'s
+		// (incomplete) report of unique ownership.
+		await setupProject()
+		const location = '.engineering/resources/REQ-001/example.json'
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
+		await writeFile(root, location, 'content that must never be served')
+		await writeFile(root, '.engineering/req/REQ-002.md', '---\nschema: ef/requirement@1\ntype: requirement\nid: REQ-002\n')
+
+		const outcome = await runResourceReadCommand('REQ-001', location, {}, deps())
+		expect(outcome.exitCode)
+			.toBe(1)
+		expect(outcome.stdout)
+			.toEqual(new Uint8Array(0))
+	})
+
+	it('exits 1, empty stdout, when a second Artifact\'s top-level \'resources\' key is duplicated, discarding a candidate array that could name the same location', async () => {
+		// `REQ-002`'s frontmatter declares `resources` TWICE: the first
+		// (empty) array wins decoding (`EF-ENV-005`, first-occurrence
+		// selection), so `resourceOwnership` never sees the second, discarded
+		// array -- which, in this reproduction, names the identical `location`
+		// `REQ-001` legitimately owns. Discarding one candidate `resources`
+		// array is exactly the kind of ambiguity that must block trusting
+		// `resourceOwnership` as a complete, project-wide index.
+		await setupProject()
+		const location = '.engineering/resources/REQ-001/example.json'
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
+		await writeFile(root, location, 'content that must never be served')
+		await writeFile(root, '.engineering/req/REQ-002.md', requirementMdWithDuplicateResourcesKey('REQ-002', location))
+
+		const outcome = await runResourceReadCommand('REQ-001', location, {}, deps())
+		expect(outcome.exitCode)
+			.toBe(1)
+		expect(outcome.stdout)
+			.toEqual(new Uint8Array(0))
 	})
 
 	it('exits 1, empty stdout, when two Artifacts declare the same local path, whichever owner is used to read it (EF-RES-009 exclusive ownership)', async () => {

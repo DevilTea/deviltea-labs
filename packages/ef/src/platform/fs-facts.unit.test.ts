@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { isDirectory, isRegularFile, isSymlink, readFileBytes, readRegularFileNoFollow, walkDirectory } from './fs-facts'
+import { directoryIdentity, isDirectory, isRegularFile, isSymlink, readFileBytes, readRegularFileNoFollow, regularFileIdentity, walkDirectory } from './fs-facts'
 
 let tempRoot: string
 
@@ -53,6 +53,38 @@ describe('isRegularFile / isDirectory / isSymlink', () => {
 		await expect(isRegularFile(target)).resolves.toBe(false)
 		await expect(isDirectory(target)).resolves.toBe(false)
 		await expect(isSymlink(target)).resolves.toBe(false)
+	})
+})
+
+describe('regularFileIdentity', () => {
+	it('reports an identity for a real, non-symlink regular file', async () => {
+		const target = path.join(tempRoot, 'PROJECT.md')
+		fs.writeFileSync(target, 'content')
+
+		const identity = await regularFileIdentity(target)
+		expect(identity)
+			.toEqual({ dev: expect.any(Number), ino: expect.any(Number) })
+	})
+
+	it('is undefined for a directory, unlike directoryIdentity for the same path', async () => {
+		const target = path.join(tempRoot, 'req')
+		fs.mkdirSync(target)
+
+		await expect(regularFileIdentity(target)).resolves.toBeUndefined()
+		await expect(directoryIdentity(target)).resolves.not.toBeUndefined()
+	})
+
+	it('is undefined for a symlink to a regular file, never following it', async () => {
+		const realFile = path.join(tempRoot, 'real.md')
+		fs.writeFileSync(realFile, 'content')
+		const link = path.join(tempRoot, 'link.md')
+		fs.symlinkSync(realFile, link)
+
+		await expect(regularFileIdentity(link)).resolves.toBeUndefined()
+	})
+
+	it('is undefined for a missing path rather than throwing', async () => {
+		await expect(regularFileIdentity(path.join(tempRoot, 'does-not-exist.md'))).resolves.toBeUndefined()
 	})
 })
 
