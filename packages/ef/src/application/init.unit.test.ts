@@ -1360,12 +1360,27 @@ describe('applyInitPlan', () => {
 					const real = await defaultApplyInitPlanDeps.createExclusive(targetPath, bytes)
 					if (targetPath === lastFilePath && real.outcome === 'created' && !substitutedForeignFile) {
 						substitutedForeignFile = true
-						await fs.rm(targetPath, { force: true })
 						// Byte-for-byte identical to the planned content: content
-						// alone must never be sufficient to prove ownership.
-						await fs.writeFile(targetPath, bytes)
-						const stat = await fs.stat(targetPath)
+						// alone must never be sufficient to prove ownership. Its
+						// inode is allocated at a wholly separate, freshly minted
+						// directory FIRST -- before the original at `targetPath` is
+						// ever removed -- so it can never be the recycled inode of
+						// the just-deleted original: that inode number cannot be
+						// freed for reuse until after this allocation already
+						// happened. Writing the replacement in place (rm then
+						// create at the identical path) would instead let a
+						// filesystem that recycles freed inode numbers immediately
+						// (observed on Linux ext4) hand the replacement the exact
+						// same `(dev, ino)` as the original, making the two
+						// genuinely indistinguishable and defeating this
+						// regression's purpose.
+						const replacementDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-init-foreign-file-'))
+						const foreignPath = path.join(replacementDir, path.basename(targetPath))
+						await fs.writeFile(foreignPath, bytes)
+						const stat = await fs.stat(foreignPath)
 						foreignIdentity = { dev: stat.dev, ino: stat.ino }
+						await fs.rm(targetPath, { force: true })
+						await fs.rename(foreignPath, targetPath)
 					}
 					return real
 				},
