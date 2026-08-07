@@ -106,7 +106,7 @@ export async function runArtifactCreateCommand(options: ArtifactCreateCommandOpt
 	if (!loaded.ok)
 		return earlyFailure(options, 2, workingTreeContextFailureCode(loaded), loaded.message)
 
-	const { root, snapshot } = loaded.context
+	const { root, snapshot, engineeringIdentity } = loaded.context
 
 	// ---- Title/summary collection ----------------------------------------------
 
@@ -140,7 +140,7 @@ export async function runArtifactCreateCommand(options: ArtifactCreateCommandOpt
 
 	// ---- Plan computation ---------------------------------------------------
 
-	const planResult = computeCreatePlan({ snapshot, type: options.type, title: title ?? '', summary: summary ?? '' })
+	const planResult = computeCreatePlan({ snapshot, type: options.type, title: title ?? '', summary: summary ?? '', engineeringIdentity })
 
 	if (!planResult.ok) {
 		switch (planResult.reason) {

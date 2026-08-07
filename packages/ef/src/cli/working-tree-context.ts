@@ -46,6 +46,7 @@ import type { LoadSnapshotFailureReason, ProjectSnapshot } from '../application/
 import type { SnapshotValidationResult } from '../application/snapshot-validation'
 import type { GitExecutor } from '../git/executor'
 import type { GitRepository } from '../git/repository'
+import type { FileIdentity } from '../platform/fs-facts'
 import type { Config } from '../repository/config'
 import type { ResolveProjectFailureReason } from './project-context'
 import { loadSnapshotFromWorkingTree } from '../application/snapshot'
@@ -66,6 +67,17 @@ export interface WorkingTreeContext {
 	 * derive from this field alone.
 	 */
 	config: Config | null
+	/**
+	 * `.engineering`'s identity as observed by discovery (`./project-context.ts`'s
+	 * `ProjectContext.engineeringIdentity`), exposed here so a mutating command
+	 * (`artifact create`) can carry it through its own plan and bind a LATER,
+	 * separate re-verification at apply time back to this exact discovery-time
+	 * observation, rather than accepting whatever merely happens to exist (or
+	 * not exist) at `.engineering`'s path when that later check runs
+	 * (`application/artifact-create.ts`'s `applyCreatePlan`, Finding 2, tenth
+	 * round).
+	 */
+	engineeringIdentity: FileIdentity
 }
 
 export interface LoadWorkingTreeContextInput {
@@ -116,7 +128,7 @@ export async function loadWorkingTreeContext(input: LoadWorkingTreeContextInput,
 	// keep fresh here either.
 	if (input.explicitProject !== undefined) {
 		const validation = validateSnapshot(loaded.snapshot)
-		return { ok: true, context: { root, git, snapshot: loaded.snapshot, validation, config } }
+		return { ok: true, context: { root, git, snapshot: loaded.snapshot, validation, config, engineeringIdentity } }
 	}
 
 	const association = await checkWorkingDirectoryAssociation(
@@ -141,5 +153,5 @@ export async function loadWorkingTreeContext(input: LoadWorkingTreeContextInput,
 	}
 
 	const validation = validateSnapshot(loaded.snapshot)
-	return { ok: true, context: { root, git, snapshot: loaded.snapshot, validation, config } }
+	return { ok: true, context: { root, git, snapshot: loaded.snapshot, validation, config, engineeringIdentity } }
 }

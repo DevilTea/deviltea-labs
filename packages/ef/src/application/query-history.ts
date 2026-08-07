@@ -38,8 +38,10 @@
 
 import type { Diagnostic } from '../domain/diagnostics'
 import type { ArtifactType, Envelope, Status } from '../domain/model'
+import type { LocalResourceFileEntry, LocalResourceFileState } from '../domain/resources'
 import type { GitRepository, GitTreeEntry } from '../git/repository'
 import type { WalkEntry } from '../platform/fs-facts'
+import type { ListArtifactFilesResult } from '../repository/layout'
 import type { HistoryCommitData, HistoryEffectData } from './query-types'
 import type { SnapshotArtifactRecord } from './snapshot-validation'
 import { validateBody } from '../domain/body-schemas'
@@ -48,7 +50,7 @@ import { validateFilename } from '../domain/identity'
 import { validateStatus } from '../domain/lifecycle'
 import { ALLOWED_TRANSITIONS, compareBytewise, RELATION_COMPATIBILITY, TERMINAL_STATUSES } from '../domain/model'
 import { validateRelationEntries } from '../domain/relations'
-import { validateResourceDescriptors } from '../domain/resources'
+import { validateLocalResourceFiles, validateResourceDescriptors } from '../domain/resources'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
 import { extractSections, parseBody } from '../parsing/markdown'
 import { detectInvalidUtf8 } from '../platform/text-checks'
@@ -80,6 +82,29 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: false })
 /** A tree entry that is an ordinary file readable as a blob -- not a directory, gitlink, or symlink-mode (`120000`) blob. */
 function isRegularBlobEntry(entry: GitTreeEntry | undefined): entry is GitTreeEntry {
 	return entry !== undefined && entry.type === 'blob' && entry.mode !== '120000'
+}
+
+/**
+ * Tenth-round review Finding 4 (06-resources.md "Local path resolution";
+ * `EF-RES-006`): this historical tree entry's state in `domain/resources.ts`'s
+ * own `LocalResourceFileState` vocabulary -- mirrors
+ * `application/snapshot-validation.ts`'s own `fileStateFor`, applied here to a
+ * `GitTreeEntry` instead of a filesystem-walk `SnapshotEntryKind`. A Git
+ * gitlink (`type: 'commit'`) has no dedicated bucket in that vocabulary; it is
+ * treated as `'directory'` -- like a directory, it is never the ordinary file
+ * content this walk may trust as a Resource's own bytes, and
+ * `validateLocalResourceFiles` only ever branches on "is it exactly `'file'`
+ * or not", so which non-`'file'` bucket a non-regular entry falls into does
+ * not change the diagnostic's severity, only its message text.
+ */
+function resourceFileStateOf(entry: GitTreeEntry | undefined): LocalResourceFileState {
+	if (!entry)
+		return 'missing'
+	if (entry.mode === '120000')
+		return 'symlink'
+	if (entry.type === 'blob')
+		return 'file'
+	return 'directory'
 }
 
 /**
@@ -200,6 +225,49 @@ function isValidLocalResourceLocation(location: string): boolean {
 }
 
 /**
+ * Tenth-round review Finding 5(b) (07-change-transactions.md "CHG-required
+ * mutations"/"CHG-optional mutations"): whether a change from `before` to
+ * `after` for `type` requires CHG coverage at all, given that the target's
+ * aggregate is already known to have changed this commit. Narrowly mirrors
+ * `application/transition-validation.ts`'s own (unexported) `requiresChg` --
+ * not imported: exporting it would require modifying that module, outside
+ * this fix's file scope (see this round's review report for the extraction
+ * that would let this module import it instead) -- draft-before mutations
+ * other than activation, and any mutation once `before` is already terminal
+ * (the frozen-content check below owns that violation instead), are
+ * CHG-optional; every other before/after pair, including PROJECT's own
+ * permanently-active baseline, requires exactly one completing CHG's claim.
+ */
+function requiresChgForTarget(type: ArtifactType, before: Status | undefined, after: Status): boolean {
+	if (type === 'change')
+		return false
+	if (before === undefined)
+		return after !== 'draft'
+	if (before === 'draft')
+		return after === 'active'
+	if (TERMINAL_STATUSES.includes(before))
+		return false
+	return true
+}
+
+/**
+ * Tenth-round review Finding 6: a fingerprint of one CHG's own aggregate at
+ * `path` in `treeMap` -- its file blob OID plus every declared local
+ * Resource location's own OID, sorted for stable comparison -- used to detect
+ * a same-status (`completed -> completed`, `retired -> retired`) content
+ * mutation `chgLifecycleStatus`'s status-only tracking would otherwise never
+ * observe.
+ */
+function chgAggregateWitnessOf(treeMap: ReadonlyMap<string, GitTreeEntry>, path: string, envelope: Envelope): string {
+	const fileOid = treeMap.get(path)?.oid ?? ''
+	const resourceOids = envelope.resources
+		.filter(resource => isValidLocalResourceLocation(resource.location))
+		.map(resource => `${resource.location}=${treeMap.get(resource.location)?.oid ?? ''}`)
+		.sort(compareBytewise)
+	return JSON.stringify({ fileOid, resourceOids })
+}
+
+/**
  * Finding 4 (10-query-and-trace.md; 02-identity.md "ID immutability and
  * permanent retention"): the target's own canonical-path lookup
  * (`envelopeAt(treeMap, canonicalPath)`) only proves what sits at THAT one
@@ -241,9 +309,27 @@ function engineeringWalkEntries(treeMap: ReadonlyMap<string, GitTreeEntry>): Wal
 	return entries
 }
 
-/** Every canonical Artifact candidate path (`listArtifactFiles`' own "Artifact discovery scope") visible in this historical commit's tree. */
-function artifactDiscoveryPaths(treeMap: ReadonlyMap<string, GitTreeEntry>): string[] {
-	return listArtifactFiles(engineeringWalkEntries(treeMap)).artifactFiles
+/**
+ * Every canonical Artifact candidate path (`listArtifactFiles`' own "Artifact
+ * discovery scope") visible in this historical commit's tree, PLUS that same
+ * scan's own `EF-FS-003` canonical-layout diagnostics.
+ *
+ * Tenth-round review Finding 3: `artifactFiles` alone only covers the
+ * canonical candidate set -- it never decodes an entry that violates the
+ * canonical layout (a nested subdirectory such as
+ * `.engineering/req/nested/REQ-001.md`, or an unexpected top-level entry such
+ * as `.engineering/other/REQ-001.md`). Such an entry could still be hiding an
+ * unparsed occurrence of `targetId`: if `targetId` first appears at exactly
+ * such a path and is only later moved to its canonical path, the wrong-path
+ * scan below would never have decoded it, so `targetEverAppeared` would stay
+ * `false` through the wrong-path commit and the later canonical appearance
+ * would be treated as a fresh first presence instead of the historical move
+ * it actually is. `listArtifactFiles`'s own `EF-FS-003` diagnostics are
+ * therefore surfaced to the caller too, which gates on them exactly like the
+ * CURRENT snapshot already does for the same reason.
+ */
+function artifactDiscoveryPaths(treeMap: ReadonlyMap<string, GitTreeEntry>): ListArtifactFilesResult {
+	return listArtifactFiles(engineeringWalkEntries(treeMap))
 }
 
 export interface HistoryOutcome {
@@ -491,6 +577,20 @@ export async function computeHistory(
 	// this commit's own occurrence of a given CHG id is processed below, then
 	// updated to that occurrence's status.
 	const chgLifecycleStatus = new Map<string, Status>()
+	/**
+	 * Tenth-round review Finding 6: a terminal (`completed`/`retired`) CHG's
+	 * own aggregate (its file bytes plus its owned local Resource content) is
+	 * frozen after integration, exactly like a terminal knowledge Artifact
+	 * (07-change-transactions.md: "its frontmatter, body, and owned Resources
+	 * are frozen after integration"). `chgLifecycleStatus` alone only tracks
+	 * STATUS -- a same-status recurrence (`completed -> completed`,
+	 * `retired -> retired`) with the file OID or a declared local Resource's
+	 * OID actually different is a same-status mutation that map would never
+	 * observe on its own. Keyed by CHG id; holds a fingerprint of `{ fileOid,
+	 * resourceOids }` captured the moment the id's status is observed
+	 * terminal, compared against every later same-status occurrence.
+	 */
+	const chgTerminalWitness = new Map<string, string>()
 
 	const commits: HistoryCommitData[] = []
 	const effects: HistoryEffectData[] = []
@@ -676,6 +776,16 @@ export async function computeHistory(
 		if (!treeMap)
 			return { kind: 'history-unavailable' }
 
+		// Tenth-round review Finding 5(b): captured BEFORE `reachedBootstrap`
+		// is (possibly) flipped `true` below, so this is `true` on exactly the
+		// one commit that is this walk's OWN bootstrap boundary -- the one
+		// commit where `previousEnvelope`/`previousTreeMap` are still at their
+		// initial (pre-loop) `undefined` value. "Atomic project bootstrap" is
+		// explicitly CHG-optional (07-change-transactions.md), so the
+		// exactly-once coverage check below never demands CHG coverage for
+		// the very state bootstrap itself establishes.
+		const isBootstrapCommit = !reachedBootstrap
+
 		if (!reachedBootstrap) {
 			const boundary = await evaluateBootstrapBoundary(oid, treeMap)
 			if (boundary === 'not-present')
@@ -773,7 +883,18 @@ export async function computeHistory(
 		// disappearance-then-later-reappearance would otherwise reset
 		// `previousEnvelope` to `undefined` and let the reappearance be
 		// silently accepted as a fresh `introduces` effect.
-		for (const candidatePath of artifactDiscoveryPaths(treeMap)) {
+		// Tenth-round review Finding 3 (11-filesystem-and-config.md "Artifact
+		// discovery scope"; `EF-FS-003`): any canonical-layout violation
+		// anywhere in this commit's discovery scope makes this commit
+		// untrustworthy for the SAME reason the current snapshot gates
+		// `EF-FS-003` -- such an entry could be hiding an unparsed occurrence of
+		// `targetId` this scan below would otherwise never decode (see
+		// `artifactDiscoveryPaths`'s own doc). Checked before the candidate-path
+		// scan even runs.
+		const discoveredArtifacts = artifactDiscoveryPaths(treeMap)
+		if (hasErrorDiagnostic(discoveredArtifacts.diagnostics))
+			return { kind: 'untrusted-data' }
+		for (const candidatePath of discoveredArtifacts.artifactFiles) {
 			if (candidatePath === canonicalPath)
 				continue
 			const candidateLookup = await envelopeAt(treeMap, candidatePath)
@@ -820,24 +941,31 @@ export async function computeHistory(
 				return { kind: 'untrusted-data' }
 		}
 
-		// A declared LOCAL Resource `location` is about to be compared as
-		// this exact historical commit's Resource CONTENT (owned-set OID
-		// comparison). The tree entry actually sitting at that location may
-		// be a directory, a symlink-mode (`120000`) blob, or a gitlink
-		// (`commit`-type entry) instead of the ordinary file the descriptor
-		// claims to describe -- any of which would still silently compare as
-		// though it were the Resource's real content. A location with NO
-		// tree entry at all is the ordinary, expected "not created yet" case
-		// and is left alone; only a location that DOES resolve to a tree
-		// entry that is not a regular blob is untrusted.
+		// Tenth-round review Finding 4 (06-resources.md "Local path
+		// resolution"; `EF-RES-006`): once `currentEnvelope` declares a valid
+		// LOCAL Resource location, Core requires that location to resolve to a
+		// regular file in the SAME authoritative state -- absence is
+		// `EF-RES-006` ("Local Resource file is missing or not a regular
+		// file"), not an ordinary "not created yet" state this walk may
+		// silently allow through (a location with NO tree entry at all used to
+		// be treated as legitimate absence; it no longer is). Reuses
+		// `domain/resources.ts`'s own `validateLocalResourceFiles` -- the exact
+		// `EF-RES-006` rule `snapshot-validation.ts` runs for the CURRENT
+		// snapshot -- rather than reimplementing the file-existence/regularity
+		// judgment locally, given this historical tree entry's own state
+		// (`resourceFileStateOf`).
 		if (currentEnvelope) {
+			const localResourceEntries: LocalResourceFileEntry[] = []
+			const fileFacts = new Map<string, LocalResourceFileState>()
 			for (const resource of currentEnvelope.resources) {
 				if (isExternalResourceLocation(resource.location) || !isValidLocalResourceLocation(resource.location))
 					continue
-				const resourceEntry = treeMap.get(resource.location)
-				if (resourceEntry && !isRegularBlobEntry(resourceEntry))
-					return { kind: 'untrusted-data' }
+				localResourceEntries.push({ artifactId: targetId, path: canonicalPath, location: resource.location })
+				fileFacts.set(resource.location, resourceFileStateOf(treeMap.get(resource.location)))
 			}
+			const resourceFileDiagnostics = validateLocalResourceFiles(localResourceEntries, fileFacts)
+			if (hasErrorDiagnostic(resourceFileDiagnostics))
+				return { kind: 'untrusted-data' }
 		}
 
 		// ---- Aggregate diffing: did this commit change the target's owned paths? ----
@@ -852,6 +980,45 @@ export async function computeHistory(
 		}
 		if (changed.length > 0)
 			commits.push({ oid, changed_paths: changed.sort(compareBytewise) })
+		const targetContentChanged = changed.length > 0
+
+		// Tenth-round review Finding 5(a) (05-supersession.md /
+		// 06-resources.md frozen-content preservation): a terminal
+		// (`superseded`/`retired`/`completed`) target's own aggregate is
+		// byte-frozen. Once BOTH the previous and current commit's status are
+		// terminal, ANY owned-path content change is untrustworthy REGARDLESS
+		// of what any completing CHG in this commit claims -- checked here,
+		// before the CHG scan below even runs, so a completing CHG declaring
+		// `modifies` for an already-terminal target can never paper over this
+		// violation.
+		if (
+			previousEnvelope !== undefined
+			&& currentEnvelope !== undefined
+			&& TERMINAL_STATUSES.includes(previousEnvelope.status)
+			&& TERMINAL_STATUSES.includes(currentEnvelope.status)
+			&& targetContentChanged
+		) {
+			return { kind: 'untrusted-data' }
+		}
+
+		// Finding 7(c) (now computed once per commit, reused by both the
+		// per-CHG effect-truthfulness check below and Finding 5(b)'s
+		// exactly-once coverage check): the target's own aggregate transition
+		// ACROSS THIS EXACT COMMIT boundary (07-change-transactions.md
+		// net-effect classification): absent -> present is `introduces`;
+		// present -> `status: retired` (genuinely, not already retired) is
+		// `retires`; present -> present with the aggregate's own content
+		// actually changed is `modifies`; anything else matches none of the
+		// three effect types.
+		const actualEffect: 'introduces' | 'modifies' | 'retires' | undefined
+			= previousEnvelope === undefined && currentEnvelope !== undefined
+				? 'introduces'
+				: previousEnvelope !== undefined && currentEnvelope !== undefined
+					&& currentEnvelope.status === 'retired' && previousEnvelope.status !== 'retired'
+					? 'retires'
+					: previousEnvelope !== undefined && currentEnvelope !== undefined && targetContentChanged
+						? 'modifies'
+						: undefined
 
 		// ---- Engineering effects: newly completed CHGs targeting this Artifact ----
 		// Finding 8 (EF-CHG-007, exactly-once at one integration boundary):
@@ -940,6 +1107,26 @@ export async function computeHistory(
 				if (!isLegalTransition)
 					return { kind: 'untrusted-data' }
 			}
+
+			// Tenth-round review Finding 6: a terminal CHG's own aggregate is
+			// frozen -- a same-status recurrence (`priorStatus === chgEnvelope.status`,
+			// both terminal) whose fingerprint no longer matches the one
+			// captured the last time this id's status was observed is a
+			// same-status mutation `chgLifecycleStatus`'s status-only map would
+			// never see. Any first transition INTO a terminal status (whether a
+			// fresh first appearance or a legal `draft -> completed`/`draft ->
+			// retired` move) simply records that moment's witness with nothing
+			// to compare against yet.
+			if (TERMINAL_STATUSES.includes(chgEnvelope.status)) {
+				const currentWitness = chgAggregateWitnessOf(treeMap, path, chgEnvelope)
+				if (priorStatus === chgEnvelope.status) {
+					const priorWitness = chgTerminalWitness.get(chgEnvelope.id)
+					if (priorWitness !== undefined && priorWitness !== currentWitness)
+						return { kind: 'untrusted-data' }
+				}
+				chgTerminalWitness.set(chgEnvelope.id, currentWitness)
+			}
+
 			const wasCompleted = priorStatus === 'completed'
 			chgLifecycleStatus.set(chgEnvelope.id, chgEnvelope.status)
 			if (chgEnvelope.status !== 'completed' || wasCompleted)
@@ -1085,36 +1272,10 @@ export async function computeHistory(
 			// Finding 7(c): a completed CHG's declared effect FACT is never
 			// taken on trust alone -- it must match the target's own before/
 			// after aggregate transition ACROSS THIS EXACT COMMIT boundary
-			// (07-change-transactions.md net-effect classification):
-			// absent -> present is `introduces`; present -> `status: retired`
-			// is `retires`; present -> present with the aggregate's own
-			// content actually changed is `modifies`; anything else (no real
-			// aggregate transition at all, or a physical absent -> absent /
-			// present -> absent shape a CHG cannot legitimately claim) matches
-			// NONE of the three effect types. This walk already tracks the
-			// target aggregate's before/after presence (`previousEnvelope`/
-			// `currentEnvelope`) and per-commit owned-path OID changes
-			// (`changed`, computed above for `commits`) -- reused here rather
-			// than re-derived.
-			const targetContentChanged = changed.length > 0
-			// Finding 7: `retires` requires a GENUINE transition INTO `retired`
-			// (present, not already retired -> present, retired) -- not merely
-			// "currently retired", which an already-terminal, byte-identical
-			// target (`previousEnvelope.status === 'retired'` already) would also
-			// satisfy. 07-change-transactions.md's own `retires` definition is
-			// "before: present and not retired -> after: retired"; terminal
-			// content is frozen, so a target that was ALREADY `retired` before
-			// this commit can never be the subject of a fresh `retires` effect,
-			// regardless of what a completing CHG declares.
-			const actualEffect: 'introduces' | 'modifies' | 'retires' | undefined
-				= previousEnvelope === undefined && currentEnvelope !== undefined
-					? 'introduces'
-					: previousEnvelope !== undefined && currentEnvelope !== undefined
-						&& currentEnvelope.status === 'retired' && previousEnvelope.status !== 'retired'
-						? 'retires'
-						: previousEnvelope !== undefined && currentEnvelope !== undefined && targetContentChanged
-							? 'modifies'
-							: undefined
+			// (`actualEffect`, computed once per commit above -- Finding 7:
+			// `retires` requires a GENUINE transition INTO `retired`, not
+			// merely "currently retired", which an already-terminal,
+			// byte-identical target would also satisfy).
 			if (qualifyingRelations.some(relation => relation.type !== actualEffect))
 				return { kind: 'untrusted-data' }
 
@@ -1143,15 +1304,20 @@ export async function computeHistory(
 			}
 		}
 
-		// Finding 5: a CHG id previously observed at a TERMINAL status
-		// (`completed`/`retired`) that is no longer present anywhere in this
-		// commit's `.engineering/chg/` scan has been physically deleted --
-		// 02-identity.md forbids this ("its Artifact MUST remain in the
-		// authoritative files ... rather than be physically deleted"), so this
-		// commit's content is untrustworthy rather than merely "this CHG has no
-		// history at this point".
-		for (const [chgId, status] of chgLifecycleStatus) {
-			if (TERMINAL_STATUSES.includes(status) && !presentChgIds.has(chgId))
+		// Tenth-round review Finding 6 (02-identity.md permanent retention):
+		// ANY previously observed CHG id -- not only one previously seen at a
+		// TERMINAL status -- that is no longer present anywhere in this
+		// commit's `.engineering/chg/` scan has been physically deleted.
+		// Restricting this to terminal ids alone let a DRAFT CHG disappear and
+		// later reappear `completed` slip through untouched (a draft is not
+		// terminal, so its disappearance was silently ignored, and the later
+		// draft -> completed transition looked legal since `chgLifecycleStatus`
+		// had forgotten it entirely). Every issued CHG id, once observed at
+		// any status, must remain in the authoritative files from that point
+		// on ("its Artifact MUST remain in the authoritative files ... rather
+		// than be physically deleted").
+		for (const chgId of chgLifecycleStatus.keys()) {
+			if (!presentChgIds.has(chgId))
 				return { kind: 'untrusted-data' }
 		}
 
@@ -1163,6 +1329,35 @@ export async function computeHistory(
 		// here.
 		if (pendingEffectsThisCommit.length > 1)
 			return { kind: 'untrusted-data' }
+
+		// Tenth-round review Finding 5(b) (07-change-transactions.md
+		// "CHG-required mutations"; exactly-once coverage): the target's own
+		// aggregate genuinely transitioned this commit (`actualEffect !==
+		// undefined`) in a way that requires CHG coverage
+		// (`requiresChgForTarget` -- an active-before mutation, a draft's
+		// activation, a fresh non-draft first appearance, or ANY change to
+		// PROJECT's own permanently-active aggregate), yet no completing CHG
+		// in this SAME commit claims it. Left unflagged, this commit would
+		// still be recorded (`commits.push` above) and this query would report
+		// `complete: true` with no engineering effect explaining an
+		// authoritative change history cannot attribute to any CHG. Exempted
+		// on the BOOTSTRAP commit itself ("atomic project bootstrap" is
+		// CHG-optional, 07-change-transactions.md "CHG-optional mutations") --
+		// `isBootstrapCommit` is only ever `true` on the one commit
+		// `previousEnvelope`/`previousTreeMap` are still at their initial
+		// (pre-loop) `undefined` value, so `requiresChgForTarget`'s own
+		// `before === undefined` branch can never wrongly demand CHG coverage
+		// for the very state bootstrap itself establishes.
+		if (
+			!isBootstrapCommit
+			&& actualEffect !== undefined
+			&& currentEnvelope !== undefined
+			&& requiresChgForTarget(targetType, previousEnvelope?.status, currentEnvelope.status)
+			&& pendingEffectsThisCommit.length === 0
+		) {
+			return { kind: 'untrusted-data' }
+		}
+
 		effects.push(...pendingEffectsThisCommit)
 
 		previousTreeMap = treeMap

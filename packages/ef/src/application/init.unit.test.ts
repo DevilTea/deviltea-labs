@@ -1221,4 +1221,79 @@ describe('applyInitPlan', () => {
 				.toBe('foreign replacement content')
 		})
 	})
+
+	// FINDING 1 (P0, tenth-round review): the success path's final marker
+	// removal did only `readInitMarker` (nonce field only) + `verifyClaimIntact`
+	// (identity only) before calling `deps.unlink(markerPath)` directly --
+	// never the `entrySafeToDelete` byte-content proof `abort`'s own cleanup
+	// already required for every FILE entry. A same-path replacement landing
+	// strictly after that `readInitMarker` parse but before the unlink -- a
+	// forced-inode-ABA reusing the marker's captured `(dev, ino)`, reformatted
+	// to still parse with the identical `nonce` field but different overall
+	// bytes -- passed both checks and had its foreign bytes deleted by the old
+	// direct `unlink`. The final marker deletion must be routed through the
+	// same ownership-proven (identity AND byte content) deletion primitive as
+	// `abort`'s cleanup, so this exact substitution is instead caught
+	// immediately before deletion and the foreign marker survives untouched.
+	describe('ownership-proven marker deletion on the success path (Finding 1, tenth-round regression)', () => {
+		it('never deletes a foreign marker substituted (same forced identity, same nonce, different bytes) strictly after the success-path readInitMarker parse and before the final deletion', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			let capturedIdentity: { dev: number, ino: number } | undefined
+			let swapped = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				regularFileIdentity: async (targetPath: string) => {
+					const identity = await defaultApplyInitPlanDeps.regularFileIdentity(targetPath)
+					if (targetPath === markerPath && !swapped && identity !== undefined)
+						capturedIdentity = identity
+					// Forced ABA, exactly like the existing dedicated fake-identity
+					// tests above for `engineeringPath` and for a tracked FILE entry:
+					// once substituted, always report the identity captured at the
+					// marker's own creation, regardless of which real file is
+					// actually at `markerPath` right now -- deterministic on every
+					// platform rather than depending on real inode-reuse behavior.
+					if (targetPath === markerPath && swapped && capturedIdentity !== undefined)
+						return capturedIdentity
+					return identity
+				},
+				readInitMarker: async (targetPath: string) => {
+					const result = await defaultApplyInitPlanDeps.readInitMarker(targetPath)
+					if (targetPath === markerPath && result.outcome === 'found' && !swapped) {
+						swapped = true
+						// The reviewer's exact reproduction: land the swap strictly
+						// after this success-path `readInitMarker` parse (whose
+						// result -- captured above, still reflecting the genuine
+						// pre-swap marker -- is what the caller compares against its
+						// own `nonce`) but before the final deletion. The foreign
+						// replacement keeps the identical `nonce` field (so a
+						// field-level check alone cannot distinguish it either) but
+						// its overall raw bytes are different from what this
+						// invocation's own `writeInitMarker` produced.
+						const foreignMarker = JSON.stringify({ schema: 'ef/init-state@1', nonce: result.marker.nonce, foreign: true })
+						await fs.rm(markerPath, { force: true })
+						await fs.writeFile(markerPath, foreignMarker)
+					}
+					return result
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The foreign marker survives completely untouched: ownership
+			// (identity AND byte content) is re-proven immediately before the
+			// final deletion, exactly like every other tracked FILE entry
+			// `abort`'s own cleanup already protects.
+			const survivingBytes = await fs.readFile(markerPath, 'utf8')
+			expect(JSON.parse(survivingBytes))
+				.toEqual({ schema: 'ef/init-state@1', nonce: expect.any(String), foreign: true })
+		})
+	})
 })

@@ -1,4 +1,5 @@
 import type { ArtifactType, Envelope } from '../domain/model'
+import type { FileIdentity } from '../platform/fs-facts'
 import type { ArtifactCreatePlan } from './artifact-create'
 import type { ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
 import fs from 'node:fs/promises'
@@ -6,6 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SCHEMA_BY_TYPE } from '../domain/model'
+import { directoryIdentity as realDirectoryIdentity } from '../platform/fs-facts'
 import {
 	applyCreatePlan,
 	computeCreatePlan,
@@ -13,6 +15,9 @@ import {
 } from './artifact-create'
 import { loadSnapshotFromWorkingTree } from './snapshot'
 import { validateSnapshot } from './snapshot-validation'
+
+/** Opaque, arbitrary identity for the pure `computeCreatePlan` tests below: no filesystem is touched in that describe block, so this value is never compared against anything real -- it merely proves the field is threaded onto the resulting plan unchanged. */
+const FAKE_ENGINEERING_IDENTITY: FileIdentity = { dev: 1, ino: 1 }
 
 const CONFIG_YAML = `schema: ef/config@1
 repository:
@@ -166,7 +171,7 @@ function fakeArtifactWithDuplicateIdKey(rawId: string, path: string = `.engineer
 
 describe('computeCreatePlan', () => {
 	it('rejects the "project" type token', () => {
-		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'project', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'project', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(false)
 		expect(result.ok === false && result.reason)
@@ -174,7 +179,7 @@ describe('computeCreatePlan', () => {
 	})
 
 	it('rejects an unknown type token', () => {
-		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'bogus', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'bogus', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(false)
 		expect(result.ok === false && result.reason)
@@ -182,7 +187,7 @@ describe('computeCreatePlan', () => {
 	})
 
 	it('rejects a blank title', () => {
-		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: '   ', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: '   ', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(false)
 		expect(result.ok === false && result.reason)
@@ -190,7 +195,7 @@ describe('computeCreatePlan', () => {
 	})
 
 	it('rejects a blank summary', () => {
-		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: 'Title', summary: '   ' })
+		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: 'Title', summary: '   ', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(false)
 		expect(result.ok === false && result.reason)
@@ -198,7 +203,7 @@ describe('computeCreatePlan', () => {
 	})
 
 	it('allocates REQ-001 for an empty graph', () => {
-		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(true)
 		if (!result.ok)
@@ -212,7 +217,7 @@ describe('computeCreatePlan', () => {
 	it('allocates the next ID without filling numeric gaps', () => {
 		const snapshot = emptySnapshot()
 		snapshot.artifacts.push(fakeArtifactWithId('REQ-041'), fakeArtifactWithId('REQ-042'), fakeArtifactWithId('REQ-044'))
-		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(true)
 		if (!result.ok)
@@ -231,7 +236,7 @@ describe('computeCreatePlan', () => {
 		it('refuses (rather than silently skipping) when a canonical-directory artifact never decoded its envelope', () => {
 			const snapshot = emptySnapshot()
 			snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('REQ-999'), fakeArtifactWithId('REQ-005'))
-			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 			expect(result.ok)
 				.toBe(false)
 			expect(result.ok === false && result.reason)
@@ -244,7 +249,7 @@ describe('computeCreatePlan', () => {
 			// The exact reproduction from the review finding.
 			const snapshot = emptySnapshot()
 			snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('REQ-999'), fakeArtifactWithId('REQ-001'))
-			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 			expect(result.ok)
 				.toBe(false)
 			expect(result.ok === false && result.reason)
@@ -254,7 +259,7 @@ describe('computeCreatePlan', () => {
 		it('refuses allocation when a canonical-directory envelope decoded but its ID does not parse (EF-ID-001 class)', () => {
 			const snapshot = emptySnapshot()
 			snapshot.artifacts.push(fakeArtifactWithRawId('not-an-id', '.engineering/req/not-an-id.md'), fakeArtifactWithId('REQ-001'))
-			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 			expect(result.ok)
 				.toBe(false)
 			expect(result.ok === false && result.reason)
@@ -264,7 +269,7 @@ describe('computeCreatePlan', () => {
 		it('refuses allocation when a canonical-directory envelope decoded but its numeric component is not canonical (EF-ID-003 class)', () => {
 			const snapshot = emptySnapshot()
 			snapshot.artifacts.push(fakeArtifactWithRawId('REQ-0007', '.engineering/req/REQ-0007.md'), fakeArtifactWithId('REQ-001'))
-			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 			expect(result.ok)
 				.toBe(false)
 			expect(result.ok === false && result.reason)
@@ -274,7 +279,7 @@ describe('computeCreatePlan', () => {
 		it('refuses allocation when a canonical-directory file lost its declared id to a duplicate frontmatter key (EF-ENV-005 on `id`)', () => {
 			const snapshot = emptySnapshot()
 			snapshot.artifacts.push(fakeArtifactWithDuplicateIdKey('REQ-005'), fakeArtifactWithId('REQ-001'))
-			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 			expect(result.ok)
 				.toBe(false)
 			expect(result.ok === false && result.reason)
@@ -291,7 +296,7 @@ describe('computeCreatePlan', () => {
 		it('blocks REQ allocation when a wrong-directory identity-uncertain file sits under a DIFFERENT type\'s canonical directory (full discovery scope)', () => {
 			const snapshot = emptySnapshot()
 			snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('junk', '.engineering/adr/junk.md'), fakeArtifactWithId('REQ-005'))
-			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 			expect(result.ok)
 				.toBe(false)
 			expect(result.ok === false && result.reason)
@@ -308,7 +313,7 @@ describe('computeCreatePlan', () => {
 		it('does not block REQ allocation on a fully decoded, identity-certain artifact of a different, known type', () => {
 			const snapshot = emptySnapshot()
 			snapshot.artifacts.push(fakeDecodedArtifactOfType('decision', 'ADR-999', '.engineering/adr/ADR-999.md'), fakeArtifactWithId('REQ-005'))
-			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 			expect(result.ok)
 				.toBe(true)
 			if (!result.ok)
@@ -319,7 +324,7 @@ describe('computeCreatePlan', () => {
 	})
 
 	it('rejects a multi-line title', () => {
-		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: 'Line one\nLine two', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: 'Line one\nLine two', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(false)
 		expect(result.ok === false && result.reason)
@@ -329,7 +334,7 @@ describe('computeCreatePlan', () => {
 	it('allocates REQ-1000 after REQ-999 (no leading zeroes above 999)', () => {
 		const snapshot = emptySnapshot()
 		snapshot.artifacts.push(fakeArtifactWithId('REQ-999'))
-		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(true)
 		if (!result.ok)
@@ -341,7 +346,7 @@ describe('computeCreatePlan', () => {
 	it('refuses an already-occupied canonical target path even when its ID never decoded', () => {
 		const snapshot = emptySnapshot()
 		snapshot.entryKinds = new Map([['.engineering/req/REQ-001.md', 'file']])
-		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(false)
 		expect(result.ok === false && result.reason)
@@ -354,7 +359,7 @@ describe('computeCreatePlan', () => {
 			['.engineering', 'directory'],
 			['.engineering/req', 'symlink'],
 		])
-		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(false)
 		expect(result.ok === false && result.reason)
@@ -368,7 +373,7 @@ describe('computeCreatePlan', () => {
 	it('rejects (managed-directory-symlinked) when `.engineering` itself is a symlink', () => {
 		const snapshot = emptySnapshot()
 		snapshot.entryKinds = new Map([['.engineering', 'symlink']])
-		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(false)
 		expect(result.ok === false && result.reason)
@@ -383,7 +388,7 @@ describe('computeCreatePlan', () => {
 		// allocate normally, not be confused with a forbidden symlink.
 		const snapshot = emptySnapshot()
 		snapshot.entryKinds = new Map([['.engineering', 'directory']])
-		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(true)
 	})
@@ -395,7 +400,7 @@ describe('computeCreatePlan', () => {
 		['pol', 'policy', ['Policy', 'Scope', 'Rationale', 'Compliance'], 'POL-001', '.engineering/pol/POL-001.md'],
 		['chg', 'change', ['Rationale', 'Sources', 'Changes', 'Verification'], 'CHG-001', '.engineering/chg/CHG-001.md'],
 	] as const)('produces a valid draft skeleton for type token %s', (token, expectedType, headings, expectedId, expectedPath) => {
-		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: token, title: 'A Title', summary: 'A summary sentence.' })
+		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: token, title: 'A Title', summary: 'A summary sentence.', engineeringIdentity: FAKE_ENGINEERING_IDENTITY })
 		expect(result.ok)
 			.toBe(true)
 		if (!result.ok)
@@ -443,9 +448,21 @@ async function pathExists(target: string): Promise<boolean> {
 
 describe('applyCreatePlan', () => {
 	let tempDir: string
+	// `.engineering`'s REAL identity, captured immediately after creating it in
+	// `beforeEach` -- exactly what discovery would have observed before
+	// `computeCreatePlan` ran in real usage (Finding 2, tenth round). Every
+	// `computePlanOrThrow` call defaults to this so ordinary tests exercise the
+	// real, matching-identity path; only the deliberate-mismatch regressions
+	// below override it.
+	let engineeringIdentity: FileIdentity
 
 	beforeEach(async () => {
 		tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-artifact-create-')))
+		await fs.mkdir(path.join(tempDir, '.engineering'))
+		const identity = await realDirectoryIdentity(path.join(tempDir, '.engineering'))
+		if (identity === undefined)
+			throw new Error('unexpected: freshly created \'.engineering\' has no directory identity')
+		engineeringIdentity = identity
 	})
 
 	afterEach(async () => {
@@ -453,7 +470,7 @@ describe('applyCreatePlan', () => {
 	})
 
 	function computePlanOrThrow(overrides: Partial<Parameters<typeof computeCreatePlan>[0]> = {}): ArtifactCreatePlan {
-		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: 'Search Result Filtering', summary: 'Search results must support filtering.', ...overrides })
+		const result = computeCreatePlan({ snapshot: emptySnapshot(), type: 'req', title: 'Search Result Filtering', summary: 'Search results must support filtering.', engineeringIdentity, ...overrides })
 		if (!result.ok)
 			throw new Error(`unexpected computeCreatePlan failure: ${result.reason}`)
 		return result.plan
@@ -689,6 +706,12 @@ describe('applyCreatePlan', () => {
 		const plan = computePlanOrThrow()
 		const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-outside-')))
 		try {
+			// Replace the real `.engineering` `beforeEach` created (and the plan's
+			// `engineeringIdentity` was captured against) with a symlink: the
+			// symlink check fires before any identity comparison either way (see
+			// `verifyChainComponent`), so this exercises the symlink-rejection path
+			// regardless of the identity binding.
+			await fs.rm(path.join(tempDir, '.engineering'), { recursive: true, force: true })
 			await fs.symlink(outsideDir, path.join(tempDir, '.engineering'))
 
 			const result = await applyCreatePlan(plan, tempDir)
@@ -773,6 +796,69 @@ describe('applyCreatePlan', () => {
 			.toEqual([])
 	})
 
+	// FINDING 2 (P1, tenth round): `.engineering` itself is bound to
+	// `plan.engineeringIdentity` from `applyCreatePlan`'s very FIRST checkpoint
+	// onward, never merely `undefined`. A prior implementation passed
+	// `undefined` for BOTH chain components at that first checkpoint, so a
+	// `.engineering` deleted or swapped for a different real directory strictly
+	// between plan computation/authorization and `applyCreatePlan` was
+	// wrongly accepted as an ordinary "not created yet" case identical to the
+	// type directory's own legitimate absence -- `ensureDirectory`'s recursive
+	// `mkdir` then silently recreated `.engineering` itself, and the fresh
+	// allocation reload computed an ID over that new, empty shell instead of
+	// refusing.
+	describe('`.engineering` identity is bound from discovery time, before any write (Finding 2 regression, tenth round)', () => {
+		it('rejects, without recreating `.engineering`, when the entire `.engineering` directory was deleted between plan computation and apply', async () => {
+			// The exact reproduction from the review finding: compute the first
+			// REQ plan (REQ-001) from a valid project, delete the entire
+			// `.engineering` directory before `applyCreatePlan`, then apply.
+			const plan = computePlanOrThrow()
+			expect(plan.id)
+				.toBe('REQ-001')
+
+			await fs.rm(path.join(tempDir, '.engineering'), { recursive: true, force: true })
+
+			const result = await applyCreatePlan(plan, tempDir)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// `.engineering` must NOT have been silently recreated by
+			// `ensureDirectory`'s recursive `mkdir`, and nothing was published.
+			await expect(fs.stat(path.join(tempDir, '.engineering'))).rejects.toThrow()
+		})
+
+		it('rejects, without writing anything, when `.engineering` was replaced by a DIFFERENT real directory between plan computation and apply (forced-identity stub)', async () => {
+			// Rather than rely on timing to make two real directories land at the
+			// same path with different `dev`/`ino` (platform/filesystem
+			// dependent), force the plan's own `engineeringIdentity` to a value
+			// that provably does not match the real, untouched `.engineering`
+			// `beforeEach` created -- deterministically simulating "the plan was
+			// computed against a `.engineering` that is no longer the one on
+			// disk" without needing to physically race the swap.
+			const mismatchedIdentity: FileIdentity = { dev: engineeringIdentity.dev, ino: engineeringIdentity.ino + 1 }
+			const plan = computePlanOrThrow({ engineeringIdentity: mismatchedIdentity })
+			expect(plan.id)
+				.toBe('REQ-001')
+
+			const result = await applyCreatePlan(plan, tempDir)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// `.engineering` itself is completely untouched (still empty, no
+			// `req` directory or anything else created inside it), and nothing
+			// was published.
+			expect(await fs.readdir(path.join(tempDir, '.engineering')))
+				.toEqual([])
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+		})
+	})
+
 	// FINDING 2 (P1, ninth round): the pre-publication `targetExists` re-check
 	// alone proves only that THIS invocation's own candidate path is still
 	// unclaimed -- it says nothing about whether the requested prefix's
@@ -824,10 +910,10 @@ Because it is needed.
 
 			const deps = {
 				...defaultApplyCreatePlanDeps,
-				loadSnapshot: async (root: string) => {
+				loadSnapshot: async (root: string, expectedEngineeringIdentity: FileIdentity) => {
 					await fs.mkdir(path.join(root, '.engineering/req'), { recursive: true })
 					await fs.writeFile(path.join(root, '.engineering/req/REQ-999.md'), reqRequirementMd('REQ-999'))
-					return defaultApplyCreatePlanDeps.loadSnapshot(root)
+					return defaultApplyCreatePlanDeps.loadSnapshot(root, expectedEngineeringIdentity)
 				},
 			}
 
@@ -858,10 +944,10 @@ Because it is needed.
 
 			const deps = {
 				...defaultApplyCreatePlanDeps,
-				loadSnapshot: async (root: string) => {
+				loadSnapshot: async (root: string, expectedEngineeringIdentity: FileIdentity) => {
 					await fs.mkdir(path.join(root, '.engineering/req'), { recursive: true })
 					await fs.writeFile(path.join(root, '.engineering/req/REQ-999.md'), 'not valid frontmatter at all\n')
-					return defaultApplyCreatePlanDeps.loadSnapshot(root)
+					return defaultApplyCreatePlanDeps.loadSnapshot(root, expectedEngineeringIdentity)
 				},
 			}
 
@@ -1038,7 +1124,7 @@ Because it is needed.
 		if (!loaded.ok)
 			return
 
-		const planResult = computeCreatePlan({ snapshot: loaded.snapshot, type: 'req', title: 'Search Result Filtering', summary: 'Search results must support filtering by supported criteria.' })
+		const planResult = computeCreatePlan({ snapshot: loaded.snapshot, type: 'req', title: 'Search Result Filtering', summary: 'Search results must support filtering by supported criteria.', engineeringIdentity })
 		expect(planResult.ok)
 			.toBe(true)
 		if (!planResult.ok)

@@ -19,10 +19,16 @@
  * domain validators (identity syntax, filename, status, body schema) before
  * ever proposing it for publication.
  *
- * `applyCreatePlan` performs the exact hard-link publication protocol: write
- * the complete file at a temporary same-directory path, validate the written
- * bytes, bind an identity to the verified temporary file, re-verify the
- * managed directory chain and that the target is still absent, publish via a
+ * `applyCreatePlan` performs the exact hard-link publication protocol: verify,
+ * from its very first checkpoint, that `.engineering` itself still denotes
+ * exactly the directory `computeCreatePlan`'s caller observed at discovery
+ * time (`ArtifactCreatePlan.engineeringIdentity`, threaded from
+ * `loadWorkingTreeContext` -- Finding 2, tenth round; `.engineering` is never
+ * created or silently re-accepted-as-new by this command, unlike the type
+ * directory, which legitimately may not exist yet), write the complete file
+ * at a temporary same-directory path, validate the written bytes, bind an
+ * identity to the verified temporary file, re-verify the managed directory
+ * chain and that the target is still absent, publish via a
  * create-if-absent hard link (treating target-exists as a race rather than a
  * replacement), re-verify the chain AND the published path's own identity
  * immediately afterward (attempting an ownership-proven retraction on
@@ -110,6 +116,17 @@ export interface ComputeCreatePlanInput {
 	type: string
 	title: string
 	summary: string
+	/**
+	 * `.engineering`'s identity as already observed by discovery (`cli/project-context.ts`'s
+	 * `ProjectContext.engineeringIdentity`, threaded here via
+	 * `cli/working-tree-context.ts`'s `WorkingTreeContext.engineeringIdentity`;
+	 * Finding 2, tenth round). Carried onto the resulting {@link ArtifactCreatePlan}
+	 * unchanged so `applyCreatePlan` can bind its OWN, separate, later
+	 * `.engineering` re-verifications back to the exact directory this plan was
+	 * computed against, rather than accepting whatever merely happens to exist
+	 * (or does not exist) at apply time -- see `applyCreatePlan`'s own doc.
+	 */
+	engineeringIdentity: FileIdentity
 }
 
 export interface ArtifactCreatePlan {
@@ -120,6 +137,8 @@ export interface ArtifactCreatePlan {
 	bytes: Uint8Array
 	envelope: Envelope
 	changes: [{ action: 'create', path: string }]
+	/** See {@link ComputeCreatePlanInput.engineeringIdentity}. */
+	engineeringIdentity: FileIdentity
 }
 
 export type ComputeCreatePlanFailureReason
@@ -266,7 +285,7 @@ function validateDraftArtifactBytes(bytes: Uint8Array, filePath: string): Diagno
  * `snapshot`. Pure; performs no filesystem access.
  */
 export function computeCreatePlan(input: ComputeCreatePlanInput): ComputeCreatePlanResult {
-	const { snapshot, type, title, summary } = input
+	const { snapshot, type, title, summary, engineeringIdentity } = input
 
 	if (!isCreateTypeToken(type)) {
 		return {
@@ -356,6 +375,7 @@ export function computeCreatePlan(input: ComputeCreatePlanInput): ComputeCreateP
 			bytes,
 			envelope,
 			changes: [{ action: 'create', path: filePath }],
+			engineeringIdentity,
 		},
 	}
 }
@@ -397,8 +417,18 @@ export interface ApplyCreatePlanDeps {
 	 * same-prefix Artifact (or an identity-uncertain file) visible strictly
 	 * between plan computation and this call is caught even though it never
 	 * touches the plan's own candidate `targetPath` at all.
+	 *
+	 * `expectedEngineeringIdentity` is threaded straight through to
+	 * `loadSnapshotFromWorkingTree`'s own option of the same name (Finding 2,
+	 * tenth round): the re-enumeration itself must be bound to the exact
+	 * `.engineering` this plan was computed against, not merely whatever
+	 * directory happens to occupy that path when this call runs -- otherwise
+	 * a `.engineering` swapped for a different (e.g. emptied or
+	 * differently-populated) real directory strictly around this call could
+	 * silently re-derive allocation from the WRONG project's graph instead of
+	 * failing closed.
 	 */
-	loadSnapshot: (projectRoot: string) => Promise<LoadSnapshotResult>
+	loadSnapshot: (projectRoot: string, expectedEngineeringIdentity: FileIdentity) => Promise<LoadSnapshotResult>
 }
 
 async function defaultFileIdentity(target: string): Promise<FileIdentity | undefined> {
@@ -430,7 +460,7 @@ export const defaultApplyCreatePlanDeps: ApplyCreatePlanDeps = {
 	},
 	directoryIdentity,
 	fileIdentity: defaultFileIdentity,
-	loadSnapshot: projectRoot => loadSnapshotFromWorkingTree(projectRoot),
+	loadSnapshot: (projectRoot, expectedEngineeringIdentity) => loadSnapshotFromWorkingTree(projectRoot, undefined, { expectedEngineeringIdentity }),
 }
 
 export type ApplyCreatePlanResult
@@ -500,12 +530,16 @@ export type VerifyManagedDirectoryChainResult
  * Re-verify one component of the managed directory chain: it must not be a
  * symlink (as before), AND, if `previousIdentity` is supplied (a prior
  * capture from an earlier checkpoint in this same `applyCreatePlan`
- * invocation), it must still be a real directory with that IDENTICAL
- * `dev`/`ino` identity. A component with no `previousIdentity` yet (the
- * first checkpoint, or a component that did not exist as a directory at the
- * previous checkpoint) is not rejected merely for currently being absent or
- * not-yet-a-directory -- that is the ordinary, legitimate "not created yet"
- * case `ensureDirectory` handles.
+ * invocation -- for `.engineering`, this is `plan.engineeringIdentity` from
+ * the very FIRST checkpoint onward, never `undefined`; Finding 2, tenth
+ * round), it must still be a real directory with that IDENTICAL `dev`/`ino`
+ * identity. A component with no `previousIdentity` yet (only ever the type
+ * directory at its first checkpoint, or a component that did not exist as a
+ * directory at the previous checkpoint) is not rejected merely for currently
+ * being absent or not-yet-a-directory -- that is the ordinary, legitimate
+ * "not created yet" case `ensureDirectory` handles. `.engineering` itself
+ * never receives that tolerance: it must already exist as exactly the
+ * directory discovery observed.
  */
 async function verifyChainComponent(deps: ApplyCreatePlanDeps, componentPath: string, previousIdentity: FileIdentity | undefined): Promise<{ ok: true, identity: FileIdentity | undefined } | { ok: false }> {
 	if (await deps.isSymlink(componentPath))
@@ -627,9 +661,14 @@ export type VerifyAllocationStillValidResult
  * every now-visible same-prefix ID must still equal `plan.id` exactly. A
  * failure of either check, or of the re-enumeration itself, is reported as
  * a rejection -- the caller treats this the same as any other typed race.
+ *
+ * The re-enumeration is bound to `plan.engineeringIdentity` (Finding 2,
+ * tenth round): `deps.loadSnapshot` fails closed (`engineering-swapped`)
+ * rather than silently re-deriving allocation from a DIFFERENT `.engineering`
+ * substituted at the same path since the plan was computed.
  */
 async function verifyAllocationStillValid(deps: ApplyCreatePlanDeps, projectRoot: string, plan: ArtifactCreatePlan): Promise<VerifyAllocationStillValidResult> {
-	const reloaded = await deps.loadSnapshot(projectRoot)
+	const reloaded = await deps.loadSnapshot(projectRoot, plan.engineeringIdentity)
 	if (!reloaded.ok) {
 		return { ok: false, message: `The allocation for '${plan.path}' could not be re-verified immediately before publication: ${reloaded.message}` }
 	}
@@ -667,7 +706,21 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	// only after it ran would be too late whenever `.engineering` itself is a
 	// symlink and the type directory does not yet exist beneath its target --
 	// `mkdir -p` would silently create it outside the project first.
-	let chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, undefined)
+	//
+	// `.engineering` itself is bound to `plan.engineeringIdentity` from this
+	// very first checkpoint (Finding 2, tenth round), never merely
+	// `undefined`: unlike the type directory (legitimately absent when no
+	// Artifact of that type has been created yet -- Git does not preserve
+	// empty directories), `.engineering` MUST already exist as the exact
+	// directory discovery observed. A prior implementation passed `undefined`
+	// for BOTH components here, which let `verifyChainComponent`'s "not yet
+	// created" tolerance also (wrongly) cover a `.engineering` deleted or
+	// swapped for a different real directory since the plan was computed --
+	// `ensureDirectory`'s recursive `mkdir` would then silently recreate
+	// `.engineering` itself, and the fresh allocation reload below would
+	// compute an ID over that new, empty shell instead of refusing. The type
+	// directory may still be created when absent; `.engineering` may not be.
+	let chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, { engineering: plan.engineeringIdentity })
 	if (!chainCheck.ok)
 		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
 
