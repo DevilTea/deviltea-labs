@@ -22,7 +22,27 @@ const GIT_TEST_ENV = {
 }
 
 function git(dir: string, args: string[]): string {
-	return execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	const result = execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	// A freshly initialized fixture repository must not run background
+	// maintenance (`gc --auto`'s detached repack, or `maintenance.auto`'s
+	// scheduled runs): a stray background process can still be writing
+	// `.git/objects/pack` when this file's teardown removes the fixture,
+	// racing the rmdir and intermittently failing with `ENOTEMPTY` (observed
+	// in CI). Disabling it right after `init` removes the writer instead of
+	// just tolerating the race.
+	if (args[0] === 'init') {
+		execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+		execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+		execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+	}
+	return result
+}
+
+/** Applies the same background-maintenance lockdown as {@link git}'s `init` branch, for fixture repositories created outside that helper (e.g. before it exists, or via a real clone). */
+function disableBackgroundMaintenance(dir: string): void {
+	execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+	execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+	execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
 }
 
 function commitAll(dir: string, message: string): string {
@@ -52,11 +72,11 @@ describe('computeInitPlan', () => {
 
 	beforeEach(async () => {
 		tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-init-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		git(tempDir, ['init', '-q', '-b', 'main'])
 	})
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true })
+		await fs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	function repoDeps(): ComputeInitPlanDeps {
@@ -260,6 +280,7 @@ describe('computeInitPlan', () => {
 		const shallowDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-init-shallow-')))
 		await fs.rm(shallowDir, { recursive: true, force: true })
 		execFileSync('git', ['clone', '-q', '--depth', '1', `file://${tempDir}`, shallowDir], { stdio: 'pipe' })
+		disableBackgroundMaintenance(shallowDir)
 
 		try {
 			const result = await computeInitPlan(
@@ -272,7 +293,7 @@ describe('computeInitPlan', () => {
 				.toBe('history-incomplete')
 		}
 		finally {
-			await fs.rm(shallowDir, { recursive: true, force: true })
+			await fs.rm(shallowDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -368,11 +389,11 @@ describe('applyInitPlan', () => {
 
 	beforeEach(async () => {
 		tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-init-apply-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		git(tempDir, ['init', '-q', '-b', 'main'])
 	})
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true })
+		await fs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	async function computeValidPlan() {

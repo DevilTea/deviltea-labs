@@ -36,7 +36,20 @@ const GIT_TEST_ENV = {
 }
 
 function git(dir: string, args: string[]): string {
-	return execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	const result = execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	// A freshly initialized fixture repository must not run background
+	// maintenance (`gc --auto`'s detached repack, or `maintenance.auto`'s
+	// scheduled runs): a stray background process can still be writing
+	// `.git/objects/pack` when `afterEach`'s `fs.rm` tears the fixture down,
+	// racing the rmdir and intermittently failing with `ENOTEMPTY` (observed
+	// in CI). Disabling it right after `init` removes the writer instead of
+	// just tolerating the race.
+	if (args[0] === 'init') {
+		execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+		execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+		execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+	}
+	return result
 }
 
 function commitAll(dir: string, message: string): string {
@@ -334,7 +347,7 @@ describe('computeHistory', () => {
 	})
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true })
+		await fs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	function gitRepo(root: string = tempDir) {
@@ -524,7 +537,7 @@ describe('computeHistory', () => {
 				.toEqual({ kind: 'history-unavailable' })
 		}
 		finally {
-			await fs.rm(shallowDir, { recursive: true, force: true })
+			await fs.rm(shallowDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -564,7 +577,7 @@ describe('computeHistory', () => {
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(otherSourceDir, { recursive: true, force: true })
+			await fs.rm(otherSourceDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -700,7 +713,7 @@ describe('computeHistory: PROJECT control-path availability', () => {
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -729,7 +742,7 @@ describe('computeHistory: malformed CHG file mid-history', () => {
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -755,7 +768,7 @@ describe('computeHistory: malformed CHG file mid-history', () => {
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -812,7 +825,7 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -838,7 +851,7 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -856,7 +869,7 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -877,7 +890,7 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -922,7 +935,7 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -984,7 +997,7 @@ Result: passed
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1008,7 +1021,7 @@ Result: passed
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1040,7 +1053,7 @@ describe('computeHistory: relation-entry trust for CHG effects (04-relations.md)
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1069,7 +1082,7 @@ describe('computeHistory: relation-entry trust for CHG effects (04-relations.md)
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1121,7 +1134,7 @@ Body text for REQ-001.
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1150,7 +1163,7 @@ describe('computeHistory: bootstrap boundary never reached (11-filesystem-and-co
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1196,7 +1209,7 @@ linked_repositories: []
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1227,7 +1240,7 @@ linked_repositories: []
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1271,7 +1284,7 @@ linked_repositories: []
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1306,7 +1319,7 @@ linked_repositories: []
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1358,7 +1371,7 @@ Body text for REQ-001.
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1388,7 +1401,7 @@ Body text for REQ-001.
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1412,7 +1425,7 @@ Body text for REQ-001.
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1447,7 +1460,7 @@ describe('computeHistory: emitted CHG summary projection-fidelity (10-query-and-
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1512,7 +1525,7 @@ Result: passed
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1552,7 +1565,7 @@ Result: passed
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1584,7 +1597,7 @@ describe('computeHistory: managed historical entries require a regular Git file 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1614,7 +1627,7 @@ describe('computeHistory: managed historical entries require a regular Git file 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1654,7 +1667,7 @@ describe('computeHistory: managed historical entries require a regular Git file 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1685,7 +1698,7 @@ describe('computeHistory: immutable integration_ref (11-filesystem-and-config.md
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1716,7 +1729,7 @@ describe('computeHistory: immutable integration_ref (11-filesystem-and-config.md
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1751,7 +1764,7 @@ describe('computeHistory: mid-history ef.yaml mode change with an unchanged blob
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1782,7 +1795,7 @@ describe('computeHistory: CHG net-effect trust (07-change-transactions.md, Findi
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1844,7 +1857,7 @@ Result: bogus
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1871,7 +1884,7 @@ Result: bogus
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1902,7 +1915,7 @@ Result: bogus
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -1941,7 +1954,7 @@ describe('computeHistory: Artifact identity trust across the whole history (Find
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -1975,7 +1988,7 @@ describe('computeHistory: Artifact identity trust across the whole history (Find
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2014,7 +2027,7 @@ describe('computeHistory: CHG historical lifecycle/retention (Finding 5, 03-life
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2056,7 +2069,7 @@ describe('computeHistory: CHG historical lifecycle/retention (Finding 5, 03-life
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2109,7 +2122,7 @@ Rationale text.
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2147,7 +2160,7 @@ describe('computeHistory: genuine transition required for a `retires` effect (Fi
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2182,7 +2195,7 @@ describe('computeHistory: exactly-once target claim across the whole commit (Fin
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2221,7 +2234,7 @@ describe('computeHistory: canonical-layout-violating entries hide unparsed Artif
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2251,7 +2264,7 @@ describe('computeHistory: declared local Resource file existence (tenth-round re
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2287,7 +2300,7 @@ describe('computeHistory: declared local Resource file existence (tenth-round re
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2327,7 +2340,7 @@ describe('computeHistory: terminal freeze and exactly-once CHG coverage for the 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2361,7 +2374,7 @@ describe('computeHistory: terminal freeze and exactly-once CHG coverage for the 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2387,7 +2400,7 @@ describe('computeHistory: terminal freeze and exactly-once CHG coverage for the 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2444,7 +2457,7 @@ Rationale text.
 				.toBeGreaterThan(0)
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2477,7 +2490,7 @@ Rationale text.
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2534,7 +2547,7 @@ Revised body text for REQ-001, missing its required Rationale heading.
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2565,7 +2578,7 @@ Revised body text for REQ-001, missing its required Rationale heading.
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2600,7 +2613,7 @@ describe('computeHistory: eleventh-round review Finding 3 (lifecycle-transition 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2630,7 +2643,7 @@ describe('computeHistory: eleventh-round review Finding 3 (lifecycle-transition 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })
@@ -2678,7 +2691,7 @@ describe('computeHistory: twelfth-round review Finding 1 (graph-wide transition 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2713,7 +2726,7 @@ describe('computeHistory: twelfth-round review Finding 1 (graph-wide transition 
 				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -2768,7 +2781,7 @@ describe('computeHistory: twelfth-round review Finding 1 (graph-wide transition 
 				])
 		}
 		finally {
-			await fs.rm(dir, { recursive: true, force: true })
+			await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })

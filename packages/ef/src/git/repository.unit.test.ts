@@ -50,7 +50,27 @@ const GIT_TEST_ENV = {
 }
 
 function git(dir: string, args: string[]): string {
-	return execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	const result = execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	// A freshly initialized fixture repository must not run background
+	// maintenance (`gc --auto`'s detached repack, or `maintenance.auto`'s
+	// scheduled runs): a stray background process can still be writing
+	// `.git/objects/pack` when this file's teardown removes the fixture,
+	// racing the rmdir and intermittently failing with `ENOTEMPTY` (observed
+	// in CI). Disabling it right after `init` removes the writer instead of
+	// just tolerating the race.
+	if (args[0] === 'init') {
+		execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+		execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+		execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+	}
+	return result
+}
+
+/** Applies the same background-maintenance lockdown as {@link git}'s `init` branch, for fixture repositories created by `git init`/`git clone` outside that helper (e.g. with a non-default object format, or via a real clone). */
+function disableBackgroundMaintenance(dir: string): void {
+	execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+	execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+	execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
 }
 
 function writeTrackedFile(dir: string, relPath: string, content: string): void {
@@ -126,7 +146,7 @@ describe('gitRepository', () => {
 	afterEach(() => {
 		while (tempDirs.length > 0) {
 			const dir = tempDirs.pop()!
-			rmSync(dir, { recursive: true, force: true })
+			rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -226,6 +246,7 @@ describe('gitRepository', () => {
 			const dir = mkdtempSync(join(tmpdir(), 'ef-git-repo-'))
 			try {
 				execFileSync('git', ['init', '-q', '-b', 'main', '--object-format=sha256', dir], { stdio: 'pipe' })
+				disableBackgroundMaintenance(dir)
 			}
 			catch {
 				rmSync(dir, { recursive: true, force: true })
@@ -689,6 +710,7 @@ describe('gitRepository', () => {
 			const shallowDir = mkdtempSync(join(tmpdir(), 'ef-git-shallow-'))
 			rmSync(shallowDir, { recursive: true, force: true })
 			execFileSync('git', ['clone', '-q', '--depth', '1', `file://${source}`, shallowDir], { stdio: 'pipe' })
+			disableBackgroundMaintenance(shallowDir)
 			tempDirs.push(shallowDir)
 
 			const result = await repo(shallowDir)
@@ -831,6 +853,7 @@ describe('gitRepository', () => {
 			const shallowDir = mkdtempSync(join(tmpdir(), 'ef-git-shallow-path-'))
 			rmSync(shallowDir, { recursive: true, force: true })
 			execFileSync('git', ['clone', '-q', '--depth', '1', `file://${source}`, shallowDir], { stdio: 'pipe' })
+			disableBackgroundMaintenance(shallowDir)
 			tempDirs.push(shallowDir)
 			tempDirs.push(source)
 
@@ -848,6 +871,7 @@ describe('gitRepository', () => {
 			const shallowDir = mkdtempSync(join(tmpdir(), 'ef-git-shallow-path-found-'))
 			rmSync(shallowDir, { recursive: true, force: true })
 			execFileSync('git', ['clone', '-q', '--depth', '1', `file://${source}`, shallowDir], { stdio: 'pipe' })
+			disableBackgroundMaintenance(shallowDir)
 			tempDirs.push(shallowDir)
 			tempDirs.push(source)
 

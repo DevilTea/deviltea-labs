@@ -9,6 +9,22 @@ import { findWorktreeRoot } from '../git/repository'
 import { checkWorkingDirectoryAssociation } from '../repository/discovery'
 import { resolveProject } from './project-context'
 
+/**
+ * Initializes a fixture Git repository at `dir`, then disables background
+ * maintenance (`gc --auto`'s detached repack, and `maintenance.auto`'s
+ * scheduled runs): a stray background process can still be writing
+ * `.git/objects/pack` when this file's teardown removes the fixture, racing
+ * the rmdir and intermittently failing with `ENOTEMPTY` (observed in CI).
+ * Disabling it right after `init` removes the writer instead of just
+ * tolerating the race.
+ */
+function initGitFixture(dir: string): void {
+	execFileSync('git', ['init', '-q', '-b', 'main', dir])
+	execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+	execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+	execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+}
+
 describe('resolveProject', () => {
 	let tempDir: string
 
@@ -17,11 +33,11 @@ describe('resolveProject', () => {
 	})
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true })
+		await fs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	it('resolves a real initialized project by ascending from a nested cwd', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		await fs.mkdir(path.join(tempDir, '.engineering'))
 		await fs.writeFile(
 			path.join(tempDir, '.engineering', 'ef.yaml'),
@@ -41,7 +57,7 @@ describe('resolveProject', () => {
 	})
 
 	it('reports not-found when no .engineering exists anywhere above cwd', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		const result = await resolveProject({ cwd: tempDir }, createGitExecutor())
 		expect(result.ok)
 			.toBe(false)
@@ -50,7 +66,7 @@ describe('resolveProject', () => {
 	})
 
 	it('reports incomplete-initialization when ef.yaml is absent from an existing .engineering directory', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		await fs.mkdir(path.join(tempDir, '.engineering'))
 		const result = await resolveProject({ cwd: tempDir }, createGitExecutor())
 		expect(result.ok)
@@ -60,7 +76,7 @@ describe('resolveProject', () => {
 	})
 
 	it('honors an explicit --project root even when cwd is elsewhere', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		await fs.mkdir(path.join(tempDir, '.engineering'))
 		await fs.writeFile(
 			path.join(tempDir, '.engineering', 'ef.yaml'),
@@ -75,12 +91,12 @@ describe('resolveProject', () => {
 				.toBe(tempDir)
 		}
 		finally {
-			await fs.rm(elsewhere, { recursive: true, force: true })
+			await fs.rm(elsewhere, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
 	it('reports not-a-directory when .engineering exists as a plain file', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		await fs.writeFile(path.join(tempDir, '.engineering'), 'not a directory')
 		const result = await resolveProject({ cwd: tempDir }, createGitExecutor())
 		expect(result.ok)
@@ -90,7 +106,7 @@ describe('resolveProject', () => {
 	})
 
 	it('reports read-error when ef.yaml exists as a directory instead of a file', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		await fs.mkdir(path.join(tempDir, '.engineering'))
 		await fs.mkdir(path.join(tempDir, '.engineering', 'ef.yaml'))
 		const result = await resolveProject({ cwd: tempDir }, createGitExecutor())
@@ -101,7 +117,7 @@ describe('resolveProject', () => {
 	})
 
 	it('reports not-project-worktree-root when .engineering is found below the Git worktree root', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		const sub = path.join(tempDir, 'sub')
 		await fs.mkdir(path.join(sub, '.engineering'), { recursive: true })
 		await fs.writeFile(
@@ -118,7 +134,7 @@ describe('resolveProject', () => {
 	})
 
 	it('reports unassociated when cwd sits inside a nested, undeclared Git worktree', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		await fs.mkdir(path.join(tempDir, '.engineering'))
 		await fs.writeFile(
 			path.join(tempDir, '.engineering', 'ef.yaml'),
@@ -126,7 +142,7 @@ describe('resolveProject', () => {
 		)
 		const nestedRepo = path.join(tempDir, 'linked')
 		await fs.mkdir(nestedRepo)
-		execFileSync('git', ['init', '-q', '-b', 'main', nestedRepo])
+		initGitFixture(nestedRepo)
 
 		const result = await resolveProject({ cwd: nestedRepo }, createGitExecutor())
 		expect(result.ok)
@@ -168,7 +184,7 @@ describe('resolveProject', () => {
 	// verbatim), rather than trusting discovery's now-stale `associated`
 	// verdict.
 	it('re-running the association decision against a snapshot load\'s fresher config reverses a stale verdict after ef.yaml is rewritten in place', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		await fs.mkdir(path.join(tempDir, '.engineering'))
 		const configA = 'schema: ef/config@1\nrepository:\n  integration_ref: refs/heads/main\nlinked_repositories:\n  - id: linked\n    path: linked\n    role: implementation\n    required: true\nschemas:\n  artifact_write_major: 1\n'
 		const configB = 'schema: ef/config@1\nrepository:\n  integration_ref: refs/heads/main\nlinked_repositories: []\nschemas:\n  artifact_write_major: 1\n'
@@ -176,7 +192,7 @@ describe('resolveProject', () => {
 
 		const linkedDir = path.join(tempDir, 'linked')
 		await fs.mkdir(linkedDir)
-		execFileSync('git', ['init', '-q', '-b', 'main', linkedDir])
+		initGitFixture(linkedDir)
 
 		const executor = createGitExecutor()
 		const resolved = await resolveProject({ cwd: linkedDir }, executor)

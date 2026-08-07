@@ -38,7 +38,27 @@ const GIT_TEST_ENV = {
 }
 
 function git(dir: string, args: string[]): string {
-	return execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	const result = execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	// A freshly initialized fixture repository must not run background
+	// maintenance (`gc --auto`'s detached repack, or `maintenance.auto`'s
+	// scheduled runs): a stray background process can still be writing
+	// `.git/objects/pack` when this file's teardown removes the fixture,
+	// racing the rmdir and intermittently failing with `ENOTEMPTY` (observed
+	// in CI). Disabling it right after `init` removes the writer instead of
+	// just tolerating the race.
+	if (args[0] === 'init') {
+		execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+		execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+		execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+	}
+	return result
+}
+
+/** Applies the same background-maintenance lockdown as {@link git}'s `init` branch, for fixture repositories created outside that helper (e.g. before it exists, or via a real clone). */
+function disableBackgroundMaintenance(dir: string): void {
+	execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+	execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+	execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
 }
 
 const VALUES: InitCommandValues = {
@@ -79,11 +99,11 @@ describe('runInitCommand', () => {
 
 	beforeEach(async () => {
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-init-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', root])
+		git(root, ['init', '-q', '-b', 'main'])
 	})
 
 	afterEach(async () => {
-		await fs.rm(root, { recursive: true, force: true })
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	function deps(prompts: Prompts = neverPrompts()) {
@@ -385,7 +405,7 @@ describe('runInitCommand', () => {
 
 		const otherRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-init-other-')))
 		try {
-			execFileSync('git', ['init', '-q', '-b', 'branch-b', otherRoot])
+			git(otherRoot, ['init', '-q', '-b', 'branch-b'])
 			await fs.writeFile(path.join(otherRoot, 'b.txt'), 'b\n')
 			git(otherRoot, ['add', '-A'])
 			git(otherRoot, ['commit', '-q', '-m', 'commit on branch-b'])
@@ -426,7 +446,7 @@ describe('runInitCommand', () => {
 			await expect(fs.stat(path.join(root, '.engineering'))).rejects.toThrow()
 		}
 		finally {
-			await fs.rm(otherRoot, { recursive: true, force: true })
+			await fs.rm(otherRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -515,6 +535,7 @@ describe('runInitCommand', () => {
 		const shallowDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-init-shallow-')))
 		await fs.rm(shallowDir, { recursive: true, force: true })
 		execFileSync('git', ['clone', '-q', '--depth', '1', `file://${root}`, shallowDir], { stdio: 'pipe' })
+		disableBackgroundMaintenance(shallowDir)
 
 		try {
 			const outcome = await runInitCommand(
@@ -531,7 +552,7 @@ describe('runInitCommand', () => {
 				.toBe(false)
 		}
 		finally {
-			await fs.rm(shallowDir, { recursive: true, force: true })
+			await fs.rm(shallowDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
