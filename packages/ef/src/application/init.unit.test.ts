@@ -668,7 +668,23 @@ describe('applyInitPlan', () => {
 			.toBe(false)
 	})
 
-	it('cleans up the whole claim when a materialized file is a different length than the planned bytes', async () => {
+	// Both `readFileBytes` stubs below report a mismatch UNCONDITIONALLY, on
+	// every call for `PROJECT.md` -- not only the first. That mismatch is
+	// therefore still there, unchanged, when `abort`'s cleanup loop later
+	// re-reads `PROJECT.md` immediately before its own scheduled deletion
+	// (`entrySafeToDelete`'s byte-content proof, the same check this content
+	// proof exists to close an entry-level inode-ABA hazard for -- see
+	// `applyInitPlan`'s own documentation). Cleanup therefore correctly
+	// refuses to delete `PROJECT.md` (it cannot prove, right now, that the
+	// content there is what this invocation itself wrote) and halts before
+	// touching anything at or above it in the deepest-first deletion order,
+	// even though the underlying real file was, in fact, materialized
+	// correctly -- the mismatch here exists only in what the stub reports
+	// back, exactly like the real inode-ABA case cannot be told apart from a
+	// genuine foreign substitution from the inside. `ef.yaml`, created after
+	// `PROJECT.md` and thus checked and deleted first in the reverse order,
+	// is unaffected by the stub and is cleaned up as usual.
+	it('reports incomplete and halts cleanup before the unverifiable file when a materialized file is a different length than the planned bytes', async () => {
 		const plan = await computeValidPlan()
 		const deps = {
 			...defaultApplyInitPlanDeps,
@@ -689,11 +705,19 @@ describe('applyInitPlan', () => {
 		expect(result.applied === false && result.message)
 			.toBe('File \'.engineering/PROJECT.md\' was not materialized with the planned bytes.')
 
+		// Cleanup halted at `PROJECT.md`: `.engineering` and the unverifiable
+		// file itself both survive completely untouched.
 		expect(await pathExists(path.join(tempDir, '.engineering')))
+			.toBe(true)
+		expect(await pathExists(path.join(tempDir, '.engineering/PROJECT.md')))
+			.toBe(true)
+		// The later-created, unaffected `ef.yaml` was still cleaned up before
+		// cleanup reached and halted at `PROJECT.md`.
+		expect(await pathExists(path.join(tempDir, '.engineering/ef.yaml')))
 			.toBe(false)
 	})
 
-	it('cleans up the whole claim when a materialized file is the same length but different content than the planned bytes', async () => {
+	it('reports incomplete and halts cleanup before the unverifiable file when a materialized file is the same length but different content than the planned bytes', async () => {
 		const plan = await computeValidPlan()
 		const deps = {
 			...defaultApplyInitPlanDeps,
@@ -714,6 +738,10 @@ describe('applyInitPlan', () => {
 			.toBe('incomplete')
 
 		expect(await pathExists(path.join(tempDir, '.engineering')))
+			.toBe(true)
+		expect(await pathExists(path.join(tempDir, '.engineering/PROJECT.md')))
+			.toBe(true)
+		expect(await pathExists(path.join(tempDir, '.engineering/ef.yaml')))
 			.toBe(false)
 	})
 
@@ -1129,9 +1157,66 @@ describe('applyInitPlan', () => {
 				.toBe('incomplete')
 
 			// The substituted foreign file must survive completely untouched:
-			// cleanup halts at the first identity mismatch (this file, the most
-			// recently created entry) instead of blindly unlinking whatever real
-			// file currently occupies the tracked path.
+			// cleanup halts at the first ownership mismatch for this file (the
+			// most recently created entry) -- identity and/or byte content,
+			// whichever the real filesystem happens to disprove here -- instead
+			// of blindly unlinking whatever real file currently occupies the
+			// tracked path. On a filesystem that happens to recycle the freed
+			// inode for the replacement (observed on Linux ext4), the identity
+			// check alone would be fooled; the byte-content check below proves
+			// that gap is independently closed.
+			expect(await fs.readFile(lastFilePath, 'utf8'))
+				.toBe('foreign replacement content')
+		})
+
+		it('fails closed via the byte-content check even when the per-entry identity check itself is completely fooled (inode-ABA, forced)', async () => {
+			const plan = await computeValidPlan()
+			const lastFile = plan.files[plan.files.length - 1]!
+			const lastFilePath = path.join(tempDir, lastFile.path)
+			let capturedIdentity: { dev: number, ino: number } | undefined
+			let substituted = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				regularFileIdentity: async (targetPath: string) => {
+					const identity = await defaultApplyInitPlanDeps.regularFileIdentity(targetPath)
+					if (targetPath === lastFilePath && !substituted && identity !== undefined)
+						capturedIdentity = identity
+					// Forced ABA, exactly like the existing dedicated fake-identity
+					// test above for `engineeringPath` itself, but one level down at
+					// a single tracked FILE entry: once substituted, always report
+					// the identity captured at this file's own creation, regardless
+					// of which real file is actually at `lastFilePath` right now --
+					// deterministic on every platform rather than depending on real
+					// inode-reuse behavior.
+					if (targetPath === lastFilePath && substituted && capturedIdentity !== undefined)
+						return capturedIdentity
+					return identity
+				},
+				isDirectory: async (targetPath: string) => {
+					if (targetPath.endsWith(path.join('.engineering', 'chg')) && !substituted) {
+						substituted = true
+						// Same substitution as the test above: a genuinely different
+						// real file under the identical, already-tracked path.
+						await fs.rm(lastFilePath, { force: true })
+						await fs.writeFile(lastFilePath, 'foreign replacement content')
+						return false
+					}
+					return defaultApplyInitPlanDeps.isDirectory(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The per-entry identity check was forced to (incorrectly) pass, yet
+			// the foreign file still survives completely untouched: the
+			// independent byte-content check catches what the deliberately fooled
+			// identity check alone could not.
 			expect(await fs.readFile(lastFilePath, 'utf8'))
 				.toBe('foreign replacement content')
 		})

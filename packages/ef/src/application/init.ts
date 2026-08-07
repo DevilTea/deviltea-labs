@@ -42,18 +42,29 @@
  * recursive/force removal: it deletes only the exact paths this invocation
  * tracked as having created, deepest first, via precise `unlink`/non-recursive
  * `rmdir` calls, and -- immediately before each individual deletion -- re-proves
- * that specific entry's identity against the one captured at its own creation,
- * not merely the claimed directory's own identity; a same-name,
+ * that specific entry's ownership against what was captured at its own
+ * creation, not merely the claimed directory's own identity; a same-name,
  * different-identity foreign substitution at one already-tracked path would
  * otherwise be deleted by a blind unlink/rmdir-by-path, since neither
  * primitive can tell whether the path's current content is the one this
- * invocation actually created there. `rmdir` also succeeds only on a
- * directory that is genuinely empty, so any unexpected content left behind by
- * a swap is never silently discarded either way; cleanup simply stops at the
- * first such failure and reports `incomplete`. It never re-runs project
- * discovery or validation while the marker exists, and a restarted process
- * that meets a pre-existing `.engineering` (complete or not) leaves it
- * untouched via the same atomic claim rejection.
+ * invocation actually created there. For a FILE entry specifically, that
+ * per-entry ownership proof is IDENTITY *and* BYTE-CONTENT together, never
+ * identity alone, for exactly the same ABA reason as `engineeringPath` itself
+ * but one level down: a filesystem that recycles a just-freed inode for a
+ * brand-new, unrelated file (Linux ext4, immediately after an `unlink` +
+ * `writeFile` of the same path -- the exact shape of the CI regression that
+ * motivated this content check) reports the identical `dev`/`ino` pair
+ * captured at that file's own creation even though its content is now
+ * entirely foreign; an identity-only per-entry check is fooled by this
+ * inode-ABA exactly like a bare directory-identity check would be fooled at
+ * the claim level. A directory entry needs no separate content proof:
+ * non-recursive `rmdir` succeeds only on a directory that is genuinely empty,
+ * so any unexpected content left behind by a swap is never silently discarded
+ * either way; cleanup simply stops at the first such failure and reports
+ * `incomplete`. It never re-runs project discovery or validation while the
+ * marker exists, and a restarted process that meets a pre-existing
+ * `.engineering` (complete or not) leaves it untouched via the same atomic
+ * claim rejection.
  */
 
 import type { Diagnostic } from '../domain/diagnostics'
@@ -486,7 +497,12 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  *   names this invocation has itself created so far, AND every path tracked
  *   as created so far (at any depth, not only top-level names) must still
  *   denote, by a fresh per-entry `lstat` identity re-check, the EXACT entry
- *   this invocation created there. A one-directional "every present name is
+ *   this invocation created there. (This ongoing, every-checkpoint re-check
+ *   is deliberately identity-only, for every entry kind including files; see
+ *   the "Because of the above" bullet below for the ADDITIONAL byte-content
+ *   proof required of a FILE entry, but only once, immediately before `abort`
+ *   actually deletes it -- not on every intermediate checkpoint.) A
+ *   one-directional "every present name is
  *   allowed" check is fooled by a same-claimed-identity replacement directory
  *   that contains only a SUBSET of the expected names (e.g. a directory
  *   holding nothing but a copied-nonce `.tmp/init-state.json`): every present
@@ -509,28 +525,55 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * - Because of the above, destructive cleanup (`abort` below) is
  *   ownership-proven immediately before any deletion: a fresh
  *   `directoryIdentity` re-check of `engineeringPath` itself against the
- *   identity captured at claim time (and, once the marker exists, its
- *   nonce), AND -- per entry, immediately before that specific entry is
- *   removed -- a fresh identity re-check against the identity captured when
- *   THIS invocation created that exact entry. Re-proving `engineeringPath`'s
- *   own identity alone is not enough: it says nothing about whether some
- *   individual tracked path beneath it was itself swapped for a same-name,
+ *   identity captured at claim time (and, once the marker exists, its nonce
+ *   AND its full raw bytes -- see the marker paragraph below), AND -- per
+ *   entry, immediately before that specific entry is removed -- a fresh
+ *   ownership re-check against what was captured when THIS invocation created
+ *   that exact entry: `lstat` identity for every entry, AND, for a FILE entry
+ *   specifically, byte-for-byte content equality against the exact bytes this
+ *   invocation itself wrote there. Re-proving `engineeringPath`'s own identity
+ *   alone is not enough: it says nothing about whether some individual
+ *   tracked path beneath it was itself swapped for a same-name,
  *   different-identity foreign entry, which a blind `unlink`/`rmdir`-by-path
- *   would otherwise delete without ever noticing the substitution. Cleanup
- *   removes ONLY the exact paths this invocation itself tracked as having
- *   created AND still provably owns -- deepest first, via precise
- *   `unlink`/non-recursive `rmdir`, never a recursive or force removal.
- *   `rmdir` succeeds only on a directory that is genuinely empty, so this is
- *   itself part of the ownership proof: if `engineeringPath` (or anything
- *   tracked beneath it) still holds content this invocation did not itself
- *   create -- the inode-ABA case above, or a swapped-in real directory this
- *   invocation never created -- the corresponding `rmdir` fails and cleanup
- *   stops immediately, leaving that entry and everything at or above it in
- *   the deletion order completely untouched, and still reports `incomplete`.
- *   It never deletes state it cannot prove it owns. Recovery from that state
- *   is an explicit operator action (13-cli-contract.md), matching the "on
- *   failure, remove only paths whose ownership by that invocation is proven"
- *   step of the protocol.
+ *   would otherwise delete without ever noticing the substitution. Per-entry
+ *   IDENTITY alone is, in turn, not enough for a FILE: the same inode-ABA
+ *   hazard described above for `engineeringPath` recurs one level down --
+ *   Linux ext4 recycling a just-freed inode for a brand-new file after an
+ *   `unlink` + `writeFile` of the identical tracked path reports the exact
+ *   same `dev`/`ino` this invocation captured at that file's own creation,
+ *   even though the file now holds entirely foreign content (the concrete CI
+ *   regression this content check was added to close). The byte-equality
+ *   check is independent of, and does not rely on, the identity check ever
+ *   failing: a foreign file substituted under a forced/stubbed identity match
+ *   is still caught, because its content practically never happens to equal
+ *   the exact bytes this invocation itself wrote. A directory entry needs no
+ *   separate content check: cleanup removes ONLY the exact paths this
+ *   invocation itself tracked as having created AND still provably owns --
+ *   deepest first, via precise `unlink`/non-recursive `rmdir`, never a
+ *   recursive or force removal. `rmdir` succeeds only on a directory that is
+ *   genuinely empty, so this is itself part of a directory's ownership proof:
+ *   if `engineeringPath` (or any tracked directory beneath it) still holds
+ *   content this invocation did not itself create -- the inode-ABA case
+ *   above, or a swapped-in real directory this invocation never created --
+ *   the corresponding `rmdir` fails and cleanup stops immediately, leaving
+ *   that entry and everything at or above it in the deletion order completely
+ *   untouched, and still reports `incomplete`. Any mismatch at any of these
+ *   checks -- identity, byte content, or an outright read failure -- is
+ *   treated identically: cleanup stops immediately, leaving that entry and
+ *   everything above it in the deletion order untouched, and reports
+ *   `incomplete`. It never deletes state it cannot prove it owns. Recovery
+ *   from that state is an explicit operator action (13-cli-contract.md),
+ *   matching the "on failure, remove only paths whose ownership by that
+ *   invocation is proven" step of the protocol.
+ * - The marker itself gets the same treatment one level up: `abort` requires
+ *   not merely that the marker's parsed `nonce` field match (a foreign marker
+ *   sharing that one field's value, amid otherwise different bytes, would
+ *   still pass a field-level check alone) but that its ENTIRE raw content is
+ *   byte-for-byte identical to what this invocation's own `writeInitMarker`
+ *   produced, captured immediately after that call succeeded -- the same
+ *   identity-is-not-enough principle applied to the one file whose exact
+ *   serialized shape is this module's own implementation detail rather than a
+ *   plan-supplied byte sequence.
  * - The narrowest residual case -- a swap that fully restores the SAME
  *   original directory to the SAME path strictly inside one guarded window --
  *   still acts on the genuine claimed directory either way; the only
@@ -579,11 +622,30 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	 * merely an entry of the same name (Finding 1: a present-name check alone
 	 * cannot tell a genuinely materialized entry apart from a same-name
 	 * replacement).
+	 *
+	 * For a `'file'` entry, `bytes` additionally carries the exact content
+	 * this invocation itself wrote there, captured immediately after creation
+	 * (the planned bytes already held in memory for a plan file; the just-read
+	 * marker content for `.tmp/init-state.json`, whose exact serialized bytes
+	 * are otherwise this module's implementation detail, not this module's
+	 * own). Identity ALONE is not sufficient for a file, for the same class of
+	 * reason `applyInitPlan`'s own documentation gives for `engineeringPath`
+	 * itself: a filesystem that recycles a just-freed inode for a brand-new,
+	 * unrelated FILE (observed on Linux ext4 immediately after an `unlink` +
+	 * `writeFile` of the same path -- the exact shape of a real CI regression
+	 * this comment documents) reports the identical `dev`/`ino` pair captured
+	 * at creation even though the file's actual content is now entirely
+	 * foreign -- an ABA at the level of one individually tracked entry, not
+	 * only at the level of the claimed directory. A `'directory'` entry needs
+	 * no separate `bytes`: non-recursive `rmdir` already succeeds only on a
+	 * directory that is genuinely empty, which is itself the content half of a
+	 * directory's ownership proof (see `entryContentProven`).
 	 */
 	interface CreatedEntry {
 		path: string
 		kind: 'file' | 'directory'
 		identity: FileIdentity
+		bytes?: Uint8Array
 	}
 
 	/**
@@ -617,10 +679,66 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		return entry.kind === 'directory' ? deps.directoryIdentity(entry.path) : deps.regularFileIdentity(entry.path)
 	}
 
-	/** `true` iff `entry.path` still denotes, right now, the EXACT entry (by `lstat` identity) this invocation created there. */
+	/**
+	 * `true` iff `entry.path` still denotes, right now, the EXACT entry (by
+	 * `lstat` identity) this invocation created there. This is the identity
+	 * half alone -- the ongoing, throughout-the-protocol check
+	 * `verifyClaimIntact` uses for its ordinary per-entry re-check on every
+	 * checkpoint. See `entrySafeToDelete` for the ADDITIONAL byte-content
+	 * proof `abort` requires of a FILE entry immediately before it is actually
+	 * deleted, which this function alone does not perform.
+	 */
 	async function entryOwnershipProven(entry: CreatedEntry): Promise<boolean> {
 		const current = await currentIdentityOf(entry)
 		return current !== undefined && sameFileIdentity(current, entry.identity)
+	}
+
+	/**
+	 * `true` iff `entry.path`'s current raw bytes are byte-for-byte identical
+	 * to `entry.bytes`, the content this invocation itself wrote there. A
+	 * read failure (the path vanished, or turned into something unreadable,
+	 * between the identity check and this one) is treated as unproven, not
+	 * retried or ignored. Trivially `true` for a `'directory'` entry, which
+	 * carries no `bytes` and needs none: see `CreatedEntry`'s own
+	 * documentation on why `rmdir`'s empty-only semantics already are a
+	 * directory's content proof.
+	 */
+	async function entryContentProven(entry: CreatedEntry): Promise<boolean> {
+		if (entry.kind === 'directory')
+			return true
+		try {
+			const current = await deps.readFileBytes(entry.path)
+			return bytesEqual(current, entry.bytes!)
+		}
+		catch {
+			return false
+		}
+	}
+
+	/**
+	 * `true` iff `entry.path` is provably safe for `abort`'s cleanup loop to
+	 * actually delete right now: `entryOwnershipProven`'s identity re-check
+	 * AND, for a FILE entry, `entryContentProven`'s additional byte-content
+	 * proof. This stronger, deletion-time-only definition of ownership exists
+	 * because identity alone is insufficient for a FILE at the moment of
+	 * deletion: a filesystem that recycles a just-freed inode for a
+	 * brand-new, unrelated file (Linux ext4, immediately after an `unlink` +
+	 * `writeFile` of the identical tracked path -- the exact shape of the CI
+	 * regression this check exists to close) reports the identical `dev`/`ino`
+	 * this invocation captured at that file's own creation, even though the
+	 * file's current content is now entirely foreign. `verifyClaimIntact`'s
+	 * ongoing checkpoints deliberately do NOT pay this extra cost on every
+	 * step; only the single re-check immediately before each individual
+	 * deletion needs it, and that is exactly where `abort` calls this
+	 * function instead of `entryOwnershipProven` alone. A directory entry
+	 * needs no separate content check here either: non-recursive `rmdir`
+	 * itself only ever succeeds on a directory that is genuinely empty, which
+	 * is already that entry kind's content proof.
+	 */
+	async function entrySafeToDelete(entry: CreatedEntry): Promise<boolean> {
+		if (!(await entryOwnershipProven(entry)))
+			return false
+		return entryContentProven(entry)
 	}
 
 	/**
@@ -681,11 +799,33 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	const tmpPath = path.join(engineeringPath, '.tmp')
 	const markerPath = path.join(tmpPath, 'init-state.json')
 	let markerCreated = false
+	/** The marker's exact bytes, captured immediately after this invocation's own `writeInitMarker` succeeded (see the `bytes` field of `CreatedEntry`). Used both to seed the marker's own tracked entry and by `abort`'s upfront marker check below. */
+	let markerBytes: Uint8Array | undefined
 
 	async function abort(message: string): Promise<ApplyInitPlanResult> {
 		if (markerCreated) {
 			const read = await deps.readInitMarker(markerPath)
 			if (read.outcome !== 'found' || read.marker.nonce !== nonce)
+				return { applied: false, outcome: 'incomplete', message }
+
+			// The parsed `nonce` field alone proves only that ONE sub-field's
+			// value matches -- not that the marker's entire content is
+			// byte-for-byte identical to what THIS invocation itself wrote
+			// there. A foreign marker sharing the same nonce string (e.g.
+			// embedded among extra fields, or byte-reordered/reformatted JSON
+			// that still parses to the same `nonce`) would still pass the
+			// check above. Require an EXACT match against the raw bytes
+			// captured immediately after this invocation's own
+			// `writeInitMarker` succeeded; any mismatch, including a read
+			// failure, is treated exactly like a nonce mismatch.
+			let currentMarkerBytes: Uint8Array
+			try {
+				currentMarkerBytes = await deps.readFileBytes(markerPath)
+			}
+			catch {
+				return { applied: false, outcome: 'incomplete', message }
+			}
+			if (markerBytes === undefined || !bytesEqual(currentMarkerBytes, markerBytes))
 				return { applied: false, outcome: 'incomplete', message }
 		}
 
@@ -721,18 +861,26 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		// neither primitive cares whether the path's current content is the one
 		// this invocation actually wrote there. Each entry is therefore
 		// re-`lstat`'d and its identity compared against the one captured
-		// immediately after THIS invocation created it; any mismatch (missing,
-		// or present but a different real entry) halts the loop immediately,
-		// before that entry -- or anything remaining above it in this
-		// deepest-first order -- is ever touched, leaving all of it completely
-		// untouched. `rmdir` also succeeds only on a directory that is
-		// genuinely empty: if `engineeringPath` (or anything tracked beneath
-		// it) still holds content this invocation did not itself create, the
-		// corresponding `rmdir` fails too, for the same reason. No unexpected
-		// content is ever silently discarded.
+		// immediately after THIS invocation created it -- AND, for a FILE
+		// entry, its exact byte content is also re-read and compared against
+		// what this invocation itself wrote there (`entrySafeToDelete`):
+		// identity alone is not enough for a file either, since a filesystem
+		// that recycles a just-freed inode for a brand-new file (an `unlink` +
+		// `writeFile` of the identical tracked path -- observed on Linux ext4,
+		// the exact CI regression this check exists to close) reports the
+		// identical `dev`/`ino` even though the file's content is now entirely
+		// foreign. Any mismatch (missing, a different real entry, or -- for a
+		// file -- merely different content under the same identity) halts the
+		// loop immediately, before that entry -- or anything remaining above
+		// it in this deepest-first order -- is ever touched, leaving all of it
+		// completely untouched. `rmdir` also succeeds only on a directory that
+		// is genuinely empty: if `engineeringPath` (or anything tracked
+		// beneath it) still holds content this invocation did not itself
+		// create, the corresponding `rmdir` fails too, for the same reason. No
+		// unexpected content is ever silently discarded.
 		for (let i = createdStack.length - 1; i >= 0; i--) {
 			const entry = createdStack[i]!
-			if (!(await entryOwnershipProven(entry)))
+			if (!(await entrySafeToDelete(entry)))
 				return { applied: false, outcome: 'incomplete', message }
 			try {
 				if (entry.kind === 'file')
@@ -783,7 +931,22 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		const identity = await deps.regularFileIdentity(markerPath)
 		if (identity === undefined)
 			return abort(`'${markerPath}' could not be verified as a regular file immediately after being created.`)
-		createdStack.push({ path: markerPath, kind: 'file', identity })
+		// The marker's exact serialized shape is `writeInitMarker`'s own
+		// implementation detail, not something this module reconstructs from
+		// `nonce` alone: read the just-written bytes back immediately, the
+		// same "capture right after this invocation's own creation succeeded"
+		// pattern already used for `identity` above, and keep it both as this
+		// entry's content-ownership witness and as `abort`'s upfront
+		// byte-level marker check.
+		let bytes: Uint8Array
+		try {
+			bytes = await deps.readFileBytes(markerPath)
+		}
+		catch (error) {
+			return abort(`'${markerPath}' could not be read back immediately after being created: ${(error as Error).message}`)
+		}
+		markerBytes = bytes
+		createdStack.push({ path: markerPath, kind: 'file', identity, bytes })
 	}
 
 	for (const dir of plan.directories) {
@@ -813,7 +976,12 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		const identity = await deps.regularFileIdentity(filePath)
 		if (identity === undefined)
 			return abort(`'${filePath}' could not be verified as a regular file immediately after being created.`)
-		createdStack.push({ path: filePath, kind: 'file', identity })
+		// The planned bytes are already held in memory (no re-read needed):
+		// every `ef init` file is small, so the exact bytes this invocation
+		// itself wrote are simply `file.bytes` from the plan, reused as this
+		// entry's content-ownership witness (see `CreatedEntry`'s own
+		// documentation).
+		createdStack.push({ path: filePath, kind: 'file', identity, bytes: file.bytes })
 		createdTopLevelNames.add(topLevelChildName(file.path))
 	}
 
