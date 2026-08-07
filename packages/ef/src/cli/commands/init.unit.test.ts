@@ -6,9 +6,28 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runInitCommand } from './init'
+
+// `openMock` lets a test inject a real-filesystem handle-close failure
+// strictly inside `applyInitPlan`'s own internals -- exercised here through
+// the CLI's actual, non-injected dependency wiring (this command has no
+// `applyInitPlan`-deps injection point of its own). Every test that does not
+// explicitly arm it gets a plain passthrough to the real implementation.
+const { openMock, realFns } = vi.hoisted(() => ({
+	openMock: vi.fn(),
+	realFns: {
+		open: undefined as unknown as typeof import('node:fs/promises').open,
+	},
+}))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('node:fs/promises')>()
+	realFns.open = actual.open
+	openMock.mockImplementation((...args: Parameters<typeof actual.open>) => actual.open(...args))
+	return { ...actual, open: openMock }
+})
 
 /** Wraps a real executor, forcing failure for every `execIn` call; used to simulate `computeInitPlan`'s own read-only Git checks becoming unavailable. */
 function unavailableExecutor(message: string): GitExecutor {
@@ -100,10 +119,12 @@ describe('runInitCommand', () => {
 	beforeEach(async () => {
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-init-')))
 		git(root, ['init', '-q', '-b', 'main'])
+		openMock.mockImplementation((...args: Parameters<typeof realFns.open>) => realFns.open(...args))
 	})
 
 	afterEach(async () => {
 		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+		openMock.mockClear()
 	})
 
 	function deps(prompts: Prompts = neverPrompts()) {
@@ -615,5 +636,49 @@ describe('runInitCommand', () => {
 		finally {
 			await fs.chmod(root, 0o755)
 		}
+	})
+
+	// FINDING 2 (P1, sixteenth round, matching `cli/commands/artifact-create.ts`'s
+	// own regression): a rejection from a tracked file's own `handle.close()`
+	// (now `OwnedFileLease.release()`, which itself never throws) must never
+	// escape as an uncaught rejection and must never be misreported as exit
+	// `3` (internal defect) -- it belongs to exit `2`'s execution/permission-
+	// inability class instead (13-cli-contract.md's exit table). Reproduced
+	// here through the CLI's real, non-injected `applyInitPlan` wiring by
+	// mocking the real `open()` call itself: the marker's own handle is
+	// genuinely written exactly as production code does, but its `close` is
+	// made to reject, downgrading an otherwise fully successful `ef init` from
+	// exit `0` to exit `2`.
+	it('exits 2 (applied:false, complete:false, incomplete) -- never exit 3, never a plain success -- when a tracked file\'s handle close() fails', async () => {
+		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
+			const [target] = args as [string]
+			const real = await realFns.open(...args)
+			if (typeof target === 'string' && target.endsWith(path.join('.tmp', 'init-state.json'))) {
+				return {
+					writeFile: real.writeFile.bind(real),
+					stat: real.stat.bind(real),
+					read: real.read.bind(real),
+					close: async () => {
+						await real.close()
+						throw Object.assign(new Error('bad file descriptor'), { code: 'EBADF' })
+					},
+				}
+			}
+			return real
+		})
+
+		const outcome = await runInitCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
+
+		// The initialization genuinely, fully completed on disk -- only
+		// releasing the marker's lease afterward failed.
+		await expect(fs.stat(path.join(root, '.engineering', 'ef.yaml'))).resolves.toBeTruthy()
 	})
 })

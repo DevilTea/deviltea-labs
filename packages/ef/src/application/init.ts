@@ -72,7 +72,7 @@ import type { PathHistoryResult, RefResolutionResult, WorktreeRootResult } from 
 import type { ParsedFrontmatterDocument } from '../parsing/frontmatter'
 import type { ExtractedSections, ParseBodyResult } from '../parsing/markdown'
 import type { ClaimDirectoryResult } from '../platform/claim-directory'
-import type { CreateExclusiveResult, ReadInitMarkerResult } from '../platform/exclusive-file'
+import type { CreateExclusiveResult, LeaseReleaseResult, OwnedFileLease, ReadInitMarkerResult } from '../platform/exclusive-file'
 import type { FileIdentity } from '../platform/fs-facts'
 import type { ProjectSnapshot, SnapshotArtifactFile, SnapshotEntryKind } from './snapshot'
 import { mkdir as fsMkdir, readdir as fsReaddir, rmdir as fsRmdir, unlink as fsUnlink } from 'node:fs/promises'
@@ -638,7 +638,7 @@ async function establishFreshDirectoryIdentity(deps: ApplyInitPlanDeps, dirPath:
  *   possible outcome there is a spurious abort of an otherwise-legitimate
  *   run, never a write to, or deletion of, anything else.
  */
-export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = defaultApplyInitPlanDeps): Promise<ApplyInitPlanResult> {
+async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLeases: OwnedFileLease[]): Promise<ApplyInitPlanResult> {
 	const engineeringPath = path.join(plan.targetRoot, '.engineering')
 
 	const targetRootIdentity = await deps.directoryIdentity(plan.targetRoot)
@@ -698,13 +698,29 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	 * no separate `bytes`: non-recursive `rmdir` already succeeds only on a
 	 * directory that is genuinely empty, which is itself the content half of a
 	 * directory's ownership proof (see `entryContentProven`).
+	 *
+	 * Finding (P0, sixteenth round, matching `platform/hard-link-publish.ts`'s
+	 * own finding): a prior implementation captured a FILE entry's `identity`
+	 * once, statically, from `createExclusive`'s/`writeInitMarker`'s
+	 * handle-bound return value, then let that creating handle close. Once
+	 * closed, the file had only its pathname link; a filesystem that recycled
+	 * that freed inode for a byte-identical foreign replacement at the exact
+	 * same tracked path could report the exact same `(dev, ino)` this
+	 * invocation captured at creation, fooling every subsequent per-entry
+	 * ownership re-check at once. A FILE entry now instead carries its
+	 * `OwnedFileLease` directly (`createExclusive`/`writeInitMarker` keep the
+	 * creating handle open; see `platform/exclusive-file.ts`'s own doc): the
+	 * lease's still-open handle pins the underlying inode against recycling
+	 * for as long as `applyInitPlan` might still need to make a destructive
+	 * ownership decision about it, and a per-entry re-check compares a fresh
+	 * pathname observation against the lease's LIVE `fstat` (`fstatLive()`)
+	 * rather than a stale, statically captured identity alone. A `'directory'`
+	 * entry has no handle to retain (`mkdir` returns none) and keeps its
+	 * existing `identity`-only witness.
 	 */
-	interface CreatedEntry {
-		path: string
-		kind: 'file' | 'directory'
-		identity: FileIdentity
-		bytes?: Uint8Array
-	}
+	type CreatedEntry
+		= | { path: string, kind: 'file', lease: OwnedFileLease }
+			| { path: string, kind: 'directory', identity: FileIdentity }
 
 	/**
 	 * Every path this invocation has itself created so far, in creation
@@ -732,41 +748,56 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 			.split('/')[0]!
 	}
 
-	/** The current `lstat`-derived identity of `entry.path`, read as the same kind (`file`/`directory`) this invocation created there. */
-	async function currentIdentityOf(entry: CreatedEntry): Promise<FileIdentity | undefined> {
-		return entry.kind === 'directory' ? deps.directoryIdentity(entry.path) : deps.regularFileIdentity(entry.path)
-	}
-
 	/**
-	 * `true` iff `entry.path` still denotes, right now, the EXACT entry (by
-	 * `lstat` identity) this invocation created there. This is the identity
-	 * half alone -- the ongoing, throughout-the-protocol check
-	 * `verifyClaimIntact` uses for its ordinary per-entry re-check on every
-	 * checkpoint. See `entrySafeToDelete` for the ADDITIONAL byte-content
-	 * proof `abort` requires of a FILE entry immediately before it is actually
-	 * deleted, which this function alone does not perform.
+	 * `true` iff `entry.path` still denotes, right now, the EXACT entry this
+	 * invocation created there. This is the identity half alone -- the
+	 * ongoing, throughout-the-protocol check `verifyClaimIntact` uses for its
+	 * ordinary per-entry re-check on every checkpoint. See `entrySafeToDelete`
+	 * for the ADDITIONAL byte-content proof `abort` requires of a FILE entry
+	 * immediately before it is actually deleted, which this function alone
+	 * does not perform.
+	 *
+	 * For a `'directory'` entry: an ordinary fresh `lstat` identity comparison
+	 * (`deps.directoryIdentity`), unchanged from before.
+	 *
+	 * For a `'file'` entry (Finding P0, sixteenth round): compares a FRESH
+	 * pathname observation (`deps.regularFileIdentity`) against the entry's
+	 * OWN lease's LIVE `fstat` (`lease.fstatLive()`) -- never a statically
+	 * captured identity alone. While the lease is held, POSIX guarantees the
+	 * kernel cannot free this inode for reuse by an unrelated file, so a
+	 * match here is sound proof of "same file, right now," immune to the
+	 * inode-recycling ABA a stale, closed-handle identity comparison could not
+	 * rule out. A released lease, or one whose `fstatLive()` fails (e.g. the
+	 * tracked path's last link was removed), makes ownership unprovable --
+	 * fail closed.
 	 */
 	async function entryOwnershipProven(entry: CreatedEntry): Promise<boolean> {
-		const current = await currentIdentityOf(entry)
-		return current !== undefined && sameFileIdentity(current, entry.identity)
+		if (entry.kind === 'directory') {
+			const current = await deps.directoryIdentity(entry.path)
+			return current !== undefined && sameFileIdentity(current, entry.identity)
+		}
+		const liveIdentity = await entry.lease.fstatLive()
+		if (liveIdentity === undefined)
+			return false
+		const current = await deps.regularFileIdentity(entry.path)
+		return current !== undefined && sameFileIdentity(current, liveIdentity)
 	}
 
 	/**
 	 * `true` iff `entry.path`'s current raw bytes are byte-for-byte identical
-	 * to `entry.bytes`, the content this invocation itself wrote there. A
-	 * read failure (the path vanished, or turned into something unreadable,
+	 * to the content this invocation itself wrote there (`entry.lease.bytes`).
+	 * A read failure (the path vanished, or turned into something unreadable,
 	 * between the identity check and this one) is treated as unproven, not
-	 * retried or ignored. Trivially `true` for a `'directory'` entry, which
-	 * carries no `bytes` and needs none: see `CreatedEntry`'s own
-	 * documentation on why `rmdir`'s empty-only semantics already are a
-	 * directory's content proof.
+	 * retried or ignored. Trivially `true` for a `'directory'` entry: see
+	 * `CreatedEntry`'s own documentation on why `rmdir`'s empty-only semantics
+	 * already are a directory's content proof.
 	 */
 	async function entryContentProven(entry: CreatedEntry): Promise<boolean> {
 		if (entry.kind === 'directory')
 			return true
 		try {
 			const current = await deps.readFileBytes(entry.path)
-			return bytesEqual(current, entry.bytes!)
+			return bytesEqual(current, entry.lease.bytes)
 		}
 		catch {
 			return false
@@ -1008,29 +1039,34 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	if (!(await verifyClaimIntact()))
 		return abort(claimIntactFailureMessage)
 
-	// Finding (P0, matching `platform/hard-link-publish.ts`'s
+	// Finding (P0, fifteenth round, matching `platform/hard-link-publish.ts`'s
 	// `writeTempFileComplete` finding): a prior implementation established
-	// this entry's `identity` and `bytes` from TWO fresh PATHNAME observations
+	// this entry's identity and bytes from TWO fresh PATHNAME observations
 	// made only AFTER `writeInitMarker`'s own `open(markerPath, 'wx')` handle
 	// had already closed -- `deps.regularFileIdentity(markerPath)`, then
 	// `deps.readFileBytes(markerPath)`. Neither call carries any provenance
 	// binding it back to the exact file this invocation itself created:
 	// whatever real regular file happened to occupy `markerPath` by the time
-	// they ran would have been silently adopted as "ours". `writeInitMarker`
-	// (via `createExclusive`) now captures `identity` via `handle.stat()` and
-	// reads its own just-written `bytes` back through that SAME handle,
-	// before ever closing it (see `platform/exclusive-file.ts`'s own doc); the
-	// witness below is constructed EXCLUSIVELY from that returned,
-	// handle-bound provenance -- never re-derived from any pathname
-	// observation of `markerPath` made after the handle is gone.
+	// they ran would have been silently adopted as "ours".
+	//
+	// Finding (P0, sixteenth round): even the fifteenth-round fix -- capturing
+	// identity/bytes from the handle, then closing it before returning -- was
+	// not enough: once closed, a recycled, byte-identical foreign replacement
+	// at `markerPath` could report the exact same `(dev, ino)`. `writeInitMarker`
+	// (via `createExclusive`) now keeps its creating handle OPEN, returned as
+	// an `OwnedFileLease` (see `platform/exclusive-file.ts`'s own doc); the
+	// marker's tracked entry below carries that lease directly, and every
+	// later ownership re-check compares a fresh pathname observation against
+	// the lease's LIVE `fstat` rather than a statically captured identity.
 	const markerResult = await deps.writeInitMarker(markerPath, nonce)
 	if (markerResult.outcome !== 'created')
 		return abort(`Failed to create the initialization marker at '${markerPath}'.`)
 	markerCreated = true
 	{
-		const { identity, bytes } = markerResult
-		markerBytes = bytes
-		createdStack.push({ path: markerPath, kind: 'file', identity, bytes })
+		const { lease } = markerResult
+		markerBytes = lease.bytes
+		fileLeases.push(lease)
+		createdStack.push({ path: markerPath, kind: 'file', lease })
 	}
 
 	for (const dir of plan.directories) {
@@ -1057,26 +1093,28 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		if (!(await verifyClaimIntact()))
 			return abort(claimIntactFailureMessage)
 		const filePath = path.join(plan.targetRoot, file.path)
-		// Finding (P0, matching `platform/hard-link-publish.ts`'s
+		// Finding (P0, fifteenth round, matching `platform/hard-link-publish.ts`'s
 		// `writeTempFileComplete` finding): a prior implementation established
-		// this entry's `identity` from a fresh PATHNAME observation
+		// this entry's identity from a fresh PATHNAME observation
 		// (`deps.regularFileIdentity(filePath)`) made only AFTER
 		// `createExclusive`'s own handle had already closed -- silently
 		// adopting whatever real regular file happened to occupy `filePath` by
 		// the time that call ran, including a foreign file substituted in at
-		// the exact same path in the interim. `createExclusive` now captures
-		// `identity` via `handle.stat()`, before ever closing the handle (see
-		// `platform/exclusive-file.ts`'s own doc); it is used here directly,
-		// never re-derived from a pathname observation of `filePath` made
-		// after the handle is gone. `bytes` needs no equivalent handle-bound
-		// read-back: every `ef init` file is small, so the exact bytes this
-		// invocation itself wrote are simply `file.bytes` from the plan,
-		// already held in memory before the write, reused as this entry's
-		// content-ownership witness (see `CreatedEntry`'s own documentation).
+		// the exact same path in the interim.
+		//
+		// Finding (P0, sixteenth round): closing the handle before returning
+		// (even after capturing its identity, the fifteenth-round fix) still
+		// left a window for a recycled inode to defeat a later, statically
+		// compared identity. `createExclusive` now keeps its creating handle
+		// OPEN, returned as an `OwnedFileLease` (see
+		// `platform/exclusive-file.ts`'s own doc); this entry carries that
+		// lease directly, and every later ownership re-check compares a fresh
+		// pathname observation against the lease's LIVE `fstat`.
 		const result = await deps.createExclusive(filePath, file.bytes)
 		if (result.outcome !== 'created')
 			return abort(`Failed to write '${file.path}'.`)
-		createdStack.push({ path: filePath, kind: 'file', identity: result.identity, bytes: file.bytes })
+		fileLeases.push(result.lease)
+		createdStack.push({ path: filePath, kind: 'file', lease: result.lease })
 		createdTopLevelNames.add(topLevelChildName(file.path))
 	}
 
@@ -1147,4 +1185,63 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	}
 
 	return { applied: true, outcome: 'applied', changes: plan.changes }
+}
+
+/** Release every lease in `leases`, in order, collecting each `release()` outcome. Never throws: `release()` itself never does (see `OwnedFileLease`'s own doc). */
+async function releaseAllLeases(leases: readonly OwnedFileLease[]): Promise<LeaseReleaseResult[]> {
+	const results: LeaseReleaseResult[] = []
+	for (const lease of leases)
+		results.push(await lease.release())
+	return results
+}
+
+/**
+ * Fold every tracked file lease's `release()` outcome into `natural` --
+ * `applyInitPlanCore`'s own already-decided result.
+ *
+ * Finding 2 (P1, sixteenth round, matching `application/artifact-create.ts`'s
+ * own `foldLeaseRelease`): `release()` never throws, so a close failure can
+ * never escape as an uncaught rejection here either. Unlike
+ * `ApplyCreatePlanResult`, `ApplyInitPlanResult` has no separate "verified but
+ * a later cleanup step failed" outcome to fold a POST-completion release
+ * failure into -- every tracked lease here is released only once, right
+ * before this function's caller returns, well after `applyInitPlanCore`
+ * already decided its own result. A release failure is therefore surfaced
+ * only when it would otherwise be silently swallowed by an unqualified
+ * success: if `natural` already reports `applied: false` (a proven race, or
+ * an already-incomplete abort), a release failure changes nothing further --
+ * that result already correctly reports this invocation did not complete. If
+ * `natural` reports `applied: true` (the plan fully materialized, verified,
+ * and the marker was removed), a release failure means this invocation could
+ * not even cleanly account for its own file handles afterward; that is
+ * downgraded to `outcome: 'incomplete'` rather than silently reported as a
+ * plain, unqualified success.
+ */
+function foldLeaseReleases(natural: ApplyInitPlanResult, releases: readonly LeaseReleaseResult[]): ApplyInitPlanResult {
+	if (!natural.applied)
+		return natural
+
+	const failed = releases.find((release): release is Extract<LeaseReleaseResult, { outcome: 'released-with-error' }> => release.outcome === 'released-with-error')
+	if (failed === undefined)
+		return natural
+
+	return { applied: false, outcome: 'incomplete', message: `'ef init' completed and its initialization marker was removed, but a tracked file's handle could not be cleanly released afterward: ${failed.error.message}.` }
+}
+
+/**
+ * Perform the exact 13-cli-contract.md "Initialization claim-and-complete
+ * protocol" for an already-validated `plan` (see `applyInitPlanCore`'s own
+ * doc for the full protocol). This thin wrapper's ONLY job is lease
+ * lifecycle: every FILE entry `applyInitPlanCore` creates (the marker, and
+ * every planned file) is tracked in `fileLeases` as it is created, and
+ * released -- exactly once each, regardless of outcome -- immediately after
+ * `applyInitPlanCore` returns, so `entryOwnershipProven`'s `fstatLive()`-based
+ * checks stay valid for the ENTIRE protocol, never released mid-flight (see
+ * `foldLeaseReleases`'s own doc for how a release failure is folded into the
+ * reported result).
+ */
+export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = defaultApplyInitPlanDeps): Promise<ApplyInitPlanResult> {
+	const fileLeases: OwnedFileLease[] = []
+	const natural = await applyInitPlanCore(plan, deps, fileLeases)
+	return foldLeaseReleases(natural, await releaseAllLeases(fileLeases))
 }

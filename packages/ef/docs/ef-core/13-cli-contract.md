@@ -615,8 +615,10 @@ rejection and exits `1` without modifying that path.
 
 1. acquire an implementation-local advisory writer lock, if used;
 2. compute the complete plan and provisional identity;
-3. write, flush, close, and validate the complete file at a temporary path on
-   the same filesystem as the canonical target;
+3. write, flush, and validate the complete file at a temporary path on the
+   same filesystem as the canonical target, and MAY retain the creating
+   handle as an ownership lease until publication or cleanup completes,
+   closing it afterwards;
 4. verify again that allocation and the canonical target remain valid;
 5. create the canonical target as a hard link to the complete temporary file;
 6. treat target-exists as a race rejection without replacement;

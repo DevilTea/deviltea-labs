@@ -640,14 +640,17 @@ describe('applyCreatePlan', () => {
 	// wrote it), not re-derived from a later, independent `deps.readFileBytes(tempPath)`
 	// pathname call -- so these two regressions now simulate a corrupted
 	// read-back by wrapping the REAL primitive and doctoring its RETURNED
-	// `bytes` field, never the real bytes actually persisted on disk.
+	// lease's `bytes` field, never the real bytes actually persisted on disk.
+	// (Sixteenth round: the lease's other members -- `identity`, `fstatLive`,
+	// `release` -- are spread through unchanged, so the underlying handle
+	// stays a genuine, still-open lease.)
 	it('reports incomplete when the handle-bound read-back is a different length than the planned bytes', async () => {
 		const plan = computePlanOrThrow()
 		const deps = {
 			...defaultApplyCreatePlanDeps,
 			writeTempFileComplete: async (tempPath: string, bytes: Uint8Array) => {
 				const real = await realWriteTempFileComplete(tempPath, bytes)
-				return real.outcome === 'written' ? { ...real, bytes: real.bytes.slice(0, real.bytes.length - 1) } : real
+				return real.outcome === 'written' ? { outcome: 'written' as const, lease: { ...real.lease, bytes: real.lease.bytes.slice(0, real.lease.bytes.length - 1) } } : real
 			},
 		}
 
@@ -682,9 +685,9 @@ describe('applyCreatePlan', () => {
 				const real = await realWriteTempFileComplete(tempPath, bytes)
 				if (real.outcome !== 'written')
 					return real
-				const corrupted = real.bytes.slice()
+				const corrupted = real.lease.bytes.slice()
 				corrupted[corrupted.length - 1] = (corrupted[corrupted.length - 1]! + 1) % 256
-				return { ...real, bytes: corrupted }
+				return { outcome: 'written' as const, lease: { ...real.lease, bytes: corrupted } }
 			},
 		}
 
@@ -1689,7 +1692,7 @@ Placeholder.
 				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
 					const real = await realWriteTempFileComplete(tempPathArg, bytes)
 					if (real.outcome === 'written')
-						capturedIdentity = real.identity
+						capturedIdentity = real.lease.identity
 					return real
 				},
 			}
@@ -1710,6 +1713,113 @@ Placeholder.
 		})
 	})
 
+	// FINDING (P0, sixteenth round): the fifteenth-round fix (capture
+	// identity/bytes from the creating handle) is still not enough if that
+	// handle is then CLOSED before `applyCreatePlan` finishes deciding what to
+	// do with the temporary file: once closed, the temporary file has only its
+	// pathname link, and if another actor removes that link, the underlying
+	// inode becomes free for the filesystem to recycle -- a byte-identical
+	// foreign replacement written at the exact same basename could then report
+	// the exact same `(dev, ino)` the closed handle once did, fooling BOTH the
+	// identity comparison and a byte-content comparison in `fileOwnershipProven`
+	// at once.
+	//
+	// Deterministic reproduction (no reliance on real inode recycling): the
+	// REAL `writeTempFileComplete` succeeds, and its returned lease's creating
+	// handle is left OPEN (this is the fix under test). This invocation's own
+	// temporary file's ONE pathname link is then genuinely removed, and a
+	// byte-identical foreign file is installed at the exact same basename --
+	// then `deps.fileIdentity(tempPath)` is FORCED to report the ORIGINAL,
+	// handle-captured identity, simulating what a coincidental inode-recycling
+	// ABA would look like to any pathname-only observation (deliberately
+	// simulated rather than relied upon to happen for real, since no
+	// filesystem this package targets can be made to recycle a specific inode
+	// number deterministically and quickly). A real, unforced managed-directory-
+	// chain mismatch (the type directory reported as a symlink, once) then
+	// drives `deleteOwnedTempFile`'s ownership-proven cleanup. Because the
+	// lease's handle is still open the whole time, `fstatLive()` genuinely
+	// pins the original inode: the underlying file's own `nlink` reaches zero
+	// the instant its one link is removed, so `fstatLive()` reports `undefined`
+	// (fail closed) regardless of what the forced `deps.fileIdentity(tempPath)`
+	// claims -- the foreign file must survive completely untouched.
+	describe('temporary-file ownership proof stays valid for as long as the lease is held, immune to a forced pathname-identity match (Finding, sixteenth round)', () => {
+		it('leaves a byte-identical foreign temp file untouched even when the pathname-identity dependency is forced to falsely report a match, when a real chain mismatch drives cleanup', async () => {
+			const plan = computePlanOrThrow()
+			const reqDirPath = path.join(tempDir, '.engineering/req')
+			const targetPath = path.join(tempDir, plan.path)
+			const fixedNonce = 'fixed-nonce-finding-16'
+			const tempBasename = `.${path.basename(plan.path)}.tmp-${fixedNonce}`
+			const tempPath = path.join(reqDirPath, tempBasename)
+
+			let originalIdentity: FileIdentity | undefined
+			let foreignBytes: Uint8Array | undefined
+			let chainMismatchTriggered = false
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				generateNonce: () => fixedNonce,
+				// Delegate to the REAL primitive first -- this invocation's own
+				// temporary file is genuinely created, written, fsynced, and its
+				// handle is left OPEN (returned as the lease). Only AFTER it
+				// reports success does this hook remove that ONE pathname link
+				// for real and install a byte-identical foreign file at the
+				// exact same basename -- exercising the real ABA setup the fix
+				// must survive.
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome === 'written') {
+						originalIdentity = real.lease.identity
+						foreignBytes = bytes.slice()
+						await fs.unlink(tempPathArg)
+						await fs.writeFile(tempPathArg, foreignBytes)
+					}
+					return real
+				},
+				// Deterministic ABA simulation: force the pathname-identity
+				// dependency to report the ORIGINAL, handle-captured identity
+				// for `tempPath` -- exactly what a coincidental real inode
+				// recycling would look like to a pathname-only observer. The
+				// fix must not be fooled by this alone.
+				fileIdentity: async (target: string) => {
+					if (target === tempPath && originalIdentity !== undefined)
+						return originalIdentity
+					return defaultApplyCreatePlanDeps.fileIdentity(target)
+				},
+				// A real, unforced managed-directory-chain mismatch, triggered
+				// exactly once, strictly after the write above has already run
+				// (never during the very first, pre-write chain checks, before
+				// the type directory even exists).
+				isSymlink: async (target: string) => {
+					if (target === reqDirPath && originalIdentity !== undefined && !chainMismatchTriggered) {
+						chainMismatchTriggered = true
+						return true
+					}
+					return defaultApplyCreatePlanDeps.isSymlink(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			// A genuine chain-mismatch rejection, never a plain success and
+			// never publication.
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+			await expect(fs.stat(targetPath)).rejects.toThrow()
+
+			// The foreign file must survive completely untouched -- same
+			// identity, same bytes -- because `fstatLive()` reports `undefined`
+			// (this invocation's own temp file's `nlink` reached zero the
+			// instant its one link was removed) regardless of what the forced
+			// `fileIdentity(tempPath)` claims.
+			const survivingStat = await fs.stat(tempPath)
+			expect({ dev: survivingStat.dev, ino: survivingStat.ino })
+				.not.toEqual(originalIdentity)
+			const survivingBytes = await fs.readFile(tempPath)
+			expect(new Uint8Array(survivingBytes))
+				.toEqual(foreignBytes)
+		})
+	})
+
 	// FINDING (P1, fourteenth round): once `publishViaHardLink` reports
 	// `'published'`, publication has ALREADY physically occurred, so
 	// 13-cli-contract.md's "the implementation MUST NOT misreport the
@@ -1724,6 +1834,113 @@ Placeholder.
 	// never did. `fileOwnershipProven`'s own `deps.fileIdentity` call had the
 	// identical hole, which `deleteOwnedTempFile` (the sole best-effort
 	// temp-file cleanup primitive) inherited.
+	// FINDING (P1, sixteenth round): a rejection from the temporary file's own
+	// `handle.close()` (now `OwnedFileLease.release()`) must never override an
+	// already-decided `applyCreatePlan` result by escaping as an uncaught
+	// rejection (13-cli-contract.md's exit table reserves exit `3` for
+	// internal defects, exit `2` for execution/permission inability -- a
+	// pre-publication close failure escaping unguarded would misreport a
+	// simple cleanup hiccup as an internal defect). `release()` itself never
+	// throws; these regressions instead mock its RETURN VALUE
+	// (`released-with-error`) and assert `applyCreatePlan`'s own
+	// `foldLeaseRelease` folds it into the correct typed outcome depending on
+	// whether canonical publication had already occurred.
+	describe('temp-lease release() failure containment (Finding 2, sixteenth round)', () => {
+		it('reports applied:false/incomplete (never a rejection, never a stronger claim such as raced) when the temp lease fails to release BEFORE any canonical publication', async () => {
+			const plan = computePlanOrThrow()
+			const reqDirPath = path.join(tempDir, '.engineering/req')
+			const releaseError = Object.assign(new Error('bad file descriptor'), { code: 'EBADF' })
+			let writeCompleted = false
+			let chainMismatchTriggered = false
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					writeCompleted = true
+					// `fstatLive` and `bytes`/`identity` are the REAL lease's own,
+					// unmodified -- only `release()`'s reported OUTCOME is
+					// mocked, exactly as a real close failure would surface
+					// through `OwnedFileLease`'s own non-throwing contract.
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								await real.lease.release()
+								return { outcome: 'released-with-error' as const, error: releaseError }
+							},
+						},
+					}
+				},
+				// A real, unforced managed-directory-chain mismatch, triggered
+				// exactly once, strictly after the write -- so publication is
+				// never even attempted.
+				isSymlink: async (target: string) => {
+					if (target === reqDirPath && writeCompleted && !chainMismatchTriggered) {
+						chainMismatchTriggered = true
+						return true
+					}
+					return defaultApplyCreatePlanDeps.isSymlink(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+			expect(result.applied === false && result.message)
+				.toContain(releaseError.message)
+
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+		})
+
+		it('reports applied:true/cleanup-failed (never a rejection, never a plain success) when the temp lease fails to release AFTER a fully verified publish', async () => {
+			const plan = computePlanOrThrow()
+			const releaseError = Object.assign(new Error('bad file descriptor'), { code: 'EBADF' })
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								await real.lease.release()
+								return { outcome: 'released-with-error' as const, error: releaseError }
+							},
+						},
+					}
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect('outcome' in result && result.outcome)
+				.toBe('cleanup-failed')
+			expect('message' in result && result.message)
+				.toContain(releaseError.message)
+
+			// The canonical publication genuinely happened, was fully
+			// verified, and its temp file was even successfully unlinked --
+			// only releasing the lease itself failed -- so the published file
+			// must still be exactly what this invocation wrote.
+			const onDisk = await fs.readFile(path.join(tempDir, plan.path))
+			expect(new Uint8Array(onDisk))
+				.toEqual(plan.bytes)
+		})
+	})
+
 	describe('post-published state exception containment (Finding regression, fourteenth round)', () => {
 		it('reports applied:true/incomplete (never rejecting the call) when the post-publication fileIdentity(targetPath) re-check throws an unexpected error after a real, successful hard link', async () => {
 			const plan = computePlanOrThrow()

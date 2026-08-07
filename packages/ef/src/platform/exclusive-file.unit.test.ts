@@ -1,10 +1,19 @@
+import type { FileHandle } from 'node:fs/promises'
 import { Buffer } from 'node:buffer'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createExclusive, readInitMarker, writeInitMarker } from './exclusive-file'
 import { generateNonce } from './nonce'
+
+const { openMock } = vi.hoisted(() => ({ openMock: vi.fn() }))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('node:fs/promises')>()
+	openMock.mockImplementation((...args: Parameters<typeof actual.open>) => actual.open(...args))
+	return { ...actual, open: openMock }
+})
 
 let tempRoot: string
 
@@ -14,6 +23,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	fs.rmSync(tempRoot, { recursive: true, force: true })
+	openMock.mockClear()
 })
 
 describe('createExclusive', () => {
@@ -28,18 +38,21 @@ describe('createExclusive', () => {
 		expect(new Uint8Array(fs.readFileSync(target)))
 			.toEqual(bytes)
 
-		// Finding (P0, matching `hard-link-publish.ts`'s `writeTempFileComplete`
-		// finding): `identity` and `bytes` are captured from the exact
-		// `open(target, 'wx+')` handle this call created -- via `handle.stat()`
-		// and a read back through that same handle -- BEFORE it closes, never
-		// re-derived from a later, independent pathname observation of `target`.
+		// Finding (P0, fifteenth round): identity/bytes are captured from the
+		// exact `open(target, 'wx+')` handle this call created -- via
+		// `handle.stat()` and a read back through that same handle -- before
+		// it is ever closed. Sixteenth round: they are exposed through the
+		// returned `OwnedFileLease`, whose creating handle stays open rather
+		// than being closed here (see the dedicated describe block below).
 		if (result.outcome !== 'created')
 			throw new Error('unreachable: asserted above')
 		const stats = fs.statSync(target)
-		expect(result.identity)
+		expect(result.lease.identity)
 			.toEqual({ dev: stats.dev, ino: stats.ino })
-		expect(new Uint8Array(result.bytes))
+		expect(new Uint8Array(result.lease.bytes))
 			.toEqual(bytes)
+
+		await result.lease.release()
 	})
 
 	it('returns a distinct identity for two exclusive files created in the same call sequence, both matching their own on-disk stat', async () => {
@@ -55,16 +68,19 @@ describe('createExclusive', () => {
 		if (resultA.outcome !== 'created' || resultB.outcome !== 'created')
 			throw new Error('unreachable: both creates are expected to succeed')
 
-		expect(resultA.identity)
+		expect(resultA.lease.identity)
 			.toEqual({ dev: fs.statSync(targetA).dev, ino: fs.statSync(targetA).ino })
-		expect(resultB.identity)
+		expect(resultB.lease.identity)
 			.toEqual({ dev: fs.statSync(targetB).dev, ino: fs.statSync(targetB).ino })
-		expect(resultA.identity)
-			.not.toEqual(resultB.identity)
-		expect(new Uint8Array(resultA.bytes))
+		expect(resultA.lease.identity)
+			.not.toEqual(resultB.lease.identity)
+		expect(new Uint8Array(resultA.lease.bytes))
 			.toEqual(bytesA)
-		expect(new Uint8Array(resultB.bytes))
+		expect(new Uint8Array(resultB.lease.bytes))
 			.toEqual(bytesB)
+
+		await resultA.lease.release()
+		await resultB.lease.release()
 	})
 
 	it('captures identity and a correct read-back even for a zero-byte file', async () => {
@@ -73,11 +89,13 @@ describe('createExclusive', () => {
 		if (result.outcome !== 'created')
 			throw new Error('unreachable: expected a successful create')
 
-		expect(result.bytes.length)
+		expect(result.lease.bytes.length)
 			.toBe(0)
 		const stats = fs.statSync(target)
-		expect(result.identity)
+		expect(result.lease.identity)
 			.toEqual({ dev: stats.dev, ino: stats.ino })
+
+		await result.lease.release()
 	})
 
 	it('reports already-exists and leaves the original bytes untouched on collision', async () => {
@@ -90,6 +108,8 @@ describe('createExclusive', () => {
 		const firstResult = await createExclusive(target, first)
 		expect(firstResult.outcome)
 			.toBe('created')
+		if (firstResult.outcome === 'created')
+			await firstResult.lease.release()
 
 		const secondResult = await createExclusive(target, second)
 		expect(secondResult)
@@ -118,6 +138,99 @@ describe('createExclusive', () => {
 		const outcomes = [first.outcome, second.outcome].sort()
 		expect(outcomes)
 			.toEqual(['already-exists', 'created'])
+
+		for (const result of [first, second]) {
+			if (result.outcome === 'created')
+				await result.lease.release()
+		}
+	})
+
+	// Finding (P0, sixteenth round, matching `platform/hard-link-publish.ts`):
+	// capturing identity/bytes from the creating handle and then closing it
+	// before returning (the fifteenth-round fix) is still not enough -- once
+	// closed, a recycled, byte-identical foreign replacement at the same path
+	// can report the exact same `(dev, ino)`. The handle must stay open,
+	// retained by the returned lease, for as long as a destructive ownership
+	// decision might still be made against it.
+	describe('ownedFileLease (Finding, sixteenth round)', () => {
+		it('keeps the creating handle open on success: fstatLive reports the same identity right after the create, before release()', async () => {
+			const target = path.join(tempRoot, 'lease.json')
+			const result = await createExclusive(target, new TextEncoder()
+				.encode('lease content'))
+			if (result.outcome !== 'created')
+				throw new Error('unreachable: expected a successful create')
+
+			expect(await result.lease.fstatLive())
+				.toEqual(result.lease.identity)
+
+			await result.lease.release()
+		})
+
+		it('fstatLive returns undefined once the lease has been released', async () => {
+			const target = path.join(tempRoot, 'lease-released.json')
+			const result = await createExclusive(target, new TextEncoder()
+				.encode('x'))
+			if (result.outcome !== 'created')
+				throw new Error('unreachable: expected a successful create')
+
+			const releaseResult = await result.lease.release()
+			expect(releaseResult)
+				.toEqual({ outcome: 'released' })
+			expect(await result.lease.fstatLive())
+				.toBeUndefined()
+		})
+
+		it('fstatLive returns undefined -- never the foreign file\'s own identity -- once the original tracked file is removed and a byte-identical foreign file is installed at the same path', async () => {
+			const target = path.join(tempRoot, 'lease-aba.json')
+			const bytes = new TextEncoder()
+				.encode('original content')
+			const result = await createExclusive(target, bytes)
+			if (result.outcome !== 'created')
+				throw new Error('unreachable: expected a successful create')
+
+			const originalIdentity = result.lease.identity
+
+			fs.unlinkSync(target)
+			fs.writeFileSync(target, bytes) // byte-for-byte identical foreign replacement
+			const foreignIdentity = { dev: fs.statSync(target).dev, ino: fs.statSync(target).ino }
+
+			expect(foreignIdentity)
+				.not.toEqual(originalIdentity)
+			expect(await result.lease.fstatLive())
+				.toBeUndefined()
+
+			await result.lease.release()
+		})
+
+		// Finding 2 (P1, sixteenth round): a rejection from the creating
+		// handle's own `close()` must never override `createExclusive`'s
+		// already-decided `{ outcome: 'failed', error }` result.
+		it('reports the ORIGINAL write failure, not a close() rejection, when both the write and the cleanup close fail', async () => {
+			const target = path.join(tempRoot, 'write-and-close-fail.json')
+			const writeError = Object.assign(new Error('input/output error'), { code: 'EIO' })
+			const closeError = Object.assign(new Error('bad file descriptor'), { code: 'EBADF' })
+
+			openMock.mockImplementationOnce(async (...args: Parameters<typeof fs.promises.open>) => {
+				const real = await fs.promises.open(...args)
+				return {
+					writeFile: async () => {
+						throw writeError
+					},
+					stat: real.stat.bind(real),
+					read: real.read.bind(real),
+					close: async () => {
+						await real.close()
+						throw closeError
+					},
+				} as unknown as FileHandle
+			})
+
+			const result = await createExclusive(target, new TextEncoder()
+				.encode('x'))
+
+			expect(result)
+				.toEqual({ outcome: 'failed', error: writeError })
+		})
 	})
 })
 
@@ -135,19 +248,21 @@ describe('writeInitMarker / readInitMarker', () => {
 			.toEqual({ schema: 'ef/init-state@1', nonce })
 
 		// `writeInitMarker` layers directly on `createExclusive`, so it carries
-		// the same handle-bound `identity`/`bytes` through (Finding P0).
+		// the same handle-bound, still-open lease through (Finding P0).
 		if (writeResult.outcome !== 'created')
 			throw new Error('unreachable: asserted above')
 		const stats = fs.statSync(target)
-		expect(writeResult.identity)
+		expect(writeResult.lease.identity)
 			.toEqual({ dev: stats.dev, ino: stats.ino })
-		expect(JSON.parse(Buffer.from(writeResult.bytes)
+		expect(JSON.parse(Buffer.from(writeResult.lease.bytes)
 			.toString('utf8')))
 			.toEqual({ schema: 'ef/init-state@1', nonce })
 
 		const readResult = await readInitMarker(target)
 		expect(readResult)
 			.toEqual({ outcome: 'found', marker: { schema: 'ef/init-state@1', nonce } })
+
+		await writeResult.lease.release()
 	})
 
 	it('reports missing for an absent marker path', async () => {
@@ -212,7 +327,9 @@ describe('writeInitMarker / readInitMarker', () => {
 	it('writeInitMarker reports already-exists rather than overwriting a marker from another invocation', async () => {
 		const target = path.join(tempRoot, 'init-state.json')
 		const firstNonce = generateNonce()
-		await writeInitMarker(target, firstNonce)
+		const firstResult = await writeInitMarker(target, firstNonce)
+		if (firstResult.outcome === 'created')
+			await firstResult.lease.release()
 
 		const secondNonce = generateNonce()
 		const result = await writeInitMarker(target, secondNonce)
