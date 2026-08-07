@@ -46,6 +46,35 @@ function commitAll(dir: string, message: string): string {
 		.trim()
 }
 
+/** Write `content` to the object database via `git hash-object -w --stdin`, returning the resulting blob OID -- without ever touching the working tree or index by path (Finding 10 fixtures below). */
+function hashObjectFromStdin(dir: string, content: Buffer): string {
+	return execFileSync('git', ['-C', dir, 'hash-object', '-w', '--stdin'], { env: { ...process.env, ...GIT_TEST_ENV }, input: content, encoding: 'utf8' })
+		.trim()
+}
+
+/** Stage one index entry at an ordinary (ASCII) `path` with an explicit `mode` -- e.g. `120000` for a symlink -- via `git update-index --add --cacheinfo`, without ever creating a real filesystem symlink. */
+function addCacheinfoEntry(dir: string, mode: string, blobOid: string, path: string): void {
+	execFileSync('git', ['-C', dir, 'update-index', '--add', '--cacheinfo', `${mode},${blobOid},${path}`], { env: { ...process.env, ...GIT_TEST_ENV } })
+}
+
+/** Stage one index entry whose PATH is exactly `pathBytes` -- which may contain byte sequences that are not valid UTF-8 -- via `git update-index --index-info`, fed over stdin as a `Buffer` since raw invalid-UTF-8 bytes cannot be passed as a normal CLI argument. */
+function addRawIndexEntry(dir: string, mode: string, blobOid: string, pathBytes: Buffer): void {
+	const line = Buffer.concat([Buffer.from(`${mode} blob ${blobOid}\t`), pathBytes, Buffer.from('\n')])
+	execFileSync('git', ['-C', dir, 'update-index', '--add', '--index-info'], { env: { ...process.env, ...GIT_TEST_ENV }, input: line })
+}
+
+/** `git write-tree`: materialize the current index as a tree object, returning its OID. */
+function writeTreeOid(dir: string): string {
+	return execFileSync('git', ['-C', dir, 'write-tree'], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+		.trim()
+}
+
+/** `git commit-tree <treeOid> -p <parentOid>`: create a commit for `treeOid` with a single parent, returning its OID. Used (instead of `commitAll`) whenever a fixture needs to inject a raw index entry `commitAll`'s own `git add -A` (working-tree-driven) could never stage. */
+function commitTreeOid(dir: string, treeOid: string, parentOid: string, message: string): string {
+	return execFileSync('git', ['-C', dir, 'commit-tree', treeOid, '-p', parentOid, '-m', message], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+		.trim()
+}
+
 async function writeFile(root: string, relativePath: string, content: string): Promise<void> {
 	const fullPath = path.join(root, relativePath)
 	await fs.mkdir(path.dirname(fullPath), { recursive: true })
@@ -59,6 +88,9 @@ linked_repositories: []
 schemas:
   artifact_write_major: 1
 `
+
+/** The `integration_ref` every `CONFIG_YAML` fixture above declares -- passed as `computeHistory`'s `expectedIntegrationRef` argument by every test in this file unless a test is deliberately exercising Finding 11 (immutable `integration_ref`) itself. */
+const INTEGRATION_REF = 'refs/heads/main'
 
 const PROJECT_MD = `---
 schema: ef/project@1
@@ -205,7 +237,7 @@ describe('computeHistory', () => {
 	}
 
 	it('reports engineering effects (introduces then modifies) with correct before/after status and commit_oid', async () => {
-		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', new Map())
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome.kind)
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
@@ -223,7 +255,7 @@ describe('computeHistory', () => {
 	})
 
 	it('reports Git commits that change the Artifact aggregate, oldest to newest, with bytewise-sorted changed_paths', async () => {
-		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', new Map())
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome.kind)
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
@@ -241,7 +273,7 @@ describe('computeHistory', () => {
 	})
 
 	it('tracks draft-only Git history (no CHG effects) for an Artifact aggregate', async () => {
-		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-002', 'requirement', new Map())
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-002', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome.kind)
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
@@ -253,7 +285,7 @@ describe('computeHistory', () => {
 	})
 
 	it('includes control files (ef.yaml, .gitignore) in the PROJECT aggregate', async () => {
-		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'PROJECT', 'project', new Map())
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
 		expect(outcome.kind)
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
@@ -299,7 +331,7 @@ describe('computeHistory', () => {
 			},
 		}
 		const byId = new Map([['CHG-001', liveChg]])
-		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId)
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId, INTEGRATION_REF)
 		expect(outcome.kind)
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
@@ -340,7 +372,7 @@ describe('computeHistory', () => {
 			},
 		}
 		const byId = new Map([['REQ-001', misfiledRecord]])
-		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId)
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId, INTEGRATION_REF)
 		expect(outcome)
 			.toEqual({ kind: 'untrusted-data' })
 	})
@@ -366,7 +398,7 @@ describe('computeHistory', () => {
 			},
 		}
 		const byId = new Map([['REQ-001', misfiledRecord]])
-		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId)
+		const outcome = await computeHistory(gitRepo(), oids.commit7!, 'REQ-001', 'requirement', byId, INTEGRATION_REF)
 		expect(outcome)
 			.toEqual({ kind: 'untrusted-data' })
 	})
@@ -377,7 +409,7 @@ describe('computeHistory', () => {
 			git(shallowDir, ['clone', '-q', '--depth', '1', '--branch', 'main', `file://${tempDir}`, '.'])
 			const tipOid = git(shallowDir, ['rev-parse', 'HEAD'])
 				.trim()
-			const outcome = await computeHistory(gitRepo(shallowDir), tipOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(gitRepo(shallowDir), tipOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'history-unavailable' })
 		}
@@ -413,7 +445,7 @@ describe('computeHistory', () => {
 			expect(otherTip.length)
 				.toBeGreaterThan(0)
 
-			const outcome = await computeHistory(gitRepo(), oids.commit7!, 'PROJECT', 'project', new Map())
+			const outcome = await computeHistory(gitRepo(), oids.commit7!, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
 			expect(outcome.kind)
 				.toBe('complete')
 			if (outcome.kind !== 'complete')
@@ -435,7 +467,7 @@ describe('computeHistory', () => {
 				return real.readTree(oid)
 			},
 		})
-		const outcome = await computeHistory(wrapped, oids.commit7!, 'REQ-001', 'requirement', new Map())
+		const outcome = await computeHistory(wrapped, oids.commit7!, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome)
 			.toEqual({ kind: 'history-unavailable' })
 	})
@@ -460,7 +492,7 @@ describe('computeHistory', () => {
 		// EXISTS as a tree entry at this historical commit -- this is an
 		// unreadable blob, not a genuine absence -- so the whole query must fail
 		// rather than silently falling back as if the target had never existed.
-		const outcome = await computeHistory(wrapped, oids.commit3!, 'REQ-001', 'requirement', new Map())
+		const outcome = await computeHistory(wrapped, oids.commit3!, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome)
 			.toEqual({ kind: 'untrusted-data' })
 	})
@@ -469,7 +501,7 @@ describe('computeHistory', () => {
 		await writeFile(tempDir, '.engineering/chg/CHG-003.md', chgMd('CHG-003', 'completed', '  - type: modifies\n    target: REQ-001\n  - type: references\n    target: REQ-001'))
 		const commitOid = commitAll(tempDir, 'chg-003 mixed relations')
 
-		const outcome = await computeHistory(gitRepo(), commitOid, 'REQ-001', 'requirement', new Map())
+		const outcome = await computeHistory(gitRepo(), commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome.kind)
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
@@ -491,7 +523,7 @@ describe('computeHistory', () => {
 		await writeFile(tempDir, '.engineering/req/REQ-001.md', reqWithExternalResource)
 		const commitOid = commitAll(tempDir, 'add external resource to REQ-001')
 
-		const outcome = await computeHistory(gitRepo(), commitOid, 'REQ-001', 'requirement', new Map())
+		const outcome = await computeHistory(gitRepo(), commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome.kind)
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
@@ -520,7 +552,7 @@ describe('computeHistory: PROJECT control-path availability', () => {
 			const withControlsOid = commitAll(dir, 'add .gitignore')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, withControlsOid, 'PROJECT', 'project', new Map())
+			const outcome = await computeHistory(repo, withControlsOid, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
 			expect(outcome.kind)
 				.toBe('complete')
 			if (outcome.kind !== 'complete')
@@ -560,7 +592,7 @@ describe('computeHistory: malformed CHG file mid-history', () => {
 			const completedOid = commitAll(dir, 'chg completed')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, completedOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, completedOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -586,7 +618,7 @@ describe('computeHistory: malformed CHG file mid-history', () => {
 			const malformedCompletingOid = commitAll(dir, 'malformed completing chg')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, malformedCompletingOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, malformedCompletingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -627,7 +659,7 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 			const bootstrapOid = commitAll(dir, 'bootstrap')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome.kind)
 				.toBe('complete')
 			if (outcome.kind !== 'complete')
@@ -679,7 +711,7 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 			const bootstrapOid = commitAll(dir, 'bootstrap replaces pre-EF garbage with real Artifacts')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome.kind)
 				.toBe('complete')
 			if (outcome.kind !== 'complete')
@@ -751,7 +783,7 @@ Result: passed
 			const completingOid = commitAll(dir, 'chg with duplicate top-level key')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -775,7 +807,7 @@ Result: passed
 			const oid = commitAll(dir, 'wrong-id envelope at REQ-001 canonical path')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, oid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, oid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -807,7 +839,7 @@ describe('computeHistory: relation-entry trust for CHG effects (04-relations.md)
 			const completingOid = commitAll(dir, 'chg with duplicate effect relation')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -836,7 +868,7 @@ describe('computeHistory: relation-entry trust for CHG effects (04-relations.md)
 			const completingOid = commitAll(dir, 'chg with mismatched filename/id')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -888,7 +920,7 @@ Body text for REQ-001.
 			const commitOid = commitAll(dir, 'req-001 declares an invalid resource location')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -915,7 +947,7 @@ describe('computeHistory: bootstrap boundary never reached (11-filesystem-and-co
 			// misleadingly ordinary-looking `{ kind: 'complete', effects: [],
 			// commits: [] }` a caller could mistake for "no history yet".
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, tipOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, tipOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'history-unavailable' })
 			expect(rootOid.length)
@@ -961,7 +993,7 @@ linked_repositories: []
 			const bootstrapOid = commitAll(dir, 'later, otherwise-valid bootstrap')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 			expect(preBootstrapOid.length)
@@ -992,7 +1024,7 @@ linked_repositories: []
 			const laterOid = commitAll(dir, 'PROJECT.md added later')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, laterOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, laterOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 			expect(noProjectOid.length)
@@ -1032,7 +1064,7 @@ linked_repositories: []
 				},
 			})
 
-			const outcome = await computeHistory(wrapped, laterOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(wrapped, laterOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			// MUST report the required history as unavailable -- MUST NOT
 			// silently fall through and treat the later, successfully-read
 			// commit as though history started there instead (a silent late
@@ -1071,7 +1103,7 @@ linked_repositories: []
 			const laterOid = commitAll(dir, 'later, real bootstrap replacing the symlink')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, laterOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, laterOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 			expect(symlinkBoundaryOid.length)
@@ -1125,7 +1157,7 @@ Body text for REQ-001.
 			const commitOid = commitAll(dir, 'req-001 declares a resource under REQ-999\'s owner directory')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -1155,7 +1187,7 @@ Body text for REQ-001.
 			const commitOid = commitAll(dir, 'req-001 resource location is a directory, not a regular file')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -1179,7 +1211,7 @@ Body text for REQ-001.
 			const commitOid = commitAll(dir, 'req-001 resource location is a symlink-mode blob, not a regular file')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -1214,7 +1246,7 @@ describe('computeHistory: emitted CHG summary projection-fidelity (10-query-and-
 			const completingOid = commitAll(dir, 'chg-001 completing relation has an invalid extension field')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -1279,7 +1311,7 @@ Result: passed
 			const completingOid = commitAll(dir, 'chg-001 declares a malformed resource entry')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
@@ -1319,7 +1351,171 @@ Result: passed
 			const completingOid = commitAll(dir, 'chg-001 has invalid UTF-8 in its body')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: managed historical entries require a regular Git file mode and a valid UTF-8 path (Finding 10)', () => {
+	it('fails with untrusted-data when a symlink-mode (120000) blob sits at the target Artifact\'s own canonical path, even though its blob content decodes as a valid-looking envelope', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-target-symlink-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			const bootstrapOid = commitAll(dir, 'bootstrap')
+
+			// REQ-001's canonical path is committed as a Git symlink-mode
+			// (`120000`) blob whose OWN BLOB CONTENT is nonetheless a
+			// perfectly valid-looking `ef/requirement@1` envelope.
+			// `ls-tree` reports a symlink as `type: 'blob'` exactly like an
+			// ordinary file, so `entry.type === 'blob'` alone (the previous
+			// implementation) would read and decode this content as REQ-001's
+			// own historical envelope instead of failing closed.
+			const blobOid = hashObjectFromStdin(dir, Buffer.from(reqMd('REQ-001', 'active')))
+			addCacheinfoEntry(dir, '120000', blobOid, '.engineering/req/REQ-001.md')
+			const treeOid = writeTreeOid(dir)
+			const commitOid = commitTreeOid(dir, treeOid, bootstrapOid, 'REQ-001 canonical path is a symlink-mode blob')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a symlink-mode (120000) blob sits at a `.engineering/chg/*.md` path, even though its blob content decodes as a valid-looking completing CHG', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-symlink-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			const bootstrapOid = commitAll(dir, 'bootstrap')
+
+			// CHG-001's canonical path is committed as a symlink-mode blob
+			// whose own blob content is a valid-looking, completed CHG that
+			// introduces REQ-001. Without a regular Git mode check, this
+			// walk would decode it as a genuine completing CHG and emit a
+			// fabricated effect for a symlink that was never a real CHG file.
+			const chgContent = chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001')
+			const blobOid = hashObjectFromStdin(dir, Buffer.from(chgContent))
+			addCacheinfoEntry(dir, '120000', blobOid, '.engineering/chg/CHG-001.md')
+			const treeOid = writeTreeOid(dir)
+			const commitOid = commitTreeOid(dir, treeOid, bootstrapOid, 'CHG-001 is a symlink-mode blob')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a tree entry beneath `.engineering/chg/` has an invalid-UTF-8 path -- invisible to the ordinary prefix scan, but still an untrustworthy managed path', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-invalid-path-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			const bootstrapOid = commitAll(dir, 'bootstrap')
+
+			// Raw path bytes: `.engineering/chg/CHG-` + 0xFF + `.md` --
+			// genuinely beneath `.engineering/chg/` in raw bytes, but
+			// `0xFF` is never a valid UTF-8 lead byte, so `readTree` reports
+			// this entry with `pathValid: false` and a synthesized,
+			// NUL-prefixed placeholder `path` that can never start with
+			// `.engineering/chg/`. The CHG scan's ordinary
+			// `path.startsWith('.engineering/chg/')` prefix filter can
+			// therefore never see this entry at all -- it must be caught by
+			// a separate, byte-level check instead of silently passing
+			// through as though this commit's `.engineering` tree were
+			// entirely ordinary.
+			const blobOid = hashObjectFromStdin(dir, Buffer.from('irrelevant content\n'))
+			const invalidPathBytes = Buffer.concat([
+				Buffer.from('.engineering/chg/CHG-'),
+				Buffer.from([0xFF]),
+				Buffer.from('.md'),
+			])
+			addRawIndexEntry(dir, '100644', blobOid, invalidPathBytes)
+			const treeOid = writeTreeOid(dir)
+			const commitOid = commitTreeOid(dir, treeOid, bootstrapOid, 'invalid UTF-8 path under .engineering/chg/')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: immutable integration_ref (11-filesystem-and-config.md, Finding 11)', () => {
+	it('fails with untrusted-data when the walked history\'s bootstrap config declares a DIFFERENT integration_ref than the ref this walk was asked to walk', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-boundary-ref-mismatch-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			// `CONFIG_YAML` declares `integration_ref: refs/heads/main`. Models
+			// the working-tree config having been schema-validly edited to
+			// declare a DIFFERENT ref (`refs/heads/other`), so `runQueryCommand`
+			// resolved `refs/heads/other` and is walking whatever commit that
+			// ref currently points to -- here, that commit happens to be (or
+			// share) this SAME bootstrap commit, whose own decoded
+			// `ef.yaml` still fixes `integration_ref: refs/heads/main`
+			// (11-filesystem-and-config.md: "fixed by bootstrap and MUST NOT
+			// change within Core v1"). The caller's selected ref
+			// (`refs/heads/other`) and the boundary's own declared ref
+			// (`refs/heads/main`) disagree, so this history cannot be trusted.
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			const bootstrapOid = commitAll(dir, 'bootstrap')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map(), 'refs/heads/other')
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a LATER authoritative EF-bearing commit edits ef.yaml to declare a different integration_ref than the bootstrap fixed', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-in-history-retarget-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// A LATER authoritative EF-bearing commit edits `ef.yaml` itself
+			// (a new blob OID) to declare a DIFFERENT `integration_ref` than
+			// the one the bootstrap fixed -- `integration_ref` is fixed by
+			// bootstrap and MUST NOT change within Core v1, so this in-history
+			// retarget must make the whole query untrustworthy, never be
+			// silently accepted as an ordinary later config edit.
+			expect(CONFIG_YAML)
+				.toContain('refs/heads/main')
+			const retargetedConfigYaml = CONFIG_YAML.replace('refs/heads/main', 'refs/heads/other')
+			await writeFile(dir, '.engineering/ef.yaml', retargetedConfigYaml)
+			const retargetOid = commitAll(dir, 'ef.yaml retargets integration_ref')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, retargetOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}

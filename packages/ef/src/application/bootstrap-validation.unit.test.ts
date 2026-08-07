@@ -773,7 +773,12 @@ describe('validateBootstrap', () => {
 		}
 	})
 
-	it('reports EF-VAL-010 when the bootstrap tree is missing the required .engineering/.gitignore control file', async () => {
+	it('reports EF-FS-009 when the bootstrap tree is missing the required .engineering/.gitignore control file', async () => {
+		// Missing/non-canonical '.engineering/.gitignore' is reported by
+		// `validateSnapshot` itself (`EF-FS-009`, unconditionally -- not a
+		// bootstrap-only rule), which `validateBootstrap` surfaces via its
+		// `validation.diagnostics` spread. There is no separate bootstrap-only
+		// `EF-VAL-010` for this condition (see the code comment).
 		await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
 		await writeFile(tempDir, '.engineering/PROJECT.md', PROJECT_MD)
 		const proposedOid = commitAll(tempDir, 'bootstrap without .gitignore')
@@ -781,9 +786,11 @@ describe('validateBootstrap', () => {
 		const result = await validateBootstrap({ git: repo(), proposedOid, operationStartRefState: { resolved: false } })
 
 		expect(codesOf(result.diagnostics))
-			.toContain('EF-VAL-010')
+			.toContain('EF-FS-009')
+		expect(codesOf(result.diagnostics))
+			.not.toContain('EF-VAL-010')
 		expect(result.diagnostics.find(d => d.message.includes('.gitignore'))?.message)
-			.toContain('missing the required control file \'.engineering/.gitignore\'')
+			.toContain('missing')
 		expect(result.complete)
 			.toBe(true)
 		expect(result.valid)

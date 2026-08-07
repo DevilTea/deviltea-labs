@@ -22,6 +22,8 @@ import { executeQuery, incompleteInitializationQueryResult } from '../../applica
 import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
 import { validateSnapshot } from '../../application/snapshot-validation'
 import { severityOf } from '../../domain/diagnostic-codes'
+import { findWorktreeRoot } from '../../git/repository'
+import { checkWorkingDirectoryAssociation } from '../../repository/discovery'
 import { queryResultToJson } from '../envelopes'
 import { renderQueryHuman } from '../human-render'
 import { resolveProject } from '../project-context'
@@ -71,20 +73,44 @@ export async function runQueryCommand(request: QueryRequest, options: QueryComma
 	// config-dependent command semantic here derives exclusively from
 	// `loaded.snapshot.config.config`, the single, freshest observation the
 	// queried snapshot was itself built from.
-	const { root, git } = resolved.context
+	const { root, git, engineeringIdentity } = resolved.context
 
-	const loaded = await loadSnapshotFromWorkingTree(root)
+	// `expectedEngineeringIdentity` (Finding 4, "single observation"): binds
+	// this snapshot's own directory walk to the exact `.engineering` project
+	// resolution already approved, rather than trusting a bare path string a
+	// race could have re-pointed at a different directory (e.g. one omitting
+	// an Artifact file) between that approval and this walk. This is
+	// orthogonal to the `config` note above: it verifies WHICH directory is
+	// enumerated, never which config bytes are used.
+	const loaded = await loadSnapshotFromWorkingTree(root, undefined, { expectedEngineeringIdentity: engineeringIdentity })
 	if (!loaded.ok)
 		return outcomeFor(projectResolutionFailureResult(request.kind), options.format, options.noColor)
 
 	const validation = validateSnapshot(loaded.snapshot)
 	const config = loaded.snapshot.config.config
 
+	// Re-run the working-directory association decision (Finding 5, "single
+	// observation") against `config`, the freshest configuration `loaded`
+	// itself was built from -- not `resolveProject`'s own, earlier read. An
+	// in-place rewrite of `ef.yaml` landing between that earlier read and this
+	// snapshot load could otherwise leave a now-undeclared nested worktree
+	// authorized only by a stale association decision (11-filesystem-and-config.md
+	// "Project Discovery": "validate working-directory association with the
+	// project"). Any non-`associated` outcome (including a probe failure) is
+	// folded into the same project-resolution-class failure as `!resolved.ok`/
+	// `!loaded.ok` above.
+	const association = await checkWorkingDirectoryAssociation(
+		{ cwd: deps.cwd, candidateRoot: root, config },
+		{ findWorktreeRoot: absolutePath => findWorktreeRoot(deps.executor, absolutePath) },
+	)
+	if (association.kind !== 'associated')
+		return outcomeFor(projectResolutionFailureResult(request.kind), options.format, options.noColor)
+
 	let history: QueryContext['history']
 	if (request.kind === 'history' && config) {
 		const refResult = await git.resolveRef(config.repository.integrationRef)
 		if (refResult.kind === 'resolved') {
-			history = { git, integrationRefOid: refResult.oid }
+			history = { git, integrationRefOid: refResult.oid, integrationRef: config.repository.integrationRef }
 		}
 		else if (refResult.kind === 'error' || refResult.kind === 'git-unavailable') {
 			// A failed probe is neither a proven resolution nor a proven absence

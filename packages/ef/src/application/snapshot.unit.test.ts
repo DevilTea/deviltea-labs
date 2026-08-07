@@ -9,8 +9,11 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
 import { createGitRepository } from '../git/repository'
-import { readRegularFileNoFollow, walkDirectory } from '../platform/fs-facts'
+import { directoryIdentity, readRegularFileNoFollow, walkDirectory } from '../platform/fs-facts'
 import { loadSnapshotFromCommit, loadSnapshotFromWorkingTree } from './snapshot'
+
+/** A `directoryIdentity` fake that never observes a real directory -- used by every fake `SnapshotFsDeps` below that never opts into Finding 4's `expectedEngineeringIdentity` verification, so its exact return value is irrelevant to those tests. */
+const notDirectoryIdentity: SnapshotFsDeps['directoryIdentity'] = async () => undefined
 
 const CONFIG_YAML = `schema: ef/config@1
 repository:
@@ -224,6 +227,7 @@ describe('loadSnapshotFromWorkingTree', () => {
 			readRegularFileNoFollow: async () => {
 				throw new Error('must not be called: no walk entry was observed for this path')
 			},
+			directoryIdentity: notDirectoryIdentity,
 		}
 		const result = await loadSnapshotFromWorkingTree('/fake/project', deps)
 		expect(result.ok)
@@ -260,6 +264,7 @@ describe('loadSnapshotFromWorkingTree', () => {
 						.toEqual(walkedIdentity)
 					return raceResult
 				},
+				directoryIdentity: notDirectoryIdentity,
 			}
 		}
 
@@ -302,6 +307,7 @@ describe('loadSnapshotFromWorkingTree', () => {
 				],
 				readRegularFileNoFollow: async () => ({ kind: 'ok', bytes: new TextEncoder()
 					.encode('---\nschema: ef/req@1\n---\n') }),
+				directoryIdentity: notDirectoryIdentity,
 			}
 			const result = await loadSnapshotFromWorkingTree('/fake/project', deps)
 			expect(result.ok)
@@ -374,6 +380,7 @@ describe('loadSnapshotFromWorkingTree', () => {
 				// `containmentRoot` is actually wired end to end, rather than
 				// merely accepted by the `SnapshotFsDeps` type.
 				readRegularFileNoFollow,
+				directoryIdentity: notDirectoryIdentity,
 			}
 
 			const result = await loadSnapshotFromWorkingTree(tempDir, deps)
@@ -387,6 +394,129 @@ describe('loadSnapshotFromWorkingTree', () => {
 		finally {
 			await fs.rm(outsideReq, { recursive: true, force: true })
 		}
+	})
+
+	// ---- Finding 4: `.engineering` itself swapped for a hard-linked replay --
+	// ---- directory that omits an Artifact -----------------------------------
+
+	describe('finding 4: `.engineering` replaced by a hard-linked replay directory during the walk', () => {
+		/**
+		 * Real POSIX reproduction: `.engineering` genuinely contains `ef.yaml`,
+		 * `.gitignore`, `PROJECT.md`, and `req/REQ-999.md`. `deps.walkDirectory`
+		 * (the sole seam between `loadSnapshotFromWorkingTree` and the real
+		 * filesystem for enumeration) is injected to, on its own call, replace
+		 * `.engineering` with ANOTHER real directory that hard-links the SAME
+		 * `ef.yaml`/`.gitignore`/`PROJECT.md` inodes but entirely omits
+		 * `req/REQ-999.md`, then walk that replacement directory -- exactly the
+		 * finding's own reproduction. Every retained file's later
+		 * identity-bound read (Finding 2's protection) still succeeds, since a
+		 * hard link shares its target's `dev`/`ino`; `req/REQ-999.md` simply has
+		 * no `WalkEntry` at all and is never read or counted incomplete by that
+		 * protection alone.
+		 *
+		 * The swap is deliberately left in place (not undone) through the read
+		 * phase and the post-read check below: a swap that is instead FULLY
+		 * RESTORED to the ORIGINAL directory strictly before the post-read
+		 * check runs is the honest, documented residual window described on
+		 * `LoadSnapshotFromWorkingTreeOptions.expectedEngineeringIdentity`'s own
+		 * doc -- neither the pre-walk nor the post-read `lstat` can observe a
+		 * substitution that both began and fully ended between them, since
+		 * `deps.walkDirectory` is a single opaque call from this module's point
+		 * of view and Node exposes no directory-capability primitive to bind the
+		 * walk itself to an already-verified handle. What IS provably closed by
+		 * this fix, and what these tests demonstrate, is every swap that has NOT
+		 * been undone by the time the post-read check runs -- including a swap
+		 * an attacker fails to (or does not bother to) reverse in time, which
+		 * previously went completely undetected regardless of timing.
+		 */
+		async function setUpSwapFixture(tempDirForFixture: string): Promise<{ engineeringPath: string, replayDir: string, displacedOriginal: string }> {
+			await writeMinimalProject(tempDirForFixture)
+			await fs.mkdir(path.join(tempDirForFixture, '.engineering', 'req'), { recursive: true })
+			await fs.writeFile(path.join(tempDirForFixture, '.engineering', 'req', 'REQ-999.md'), '---\nschema: ef/req@1\n---\n')
+
+			const engineeringPath = path.join(tempDirForFixture, '.engineering')
+			const replayDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-snapshot-replay-'))
+			const displacedOriginal = `${engineeringPath}.displaced-original`
+
+			// Hard links to the SAME retained-file inodes; `req/` (and
+			// `REQ-999.md`) is entirely absent from the replay directory.
+			await fs.link(path.join(engineeringPath, 'ef.yaml'), path.join(replayDir, 'ef.yaml'))
+			await fs.link(path.join(engineeringPath, '.gitignore'), path.join(replayDir, '.gitignore'))
+			await fs.link(path.join(engineeringPath, 'PROJECT.md'), path.join(replayDir, 'PROJECT.md'))
+
+			return { engineeringPath, replayDir, displacedOriginal }
+		}
+
+		function swappingWalkDeps(engineeringPath: string, replayDir: string, displacedOriginal: string): SnapshotFsDeps {
+			return {
+				isDirectory: async () => true,
+				isSymlink: async () => false,
+				directoryIdentity,
+				readRegularFileNoFollow,
+				walkDirectory: async (root) => {
+					await fs.rename(engineeringPath, displacedOriginal)
+					await fs.rename(replayDir, engineeringPath)
+					return walkDirectory(root)
+				},
+			}
+		}
+
+		it('reports engineering-swapped (not ok:true over a partial graph) when the swap is bound against the prior observation via expectedEngineeringIdentity', async () => {
+			if (process.platform === 'win32') {
+				// Hard links and the rename-swap reproduction below have no direct
+				// Windows equivalent; POSIX-only per the finding's own reproduction.
+				return
+			}
+
+			const { engineeringPath, replayDir, displacedOriginal } = await setUpSwapFixture(tempDir)
+			const expectedEngineeringIdentity = await directoryIdentity(engineeringPath)
+			expect(expectedEngineeringIdentity)
+				.toBeDefined()
+
+			try {
+				const result = await loadSnapshotFromWorkingTree(
+					tempDir,
+					swappingWalkDeps(engineeringPath, replayDir, displacedOriginal),
+					{ expectedEngineeringIdentity: expectedEngineeringIdentity! },
+				)
+				expect(result.ok)
+					.toBe(false)
+				expect(result.ok === false && result.reason)
+					.toBe('engineering-swapped')
+			}
+			finally {
+				await fs.rm(engineeringPath, { recursive: true, force: true })
+				await fs.rename(displacedOriginal, engineeringPath)
+			}
+		})
+
+		it('without expectedEngineeringIdentity, the identical swap is undetected: ok:true with the omitted Artifact silently absent', async () => {
+			if (process.platform === 'win32') {
+				return
+			}
+
+			const { engineeringPath, replayDir, displacedOriginal } = await setUpSwapFixture(tempDir)
+
+			try {
+				const result = await loadSnapshotFromWorkingTree(tempDir, swappingWalkDeps(engineeringPath, replayDir, displacedOriginal))
+				expect(result.ok)
+					.toBe(true)
+				if (!result.ok)
+					return
+				// `req/REQ-999.md` was genuinely on disk (moved aside, not deleted,
+				// in `displacedOriginal`) but never observed by the walk, so it is
+				// silently missing here -- exactly Finding 4's defect, still latent
+				// for any caller that does not opt into `expectedEngineeringIdentity`.
+				// `PROJECT.md` (also hard-linked into the replay directory) is the
+				// only Artifact present.
+				expect(result.snapshot.artifacts.map(a => a.path))
+					.toEqual(['.engineering/PROJECT.md'])
+			}
+			finally {
+				await fs.rm(engineeringPath, { recursive: true, force: true })
+				await fs.rename(displacedOriginal, engineeringPath)
+			}
+		})
 	})
 })
 

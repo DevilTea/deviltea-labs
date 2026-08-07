@@ -55,6 +55,7 @@ export const DIAGNOSTIC_CODES = {
 	'EF-FS-006': 'error',
 	'EF-FS-007': 'error',
 	'EF-FS-008': 'error',
+	'EF-FS-009': 'error',
 	'EF-ID-001': 'error',
 	'EF-ID-002': 'error',
 	'EF-ID-003': 'error',

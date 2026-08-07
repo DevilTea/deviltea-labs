@@ -163,18 +163,20 @@ describe('runArtifactCreateCommand', () => {
 			.toBe(2)
 	})
 
-	it('exits 1 (identity collision) when the next allocated canonical path is physically occupied by an undecodable file', async () => {
-		// An invalid file at the next-allocated path doesn't count as a "visible
-		// ID" for allocation (its envelope never decodes), so `nextId` still
-		// allocates REQ-001 -- but the canonical path is already physically
-		// occupied, which `computeCreatePlan` must still refuse to overwrite.
-		await writeFile(root, '.engineering/req/REQ-001.md', 'not a valid EF artifact file at all')
+	it('exits 2 (allocation incomplete) when an undecodable file occupies the canonical directory for the requested prefix', async () => {
+		// An invalid file inside the requested prefix's canonical directory is
+		// identity-uncertain: its envelope never decodes, so its greatest
+		// visible component cannot be determined and `computeCreatePlan` must
+		// refuse to allocate at all (02-identity.md Allocation), rather than
+		// silently skip it and allocate REQ-001 as if it weren't there.
+		await writeFile(root, '.engineering/req/REQ-999.md', 'not a valid EF artifact file at all')
 		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
 		expect(outcome.exitCode)
-			.toBe(1)
+			.toBe(2)
 		const json = JSON.parse(outcome.stdout as string)
 		expect(json.diagnostics[0].code)
-			.toBe('EF-ID-004')
+			.toBe('EF-VAL-001')
+		await expect(fs.stat(path.join(root, '.engineering/req/REQ-001.md'))).rejects.toThrow()
 	})
 
 	it('reports exit 2 when no EF project can be discovered', async () => {

@@ -16,6 +16,7 @@
 
 import type { GitExecutor } from '../git/executor'
 import type { GitRepository } from '../git/repository'
+import type { FileIdentity } from '../platform/fs-facts'
 import type { Config } from '../repository/config'
 import path from 'pathe'
 import { createGitExecutor } from '../git/executor'
@@ -41,6 +42,14 @@ export interface ProjectContext {
 	 * this field (see `query.ts`/`validate.ts`'s snapshot-scope handling).
 	 */
 	config: Config | null
+	/**
+	 * `.engineering`'s identity as observed by THIS discovery (Finding 4,
+	 * "single observation"), for binding a later, separate directory walk
+	 * (`application/snapshot.ts`'s `loadSnapshotFromWorkingTree`) to the exact
+	 * directory this discovery approved -- see that field's own doc on
+	 * `repository/discovery.ts`'s `DiscoverProjectResult`.
+	 */
+	engineeringIdentity: FileIdentity
 	git: GitRepository
 }
 
@@ -78,7 +87,7 @@ export async function resolveProject(input: ResolveProjectInput, executor: GitEx
 
 	switch (result.kind) {
 		case 'resolved':
-			return { ok: true, context: { root: result.root, config: result.config, git: createGitRepository(result.root, executor) } }
+			return { ok: true, context: { root: result.root, config: result.config, engineeringIdentity: result.engineeringIdentity, git: createGitRepository(result.root, executor) } }
 		case 'not-found':
 			return { ok: false, reason: 'not-found', message: 'No EF project (\'.engineering\') was found.' }
 		case 'not-a-directory':

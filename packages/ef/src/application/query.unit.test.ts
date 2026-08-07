@@ -148,6 +148,61 @@ Confirms EF-ID-005 alone does not flip graphTrustworthy.
 - N/A.
 `
 
+const REQ_MISPLACED_DIRECTORY = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-778
+title: Misplaced Requirement
+status: active
+summary: A well-formed, unambiguous requirement declared inside the wrong canonical directory.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Exercises EF-ID-014-only (wrong canonical directory) staying ungated for graphTrustworthy but path-trust-gated for a result that projects it.
+
+## Rationale
+
+Confirms EF-ID-014 alone does not flip graphTrustworthy.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
+/** References `target` from a well-formed, unambiguous requirement, for path-trust node-set regressions (Finding 6, seventh-round). */
+function requirementReferencing(id: string, target: string): string {
+	return `---
+schema: ef/requirement@1
+type: requirement
+id: ${id}
+title: Title of ${id}
+status: active
+summary: References ${target} for a path-trust node-set regression.
+tags: []
+relations:
+  - type: references
+    target: ${target}
+resources: []
+---
+
+## Requirement
+
+References ${target}.
+
+## Rationale
+
+Exercises Finding 6's path-trust node gate on a graph traversal's node set.
+
+## Acceptance Criteria
+
+- N/A.
+`
+}
+
 function supersessionReq(id: string, status: string, supersededBy?: string): string {
 	const relations = supersededBy
 		? `relations:\n  - type: superseded-by\n    target: ${supersededBy}\n`
@@ -580,14 +635,107 @@ Finding 9 regression fixture.
 - N/A.
 `
 
+/**
+ * A requirement whose relations array declares the same
+ * ('references', REQ-002) pair twice (\`EF-REL-006\`), for the GLOBAL edge-trust
+ * gate's typed narrowing (Finding 9, seventh-round): 'references' is only
+ * ever part of `impact`'s type set when `include_references` is requested, so
+ * this loss must not gate `impact` by default but must gate it once
+ * `include_references: true` is requested.
+ */
+const REQ_DUP_REFERENCES = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-965
+title: Duplicate References Entry
+status: active
+summary: A requirement whose relations array declares the same ('references', REQ-002) pair twice, for the global edge-trust gate's typed narrowing.
+tags: []
+relations:
+  - type: references
+    target: REQ-002
+  - type: references
+    target: REQ-002
+resources: []
+---
+
+## Requirement
+
+Exercises EF-REL-006 (duplicate relation) confined to 'references', for Finding 9's global-gate typed narrowing.
+
+## Rationale
+
+Finding 9 (seventh-round) regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`
+
 async function writeFile(root: string, relativePath: string, content: string): Promise<void> {
 	const fullPath = path.join(root, relativePath)
 	await fs.mkdir(path.dirname(fullPath), { recursive: true })
 	await fs.writeFile(fullPath, content)
 }
 
+/** Writes raw bytes verbatim, for fixtures that need genuinely invalid UTF-8 (Finding 7) rather than a well-formed string. */
+async function writeFileBytes(root: string, relativePath: string, bytes: Uint8Array): Promise<void> {
+	const fullPath = path.join(root, relativePath)
+	await fs.mkdir(path.dirname(fullPath), { recursive: true })
+	await fs.writeFile(fullPath, bytes)
+}
+
+/**
+ * Corrupts one interior byte of `term`'s first occurrence in a well-formed
+ * requirement body with an invalid standalone UTF-8 byte (`0xFF`), for
+ * seventh-round Finding 7's search-membership regression: the best-effort
+ * decode replaces that byte with U+FFFD, splitting the exact token a search
+ * request would otherwise match. The fixture text is ASCII-only, so a
+ * character offset is also a byte offset.
+ */
+function corruptedBodyBytes(id: string, term: string): Uint8Array {
+	const text = `---
+schema: ef/requirement@1
+type: requirement
+id: ${id}
+title: Title of ${id}
+status: active
+summary: Summary of ${id}.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+The body contains a ${term} term with a byte corrupted inside it.
+
+## Rationale
+
+Finding 7 (seventh-round) search-membership regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`
+	const charIndex = text.indexOf(term)
+	if (charIndex === -1)
+		throw new Error(`fixture text does not contain term '${term}'`)
+	const bytes = new TextEncoder()
+		.encode(text)
+	bytes[charIndex + Math.floor(term.length / 2)] = 0xFF
+	return bytes
+}
+
+const GITIGNORE = `.cache/
+.generated/
+.tmp/
+.lock
+`
+
 async function writeRichProject(root: string): Promise<void> {
 	await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
+	await writeFile(root, '.engineering/.gitignore', GITIGNORE)
 	await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
 	await writeFile(root, '.engineering/prd/PRD-001.md', PRD_001)
 	await writeFile(root, '.engineering/req/REQ-001.md', REQ_001)
@@ -666,6 +814,7 @@ function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRe
 		supersessionCrossTypeArtifactIds: new Set(),
 		supersessionFactInvalidArtifactIds: new Set(),
 		resourceFieldLossById: new Map(),
+		pathTrustLossArtifactIds: new Set(),
 	}
 	return { snapshot, validation }
 }
@@ -918,24 +1067,120 @@ describe('executeQuery', () => {
 				.toBe('EF-QRY-013')
 		})
 
-		it('stays ungated for an EF-ID-005-only filename mismatch: the declared ID is unique and decoded, so queries still succeed', async () => {
+		it('stays ungated for an EF-ID-005-only filename mismatch: the declared ID is unique and decoded, so unrelated queries still succeed', async () => {
 			await writeFile(tempDir, '.engineering/req/REQ-999.md', REQ_777_MISFILED)
 			const ok = await reloadContext()
 			expect(ok.validation.graphTrustworthy)
 				.toBe(true)
 
-			const lookup = await executeQuery(ok, { kind: 'lookup', id: 'REQ-777' })
+			// An unrelated lookup, and a list/search result that never projects
+			// REQ-777 itself, are unaffected by its own filename mismatch --
+			// Finding 6 (below) gates only the specific result that would
+			// project REQ-777's own (non-canonical) path.
+			const lookup = await executeQuery(ok, { kind: 'lookup', id: 'REQ-001' })
 			expect(lookup.complete)
 				.toBe(true)
 			expect(lookup.data?.found)
 				.toBe(true)
 
-			const list = await executeQuery(ok, { kind: 'list' })
+			const list = await executeQuery(ok, { kind: 'list', type: ['prd'] })
 			expect(list.complete)
 				.toBe(true)
 
-			const search = await executeQuery(ok, { kind: 'search', terms: ['misfiled'] })
+			const search = await executeQuery(ok, { kind: 'search', terms: ['filtering'] })
 			expect(search.complete)
+				.toBe(true)
+		})
+	})
+
+	// Seventh-round Finding 6: 10-query-and-trace.md fixes a projected
+	// Artifact's `path` as its canonical, project-relative path, but
+	// `buildArtifactSummary` projects the actual discovered path verbatim. An
+	// Artifact with an EF-ID-005 filename mismatch or an EF-ID-014
+	// wrong-canonical-directory finding has an explicitly non-canonical
+	// projected `path`, so any result that would project THAT Artifact must
+	// gate with EF-QRY-013 -- without blocking an unrelated result.
+	describe('path-trust gate (Finding 6, seventh-round: EF-ID-005/EF-ID-014, per-node scoping)', () => {
+		it('gates lookup of the misfiled Artifact itself (EF-ID-005) with EF-QRY-013', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-999.md', REQ_777_MISFILED)
+			const ctx = await reloadContext()
+			expect(ctx.validation.graphTrustworthy)
+				.toBe(true)
+
+			const lookup = await executeQuery(ctx, { kind: 'lookup', id: 'REQ-777' })
+			expect(lookup.complete)
+				.toBe(false)
+			expect(lookup.data)
+				.toBeNull()
+			expect(lookup.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates lookup of an Artifact outside its canonical directory (EF-ID-014) with EF-QRY-013', async () => {
+			await writeFile(tempDir, '.engineering/adr/REQ-778.md', REQ_MISPLACED_DIRECTORY)
+			const ctx = await reloadContext()
+			expect(ctx.validation.graphTrustworthy)
+				.toBe(true)
+
+			const lookup = await executeQuery(ctx, { kind: 'lookup', id: 'REQ-778' })
+			expect(lookup.complete)
+				.toBe(false)
+			expect(lookup.data)
+				.toBeNull()
+			expect(lookup.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('gates a list result that returns the misfiled Artifact, but not one that excludes it by filter', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-999.md', REQ_777_MISFILED)
+			const ctx = await reloadContext()
+
+			const listAll = await executeQuery(ctx, { kind: 'list' })
+			expect(listAll.complete)
+				.toBe(false)
+			expect(listAll.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			// A filter that never returns REQ-777 (a requirement) is unaffected.
+			const listPrdOnly = await executeQuery(ctx, { kind: 'list', type: ['prd'] })
+			expect(listPrdOnly.complete)
+				.toBe(true)
+			expect(listPrdOnly.data?.artifacts.map(a => a.id))
+				.toEqual(['PRD-001'])
+		})
+
+		it('gates a search result that returns the misfiled Artifact, but not one that only matches an unrelated Artifact', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-999.md', REQ_777_MISFILED)
+			const ctx = await reloadContext()
+
+			const searchMisfiled = await executeQuery(ctx, { kind: 'search', terms: ['misfiled'] })
+			expect(searchMisfiled.complete)
+				.toBe(false)
+			expect(searchMisfiled.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			const searchUnrelated = await executeQuery(ctx, { kind: 'search', terms: ['filtering'] })
+			expect(searchUnrelated.complete)
+				.toBe(true)
+			expect(searchUnrelated.data?.results.map(r => r.artifact.id))
+				.not.toContain('REQ-777')
+		})
+
+		it('gates a relations result whose node set includes the misfiled Artifact as a neighbor', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-999.md', REQ_777_MISFILED)
+			await writeFile(tempDir, '.engineering/req/REQ-800.md', requirementReferencing('REQ-800', 'REQ-777'))
+			const ctx = await reloadContext()
+
+			const relationsToMisfiled = await executeQuery(ctx, { kind: 'relations', id: 'REQ-800', direction: 'outgoing' })
+			expect(relationsToMisfiled.complete)
+				.toBe(false)
+			expect(relationsToMisfiled.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+
+			// A relations result whose node set never includes REQ-777 is
+			// unaffected by its own path-trust loss.
+			const relationsUnrelated = await executeQuery(ctx, { kind: 'relations', id: 'REQ-001', direction: 'outgoing' })
+			expect(relationsUnrelated.complete)
 				.toBe(true)
 		})
 	})
@@ -1430,6 +1675,79 @@ Finding C: an edge-lossy Artifact outside a traversal's reachable component must
 				.toEqual([{ artifact: expect.objectContaining({ id: 'REQ-001' }), depth: 0 }])
 			expect(traceZero.data!.edges)
 				.toEqual([])
+		})
+	})
+
+	// Seventh-round Finding 9: `edgeTrustGlobalFailure` (incoming/both
+	// `relations`/`trace`, and `impact`, which is always incoming) previously
+	// gated on ANY typed edge/semantic loss ANYWHERE in the graph, regardless
+	// of the traversal's own selected relation type set -- unlike
+	// `edgeTrustLocalFailure` (sixth-round Finding 9), which already
+	// intersects a purely outgoing traversal's per-(source,type) loss against
+	// its requested types. A typed loss confined to a relation type the
+	// traversal never reads must not block it either, globally or locally;
+	// truly untyped loss stays conservative/global.
+	describe('typed edge-loss narrowing for the GLOBAL gate (Finding 9, seventh-round)', () => {
+		it('relations (incoming): a semantic edge loss (EF-REL-004) confined to \'governed-by\' elsewhere in the graph does NOT gate a query restricted to \'derived-from\'', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-964.md', REQ_MIXED_TYPE_LOSS)
+			const ctx = await reloadContext()
+			expect([...(ctx.validation.semanticEdgeLossRelationTypesBySourceId.get('REQ-964') ?? [])])
+				.toEqual(['governed-by'])
+
+			// REQ-964 legitimately appears in the result via its OWN valid,
+			// unrelated 'derived-from' edge to PRD-001 -- its 'governed-by'-only
+			// loss must not additionally gate this unrelated 'derived-from' read.
+			const result = await executeQuery(ctx, { kind: 'relations', id: 'PRD-001', direction: 'incoming', types: ['derived-from'] })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.nodes.map(n => n.id))
+				.toContain('REQ-964')
+		})
+
+		it('relations (incoming): the SAME semantic edge loss DOES gate a query whose type set includes \'governed-by\' (the exact affected type)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-964.md', REQ_MIXED_TYPE_LOSS)
+			const ctx = await reloadContext()
+
+			const result = await executeQuery(ctx, { kind: 'relations', id: 'REQ-001', direction: 'incoming', types: ['governed-by'] })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
+
+		it('trace (incoming): a semantic edge loss confined to \'governed-by\' does NOT gate a trace restricted to \'derived-from\'', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-964.md', REQ_MIXED_TYPE_LOSS)
+			const ctx = await reloadContext()
+
+			// REQ-964 legitimately appears in the result via its OWN valid,
+			// unrelated 'derived-from' edge to PRD-001.
+			const result = await executeQuery(ctx, { kind: 'trace', roots: ['PRD-001'], types: ['derived-from'], direction: 'incoming', maxDepth: 5 })
+			expect(result.complete)
+				.toBe(true)
+			expect(result.data!.nodes.map(n => n.artifact.id))
+				.toContain('REQ-964')
+		})
+
+		it('impact (always incoming): a typed edge loss (EF-REL-006) confined to \'references\' does NOT gate impact when include_references is false (the default)', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-965.md', REQ_DUP_REFERENCES)
+			const ctx = await reloadContext()
+			expect([...(ctx.validation.edgeLossRelationTypesBySourceId.get('REQ-965') ?? [])])
+				.toEqual(['references'])
+
+			const result = await executeQuery(ctx, { kind: 'impact', roots: ['REQ-001'], maxDepth: 5 })
+			expect(result.complete)
+				.toBe(true)
+		})
+
+		it('impact (always incoming): the SAME typed edge loss DOES gate impact once include_references is true', async () => {
+			await writeFile(tempDir, '.engineering/req/REQ-965.md', REQ_DUP_REFERENCES)
+			const ctx = await reloadContext()
+
+			const result = await executeQuery(ctx, { kind: 'impact', roots: ['REQ-001'], maxDepth: 5, includeReferences: true })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
 		})
 	})
 
@@ -2040,6 +2358,37 @@ Finding 9 regression fixture.
 			expect(result.data!.results.some(r => r.artifact.id === 'REQ-970'))
 				.toBe(false)
 		})
+
+		// Seventh-round Finding 7: search reads every Artifact's best-effort
+		// decoded body text (`bodyText`), where an invalid UTF-8 byte becomes
+		// U+FFFD (`EF-FS-005`/`byteDecodingLossArtifactIds`). When that
+		// replacement falls inside the exact token a search request asks for,
+		// the corrupted Artifact never matches and so never reaches
+		// `data.results` -- the per-result `projectionLossArtifactIds` check
+		// cannot fire for an Artifact that was never returned -- silently
+		// yielding an empty/partial `complete: true` result instead of
+		// reporting the loss.
+		it('gates search with EF-QRY-013 when an invalid UTF-8 byte inside the searched token could have hidden a match, instead of silently returning empty', async () => {
+			const corrupted = corruptedBodyBytes('REQ-600', 'zzzcorruptedtoken')
+			await writeFileBytes(tempDir, '.engineering/req/REQ-600.md', corrupted)
+			const withBodyLoss = await reloadContext()
+
+			// Confirm the fixture produces body-only byte-decoding loss without
+			// flipping graphTrustworthy (only the frontmatter/identity facts
+			// gate that; the corrupted byte here is confined to the body).
+			expect(withBodyLoss.validation.graphTrustworthy)
+				.toBe(true)
+			expect([...withBodyLoss.validation.byteDecodingLossArtifactIds])
+				.toContain('REQ-600')
+
+			const result = await executeQuery(withBodyLoss, { kind: 'search', terms: ['zzzcorruptedtoken'] })
+			expect(result.complete)
+				.toBe(false)
+			expect(result.data)
+				.toBeNull()
+			expect(result.diagnostics[0]!.code)
+				.toBe('EF-QRY-013')
+		})
 	})
 
 	describe('relations', () => {
@@ -2557,7 +2906,7 @@ Finding 9 regression fixture.
 
 			const historyContext: QueryContext = {
 				...context,
-				history: { git: createGitRepository(tempDir, createGitExecutor()), integrationRefOid: tipOid },
+				history: { git: createGitRepository(tempDir, createGitExecutor()), integrationRefOid: tipOid, integrationRef: 'refs/heads/main' },
 			}
 			const result = await executeQuery(historyContext, { kind: 'history', id: 'REQ-001' })
 			expect(result.complete)
@@ -2595,7 +2944,7 @@ Finding 9 regression fixture.
 			})
 			const historyContext: QueryContext = {
 				...context,
-				history: { git: brokenGit, integrationRefOid: tipOid },
+				history: { git: brokenGit, integrationRefOid: tipOid, integrationRef: 'refs/heads/main' },
 			}
 			const result = await executeQuery(historyContext, { kind: 'history', id: 'REQ-001' })
 			expect(result.complete)
@@ -2643,7 +2992,7 @@ Finding 9 regression fixture.
 			})
 			const historyContext: QueryContext = {
 				...context,
-				history: { git: brokenGit, integrationRefOid: tipOid },
+				history: { git: brokenGit, integrationRefOid: tipOid, integrationRef: 'refs/heads/main' },
 			}
 			const result = await executeQuery(historyContext, { kind: 'history', id: 'REQ-001' })
 			expect(result.complete)

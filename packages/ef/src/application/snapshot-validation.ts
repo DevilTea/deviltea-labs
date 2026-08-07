@@ -430,6 +430,37 @@ export interface SnapshotValidationResult {
 	 * must not gate a search that never reads `normative`.
 	 */
 	resourceFieldLossById: ReadonlyMap<string, ReadonlySet<ResourceFieldName>>
+	/**
+	 * Artifact IDs (by their own declared `id`) whose discovered file path is
+	 * itself explicitly non-canonical, tracked SEPARATELY from
+	 * `graphTrustworthy` (seventh-round Finding 6): `EF-ID-005` (filename does
+	 * not exactly match the declared ID), `EF-ID-014` (file outside its type's
+	 * canonical directory), or an `EF-FS-006` finding whose `path` names this
+	 * Artifact's own file (the discovered path is not itself
+	 * Unicode-NFC-normalized -- see `checkPathNormalization`'s doc; a
+	 * Resource-location `EF-FS-006` is deliberately excluded, since that
+	 * finding names a Resource's declared `location`, not any Artifact's own
+	 * path).
+	 *
+	 * `graphTrustworthy`'s own doc already explains why `EF-ID-005`/`014` do
+	 * NOT gate query trustworthiness project-wide: the declared `id` itself is
+	 * still unique and correctly decoded, so `byId` and every dependent index
+	 * remain trustworthy. But 10-query-and-trace.md fixes a projected
+	 * Artifact's `path` field as ITS canonical, project-relative path, while
+	 * `buildArtifactSummary`/`buildArtifactFull` (`query-projection.ts`)
+	 * project the actual discovered path verbatim (Finding A: raw,
+	 * unsanitized projection) -- so for exactly this Artifact, the projected
+	 * `path` is explicitly wrong. The query layer gates only the specific
+	 * result that would project one of these Artifacts (`lookup`/`list`/
+	 * `search` results, or a graph traversal's node set) with `EF-QRY-013`,
+	 * leaving every unrelated Artifact's result unaffected -- the same
+	 * per-node scoping `projectionLossArtifactIds` already uses, kept as its
+	 * own separate set here (rather than folded into
+	 * `projectionLossArtifactIds`) because the untrustworthy fact is
+	 * specifically the `path` field, not the envelope content
+	 * `projectionLossArtifactIds`'s causes corrupt.
+	 */
+	pathTrustLossArtifactIds: ReadonlySet<string>
 }
 
 /** A Resource descriptor's named core fields (06-resources.md), for `resourceFieldLossById`'s per-field loss granularity (Finding 9). */
@@ -441,6 +472,34 @@ export type ResourceFieldName = 'type' | 'location' | 'role' | 'media_type' | 'n
 
 function makeValDiagnostic(code: 'EF-VAL-004' | 'EF-VAL-007', message: string, path?: string, artifactId?: string): Diagnostic {
 	return { code, severity: severityOf(code), message, path, artifactId, related: [] }
+}
+
+// ---------------------------------------------------------------------------
+// Finding 8 (seventh-round): `.engineering/.gitignore` presence + exact content
+// ---------------------------------------------------------------------------
+
+const GITIGNORE_PATH = '.engineering/.gitignore'
+
+/**
+ * 11-filesystem-and-config.md: "`.engineering/.gitignore` is a tracked
+ * PROJECT-owned control file with these exact Core v1 entries", LF-terminated
+ * with exactly one final newline, in this exact order.
+ */
+const GITIGNORE_CANONICAL_BYTES = new TextEncoder()
+	.encode('.cache/\n.generated/\n.tmp/\n.lock\n')
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+	if (a.length !== b.length)
+		return false
+	for (let i = 0; i < a.length; i += 1) {
+		if (a[i] !== b[i])
+			return false
+	}
+	return true
+}
+
+function makeFsDiagnostic(code: 'EF-FS-009', message: string, path: string): Diagnostic {
+	return { code, severity: severityOf(code), message, path, related: [] }
 }
 
 /**
@@ -760,8 +819,23 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	else {
 		diagnostics.push(...checkTextNormalization('.engineering/ef.yaml', snapshot.configBytes))
 	}
-	if (snapshot.gitignoreBytes !== undefined)
-		diagnostics.push(...checkTextNormalization('.engineering/.gitignore', snapshot.gitignoreBytes))
+	// Finding 8 (seventh-round): `.engineering/.gitignore` is a tracked
+	// PROJECT-owned control file that MUST exist with exactly the four
+	// canonical entries (11-filesystem-and-config.md); absence or divergence
+	// was previously silently accepted. `EF-FS-005` (encoding-level violation:
+	// invalid UTF-8, forbidden BOM, CRLF, or missing final newline) keeps
+	// precedence for the same file -- EF-FS-009 only fires when this file's
+	// own text-normalization pass reported nothing, so an already-reported
+	// encoding-level defect is never doubled up with a redundant EF-FS-009.
+	if (snapshot.gitignoreBytes === undefined) {
+		diagnostics.push(makeFsDiagnostic('EF-FS-009', `Required control file '${GITIGNORE_PATH}' is missing; it must contain the four canonical entries, in order, this specification defines.`, GITIGNORE_PATH))
+	}
+	else {
+		const gitignoreTextNormalizationDiagnostics = checkTextNormalization(GITIGNORE_PATH, snapshot.gitignoreBytes)
+		diagnostics.push(...gitignoreTextNormalizationDiagnostics)
+		if (gitignoreTextNormalizationDiagnostics.length === 0 && !bytesEqual(snapshot.gitignoreBytes, GITIGNORE_CANONICAL_BYTES))
+			diagnostics.push(makeFsDiagnostic('EF-FS-009', `Control file '${GITIGNORE_PATH}' does not exactly match the four canonical entries, in order, this specification defines.`, GITIGNORE_PATH))
+	}
 
 	diagnostics.push(...snapshot.layoutDiagnostics)
 
@@ -800,6 +874,10 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	const supersessionFactInvalidArtifactIds = new Set<string>()
 	const resourceFieldLossById = new Map<string, Set<ResourceFieldName>>()
 	const extensionValueLossArtifactIds = new Set<string>()
+	// Finding 6 (seventh-round): `EF-ID-005`/`EF-ID-014` fact tracking; the
+	// artifact-path `EF-FS-006` contribution is folded in further below, once
+	// `checkPathNormalization` has run (`pathTrustLossArtifactIds`'s doc).
+	const pathTrustLossArtifactIds = new Set<string>()
 
 	for (const artifact of snapshot.artifacts) {
 		if (!artifact.frontmatter.ok) {
@@ -823,7 +901,16 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		}
 
 		diagnostics.push(...validateIdSyntax({ type: envelope.type, id: envelope.id }, artifact.path))
-		diagnostics.push(...validateFilename({ type: envelope.type, id: envelope.id }, artifact.path))
+		const filenameDiagnostics = validateFilename({ type: envelope.type, id: envelope.id }, artifact.path)
+		diagnostics.push(...filenameDiagnostics)
+		// Finding 6 (seventh-round): `EF-ID-005` (filename mismatch) or
+		// `EF-ID-014` (wrong canonical directory) each make this Artifact's own
+		// discovered path non-canonical, even though -- unlike
+		// `envelopeStructuralLossArtifactIds` -- its declared `id` remains
+		// unique and correctly decoded, so `graphTrustworthy` itself stays
+		// unaffected (`pathTrustLossArtifactIds`'s doc).
+		if (filenameDiagnostics.some(d => d.code === 'EF-ID-005' || d.code === 'EF-ID-014'))
+			pathTrustLossArtifactIds.add(envelope.id)
 
 		const statusDiagnostics = validateStatus({ type: envelope.type, status: envelope.status, id: envelope.id }, artifact.path)
 		diagnostics.push(...statusDiagnostics)
@@ -1150,7 +1237,24 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		...snapshot.artifacts.map(a => ({ path: a.path })),
 		...localResourceLocations.map(location => ({ path: location, actualPath: resolveActualPath(location) })),
 	]
-	diagnostics.push(...checkPathNormalization(pathNormalizationEntries))
+	const pathNormalizationDiagnostics = checkPathNormalization(pathNormalizationEntries)
+	diagnostics.push(...pathNormalizationDiagnostics)
+	// Finding 6 (seventh-round): fold an `EF-FS-006` whose `path` names one of
+	// THIS Artifact's own discovered paths (not a Resource `location`, which
+	// also flows through `checkPathNormalization` above) into
+	// `pathTrustLossArtifactIds`. Built from `fileOutcomes` (every Artifact
+	// whose envelope decoded, including an ambiguous-ID one) rather than
+	// `resolvedOutcomes`/`byId`: an ambiguous ID already blocks
+	// `graphTrustworthy` project-wide, so whether it is additionally present
+	// here is immaterial to any query result.
+	const artifactIdByPath = new Map(fileOutcomes.map(o => [o.path, o.envelope.id] as const))
+	for (const d of pathNormalizationDiagnostics) {
+		if (d.code !== 'EF-FS-006' || d.path === undefined)
+			continue
+		const affectedId = artifactIdByPath.get(d.path)
+		if (affectedId !== undefined)
+			pathTrustLossArtifactIds.add(affectedId)
+	}
 
 	const byId = new Map<string, SnapshotArtifactRecord>()
 	for (const outcome of resolvedOutcomes) {
@@ -1252,6 +1356,7 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		supersessionCrossTypeArtifactIds,
 		supersessionFactInvalidArtifactIds,
 		resourceFieldLossById,
+		pathTrustLossArtifactIds,
 	}
 }
 

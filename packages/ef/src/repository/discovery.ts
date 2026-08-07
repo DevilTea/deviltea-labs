@@ -21,11 +21,11 @@
 
 import type { Diagnostic } from '../domain/diagnostics'
 import type { WorktreeRootResult } from '../git/repository'
-import type { ReadRegularFileNoFollowResult } from '../platform/fs-facts'
+import type { FileIdentity, ReadRegularFileNoFollowResult } from '../platform/fs-facts'
 import type { Config } from './config'
 import { lstat } from 'node:fs/promises'
 import path from 'pathe'
-import { isDirectory, readRegularFileNoFollow } from '../platform/fs-facts'
+import { directoryIdentity, readRegularFileNoFollow } from '../platform/fs-facts'
 import { isSameLocation } from '../platform/path-identity'
 import { decodeConfig } from './config'
 
@@ -42,20 +42,38 @@ export interface DiscoverProjectDeps {
 }
 
 export type DiscoverProjectResult
-	= | { kind: 'resolved', root: string, config: Config | null, configDiagnostics: Diagnostic[] }
+	= | {
+		kind: 'resolved'
+		root: string
+		config: Config | null
+		configDiagnostics: Diagnostic[]
+		/**
+		 * `.engineering`'s `lstat`-derived identity, captured by THIS discovery
+		 * (the `directoryIdentity` check just below, which already re-proves it
+		 * is a real, non-symlink directory). Exposed (Finding 4, "single
+		 * observation") so a caller that later performs its own, separate
+		 * filesystem walk of `.engineering` -- `application/snapshot.ts`'s
+		 * `loadSnapshotFromWorkingTree` -- can bind that walk to the EXACT
+		 * directory this discovery approved, rather than trusting a bare path
+		 * string that a race could have re-pointed at a different directory (one
+		 * that, e.g., omits an Artifact file) between this observation and the
+		 * later walk.
+		 */
+		engineeringIdentity: FileIdentity
+	}
 		/** No `.engineering` path was found ascending from `cwd` to the filesystem root. */
-		| { kind: 'not-found' }
+	| { kind: 'not-found' }
 		/** An `.engineering` path exists but is not a directory (cannot be an initialization claim). */
-		| { kind: 'not-a-directory', path: string }
+	| { kind: 'not-a-directory', path: string }
 		/** A directory `.engineering` lacks `ef.yaml`, or contains `.tmp/init-state.json`: an incomplete working-tree initialization claim. */
-		| { kind: 'incomplete-initialization', root: string }
+	| { kind: 'incomplete-initialization', root: string }
 		/** The candidate root is not itself the Git worktree root that directly contains `.engineering`. */
-		| { kind: 'not-project-worktree-root', root: string }
+	| { kind: 'not-project-worktree-root', root: string }
 		/** The working directory is inside an undeclared nested Git worktree, or otherwise not associated with the discovered project (implicit discovery only). */
-		| { kind: 'unassociated', root: string }
+	| { kind: 'unassociated', root: string }
 		/** `ef.yaml` exists but could not be read (e.g. a permission failure, or it is itself a directory). */
-		| { kind: 'read-error', root: string, message: string }
-		| { kind: 'git-unavailable', message: string }
+	| { kind: 'read-error', root: string, message: string }
+	| { kind: 'git-unavailable', message: string }
 
 async function pathExists(target: string): Promise<boolean> {
 	try {
@@ -117,7 +135,13 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 
 	const engineeringPath = path.join(candidateRoot, '.engineering')
 
-	if (!(await isDirectory(engineeringPath)))
+	// `directoryIdentity` returns an identity if and only if `engineeringPath`
+	// is, right now, a real, non-symlink directory -- exactly the same
+	// condition the previous plain `isDirectory` boolean check tested, but
+	// this ALSO captures the `dev`/`ino` identity itself, threaded into
+	// `DiscoverProjectResult`'s `engineeringIdentity` below (Finding 4).
+	const engineeringIdentity = await directoryIdentity(engineeringPath)
+	if (engineeringIdentity === undefined)
 		return { kind: 'not-a-directory', path: engineeringPath }
 
 	const efYamlPath = path.join(engineeringPath, 'ef.yaml')
@@ -132,7 +156,7 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 	// file's own `dev`/`ino` unchanged even though it is now reached through a
 	// forbidden ancestor symlink. This is safe here specifically because
 	// `.engineering` was JUST proven to be a real, non-symlink directory by the
-	// `isDirectory` check above.
+	// `directoryIdentity` check above.
 	//
 	// The init-marker read cannot unconditionally receive the same
 	// `containmentRoot`, though: `.tmp` is only ever present during an actual
@@ -187,17 +211,67 @@ export async function discoverProject(input: DiscoverProjectInput, deps: Discove
 	const { config, diagnostics } = decodeConfig(configText, '.engineering/ef.yaml')
 
 	if (!isExplicit) {
-		const cwdWorktree = await deps.findWorktreeRoot(input.cwd)
-		if (cwdWorktree.kind === 'git-unavailable')
-			return cwdWorktree
-
-		const withinOwnWorktree = cwdWorktree.kind === 'found' && isSameLocation(cwdWorktree.root, candidateRoot)
-		const withinDeclaredLinkedRepo = cwdWorktree.kind === 'found' && config !== null
-			&& config.linkedRepositories.some(descriptor => isSameLocation(path.join(candidateRoot, descriptor.path), cwdWorktree.root))
-
-		if (!withinOwnWorktree && !withinDeclaredLinkedRepo)
+		const association = await checkWorkingDirectoryAssociation({ cwd: input.cwd, candidateRoot, config }, deps)
+		if (association.kind === 'git-unavailable')
+			return association
+		if (association.kind === 'unassociated')
 			return { kind: 'unassociated', root: candidateRoot }
 	}
 
-	return { kind: 'resolved', root: candidateRoot, config, configDiagnostics: diagnostics }
+	return { kind: 'resolved', root: candidateRoot, config, configDiagnostics: diagnostics, engineeringIdentity }
+}
+
+// ---------------------------------------------------------------------------
+// Working-directory association (extracted for reuse -- Finding 5)
+// ---------------------------------------------------------------------------
+
+export type WorkingDirectoryAssociationResult
+	= | { kind: 'associated' }
+		| { kind: 'unassociated' }
+		| { kind: 'git-unavailable', message: string }
+
+export interface CheckWorkingDirectoryAssociationInput {
+	/** The working directory (absolute path) whose association is being decided. */
+	cwd: string
+	/** The discovered project root `cwd` is being checked against. */
+	candidateRoot: string
+	/** The configuration to check `cwd`'s association against. */
+	config: Config | null
+}
+
+/**
+ * Decide whether `cwd` is either inside the project's own Git worktree
+ * (`candidateRoot` itself) or inside one of `config`'s declared linked
+ * repositories (11-filesystem-and-config.md "Project Discovery": "validate
+ * working-directory association with the project").
+ *
+ * Extracted out of `discoverProject`'s own inline logic (Finding 5, "single
+ * observation") so a caller that later re-reads configuration from a
+ * DIFFERENT, potentially fresher source than this module's own
+ * `ef.yaml` read -- e.g. `application/snapshot.ts`'s
+ * `loadSnapshotFromWorkingTree`, whose own separate read is the sole
+ * authoritative config source for every command semantic downstream of it
+ * (see `cli/project-context.ts`'s `ProjectContext.config` doc) -- can RE-RUN
+ * this EXACT decision against that later, fresher `config`, rather than
+ * relying on a decision `discoverProject` already made against its OWN,
+ * potentially STALE observation of `ef.yaml`. Without re-running this check,
+ * an in-place rewrite landing between `discoverProject`'s read and a later
+ * snapshot load could let a command proceed from a nested worktree that was
+ * only ever associated according to a configuration that no longer exists by
+ * the time the rest of the command actually executes.
+ *
+ * `discoverProject` itself is one such caller (using its own, first-read
+ * `config`); this function performs no filesystem access of its own beyond
+ * `deps.findWorktreeRoot`.
+ */
+export async function checkWorkingDirectoryAssociation(input: CheckWorkingDirectoryAssociationInput, deps: DiscoverProjectDeps): Promise<WorkingDirectoryAssociationResult> {
+	const cwdWorktree = await deps.findWorktreeRoot(input.cwd)
+	if (cwdWorktree.kind === 'git-unavailable')
+		return cwdWorktree
+
+	const withinOwnWorktree = cwdWorktree.kind === 'found' && isSameLocation(cwdWorktree.root, input.candidateRoot)
+	const withinDeclaredLinkedRepo = cwdWorktree.kind === 'found' && input.config !== null
+		&& input.config.linkedRepositories.some(descriptor => isSameLocation(path.join(input.candidateRoot, descriptor.path), cwdWorktree.root))
+
+	return (withinOwnWorktree || withinDeclaredLinkedRepo) ? { kind: 'associated' } : { kind: 'unassociated' }
 }

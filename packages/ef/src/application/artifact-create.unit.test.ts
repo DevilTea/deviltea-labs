@@ -75,11 +75,12 @@ function emptySnapshot(): ProjectSnapshot {
 	}
 }
 
-function fakeArtifactWithId(id: string): SnapshotArtifactFile {
+/** A well-formed, fully decoded artifact file declaring `rawId` at `path` (defaults to the canonical REQ path for `rawId`). */
+function fakeArtifactWithRawId(rawId: string, path: string = `.engineering/req/${rawId}.md`): SnapshotArtifactFile {
 	const envelope: Envelope = {
 		schema: SCHEMA_BY_TYPE.requirement,
 		type: 'requirement',
-		id,
+		id: rawId,
 		title: 'Fake existing artifact',
 		status: 'draft',
 		summary: 'Used only to seed the visible-ID set for allocation tests.',
@@ -89,7 +90,7 @@ function fakeArtifactWithId(id: string): SnapshotArtifactFile {
 		extensions: {},
 	}
 	return {
-		path: `.engineering/req/${id}.md`,
+		path,
 		bytes: new Uint8Array(),
 		text: '',
 		frontmatter: { ok: true, frontmatterText: '', bodyText: '', bodyStartLine: 2 },
@@ -100,10 +101,14 @@ function fakeArtifactWithId(id: string): SnapshotArtifactFile {
 	}
 }
 
-/** An artifact file whose frontmatter/envelope never decoded (`envelope` stays `undefined`), as `snapshot.ts` produces for a file that fails the frontmatter split. */
-function fakeArtifactWithUndecodedEnvelope(id: string): SnapshotArtifactFile {
+function fakeArtifactWithId(id: string): SnapshotArtifactFile {
+	return fakeArtifactWithRawId(id)
+}
+
+/** An artifact file whose frontmatter/envelope never decoded (`envelope` stays `undefined`), as `snapshot.ts` produces for a file that fails the frontmatter split. `path` defaults to the canonical REQ path for `id`. */
+function fakeArtifactWithUndecodedEnvelope(id: string, path: string = `.engineering/req/${id}.md`): SnapshotArtifactFile {
 	return {
-		path: `.engineering/req/${id}.md`,
+		path,
 		bytes: new Uint8Array(),
 		text: '',
 		frontmatter: { ok: false, diagnostic: { code: 'EF-ENV-001', severity: 'error', message: 'Frontmatter is missing.', location: { line: 1, column: 1 }, related: [] } },
@@ -111,6 +116,25 @@ function fakeArtifactWithUndecodedEnvelope(id: string): SnapshotArtifactFile {
 		envelope: undefined,
 		body: undefined,
 		sections: undefined,
+	}
+}
+
+/**
+ * An artifact file whose envelope decoded to completion but whose top-level
+ * `id` key was duplicated in the frontmatter (`EF-ENV-005`, `field: 'id'`):
+ * the decoded `envelope.id` reflects only the FIRST occurrence, so the
+ * file's true declared identity is ambiguous.
+ */
+function fakeArtifactWithDuplicateIdKey(rawId: string, path: string = `.engineering/req/${rawId}.md`): SnapshotArtifactFile {
+	const base = fakeArtifactWithRawId(rawId, path)
+	return {
+		...base,
+		document: {
+			document: {} as never,
+			mapping: undefined,
+			diagnostics: [{ code: 'EF-ENV-005', severity: 'error', message: 'Duplicate mapping key \'id\'.', field: 'id', related: [] }],
+			locate: () => undefined,
+		},
 	}
 }
 
@@ -171,16 +195,77 @@ describe('computeCreatePlan', () => {
 			.toBe('REQ-045')
 	})
 
-	it('ignores artifacts whose envelope never decoded when allocating the next ID', () => {
-		const snapshot = emptySnapshot()
-		snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('REQ-999'), fakeArtifactWithId('REQ-005'))
-		const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
-		expect(result.ok)
-			.toBe(true)
-		if (!result.ok)
-			return
-		expect(result.plan.id)
-			.toBe('REQ-006')
+	// FINDING 3 (P1): the allocator contract requires inspecting every
+	// visible Artifact for the requested prefix before selecting a candidate
+	// (02-identity.md Allocation). An identity-uncertain file's true numeric
+	// component is not actually known, so silently skipping it and issuing an
+	// ID anyway could reuse or fall behind a hidden higher reservation.
+	// Allocation must instead refuse (typed-incomplete) rather than guess.
+	describe('identity-uncertain envelopes block allocation instead of being silently skipped (Finding 3)', () => {
+		it('refuses (rather than silently skipping) when a canonical-directory artifact never decoded its envelope', () => {
+			const snapshot = emptySnapshot()
+			snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('REQ-999'), fakeArtifactWithId('REQ-005'))
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('allocation-incomplete')
+			expect(result.ok === false && result.message)
+				.toContain('.engineering/req/REQ-999.md')
+		})
+
+		it('refuses REQ allocation for a canonical REQ-999.md with malformed frontmatter even though REQ-001 decodes validly (would otherwise wrongly yield REQ-002)', () => {
+			// The exact reproduction from the review finding.
+			const snapshot = emptySnapshot()
+			snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('REQ-999'), fakeArtifactWithId('REQ-001'))
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('allocation-incomplete')
+		})
+
+		it('refuses allocation when a canonical-directory envelope decoded but its ID does not parse (EF-ID-001 class)', () => {
+			const snapshot = emptySnapshot()
+			snapshot.artifacts.push(fakeArtifactWithRawId('not-an-id', '.engineering/req/not-an-id.md'), fakeArtifactWithId('REQ-001'))
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('allocation-incomplete')
+		})
+
+		it('refuses allocation when a canonical-directory envelope decoded but its numeric component is not canonical (EF-ID-003 class)', () => {
+			const snapshot = emptySnapshot()
+			snapshot.artifacts.push(fakeArtifactWithRawId('REQ-0007', '.engineering/req/REQ-0007.md'), fakeArtifactWithId('REQ-001'))
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('allocation-incomplete')
+		})
+
+		it('refuses allocation when a canonical-directory file lost its declared id to a duplicate frontmatter key (EF-ENV-005 on `id`)', () => {
+			const snapshot = emptySnapshot()
+			snapshot.artifacts.push(fakeArtifactWithDuplicateIdKey('REQ-005'), fakeArtifactWithId('REQ-001'))
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('allocation-incomplete')
+		})
+
+		it('does not block REQ allocation when the identity-uncertain file sits under a different type\'s canonical directory', () => {
+			const snapshot = emptySnapshot()
+			snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('ADR-999', '.engineering/adr/ADR-999.md'), fakeArtifactWithId('REQ-005'))
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			expect(result.ok)
+				.toBe(true)
+			if (!result.ok)
+				return
+			expect(result.plan.id)
+				.toBe('REQ-006')
+		})
 	})
 
 	it('rejects a multi-line title', () => {
@@ -636,6 +721,108 @@ describe('applyCreatePlan', () => {
 			.toEqual([])
 		expect(await fs.readdir(backupPath))
 			.toEqual([])
+	})
+
+	// FINDING 2 (P0): pre-publication chain checks alone cannot catch a swap
+	// triggered from strictly INSIDE `writeTempFileComplete`/`publishViaHardLink`
+	// themselves -- by the time any pre-check runs again, the call has already
+	// returned. Only a POST-write/POST-publication re-verification, bound back
+	// to the temporary file's own `fstat` identity, catches this.
+	describe('post-write and post-publication identity verification (Finding 2 regression)', () => {
+		it('retracts the publish (ownership-proven) and reports a typed race when the managed chain is swapped for a different real directory from INSIDE publishViaHardLink, even though the published content is provably intact', async () => {
+			const plan = computePlanOrThrow()
+			const targetPath = path.join(tempDir, plan.path)
+			const shadowDirs: string[] = []
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
+					const realResult = await defaultApplyCreatePlanDeps.publishViaHardLink(tempPathArg, targetPathArg)
+					if (realResult.outcome === 'published') {
+						// Triggered from INSIDE this dependency itself, after the real
+						// hard link genuinely succeeded: hard-link the just-published
+						// file into a separate directory (preserving its exact inode),
+						// then swap that directory in for the type directory. The file
+						// at `targetPathArg` still has exactly the bytes/inode this
+						// invocation wrote -- only the managed chain identity around it
+						// changed.
+						const typeDirPath = path.dirname(targetPathArg)
+						const shadowDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-shadow-'))
+						shadowDirs.push(shadowDir)
+						await fs.link(targetPathArg, path.join(shadowDir, path.basename(targetPathArg)))
+						await fs.rm(typeDirPath, { recursive: true, force: true })
+						await fs.rename(shadowDir, typeDirPath)
+					}
+					return realResult
+				},
+			}
+
+			try {
+				const result = await applyCreatePlan(plan, tempDir, deps)
+
+				expect(result.applied)
+					.toBe(false)
+				expect(result.applied === false && result.outcome)
+					.toBe('raced')
+
+				// The retraction removed only the entry it could prove (by inode)
+				// was its own just-published content; the substituted directory
+				// itself is otherwise left as the race left it (empty, here).
+				expect(await fs.readdir(path.dirname(targetPath)))
+					.toEqual([])
+
+				const leftoverTempFiles = (await fs.readdir(path.dirname(targetPath)))
+					.filter(name => name.includes('.tmp-'))
+				expect(leftoverTempFiles)
+					.toEqual([])
+			}
+			finally {
+				for (const dir of shadowDirs)
+					await fs.rm(dir, { recursive: true, force: true })
+			}
+		})
+
+		it('reports applied+incomplete (never a plain success) and leaves foreign content untouched when the type directory is swapped for one already containing a different file at the temp name, from INSIDE publishViaHardLink before delegating to the real primitive', async () => {
+			const plan = computePlanOrThrow()
+			const targetPath = path.join(tempDir, plan.path)
+			const attackerContent = 'attacker content this invocation never wrote'
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
+					// Triggered from INSIDE this dependency, BEFORE delegating to the
+					// real primitive: swap the type directory for a different real
+					// directory that already contains a file at the exact temporary
+					// name, with content this invocation never wrote. The real
+					// `link()` call below then resolves both paths fresh, through the
+					// swapped directory, and succeeds -- but hard-links the canonical
+					// target to the WRONG file.
+					const typeDirPath = path.dirname(targetPathArg)
+					const victimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-victim-'))
+					await fs.writeFile(path.join(victimDir, path.basename(tempPathArg)), attackerContent)
+					await fs.rm(typeDirPath, { recursive: true, force: true })
+					await fs.rename(victimDir, typeDirPath)
+					return defaultApplyCreatePlanDeps.publishViaHardLink(tempPathArg, targetPathArg)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect('outcome' in result && result.outcome)
+				.toBe('incomplete')
+
+			// The foreign content must never be deleted (ownership could not be
+			// proven by inode identity) and must never be misreported as the
+			// planned bytes.
+			const onDisk = await fs.readFile(targetPath, 'utf8')
+			expect(onDisk)
+				.toBe(attackerContent)
+			expect(onDisk)
+				.not.toBe(new TextDecoder()
+					.decode(plan.bytes))
+		})
 	})
 
 	it('produces a draft file that validates as a draft under full snapshot validation', async () => {
