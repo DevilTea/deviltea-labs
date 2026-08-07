@@ -19,6 +19,7 @@
  * table, and "missing" is the closest fit.
  */
 
+import type { SnapshotValidationResult } from '../../application/snapshot-validation'
 import type { GitExecutor } from '../../git/executor'
 import type { CommandOutcome } from '../command-outcome'
 import path from 'pathe'
@@ -53,6 +54,40 @@ function failure(exitCode: 1 | 2, message: string): CommandOutcome {
 
 function isExternalLocation(location: string): boolean {
 	return location.startsWith('http://') || location.startsWith('https://')
+}
+
+/**
+ * Whether `validation.resourceOwnership` can be trusted as a COMPLETE,
+ * project-wide index of every local Resource location's owner(s) (Finding 3,
+ * ninth round). `resourceOwnership` is built only from envelopes that decoded
+ * to completion (`snapshot-validation.ts`), so it is silently blind to a
+ * second Artifact anywhere in the project whose true declared `resources`
+ * content is not what was actually indexed:
+ *
+ * - An Artifact whose envelope never decoded at all
+ *   (`!validation.graphTrustworthy`) is fully present in the bound snapshot,
+ *   yet contributes nothing to `resourceOwnership` -- its raw, unparsed bytes
+ *   could still declare the exact `location` this command is about to read.
+ * - An Artifact whose top-level `resources` key was itself duplicated
+ *   (`EF-ENV-005`, recorded per-field in `validation.envelopeFieldLossById`)
+ *   has one candidate `resources` array silently discarded by decoding's
+ *   first-occurrence selection -- the discarded array, not the one actually
+ *   indexed, could be the one declaring `location`.
+ *
+ * Either condition means exclusive local-Resource ownership can never be
+ * proven project-wide, regardless of what `resourceOwnership.get(location)`
+ * itself currently reports for this one `location` -- the missing/discarded
+ * declaration could belong to any Artifact, not only ones already known to
+ * exist for this exact location.
+ */
+function resourceOwnershipWitnessEstablished(validation: SnapshotValidationResult): boolean {
+	if (!validation.graphTrustworthy)
+		return false
+	for (const fields of validation.envelopeFieldLossById.values()) {
+		if (fields.has('resources'))
+			return false
+	}
+	return true
 }
 
 export async function runResourceReadCommand(ownerId: string, location: string, options: ResourceReadOptions, deps: ResourceReadDeps): Promise<CommandOutcome> {
@@ -109,6 +144,17 @@ export async function runResourceReadCommand(ownerId: string, location: string, 
 	// Without this check, a location claimed by more than one Artifact could
 	// still be read to completion through whichever claimant happens to be
 	// named, even though the repository is invalid.
+	//
+	// `resourceOwnership` itself, though, is derived only from envelopes that
+	// decoded to completion (Finding 3, ninth round): before trusting whatever
+	// it reports for `location` specifically, the project-wide witness that
+	// index depends on must itself be establishable -- otherwise a second
+	// Artifact's true declared content (undecoded entirely, or discarded by a
+	// duplicate `resources` key) could be hiding a claimant `owners` below
+	// would never see.
+	if (!resourceOwnershipWitnessEstablished(validation))
+		return failure(1, 'Repository-wide Resource ownership could not be established as trustworthy (an undecoded or identity-uncertain Artifact exists, or a Resource-owning Artifact\'s \'resources\' field is ambiguous), so exclusive ownership cannot be verified.')
+
 	const owners = validation.resourceOwnership.get(location) ?? []
 	if (owners.length !== 1 || owners[0] !== ownerId)
 		return failure(1, `Location '${location}' has more than one declared owner, which repository integrity forbids.`)

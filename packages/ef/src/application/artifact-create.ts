@@ -51,7 +51,7 @@ import type { Diagnostic } from '../domain/diagnostics'
 import type { ArtifactType, Envelope } from '../domain/model'
 import type { FileIdentity } from '../platform/fs-facts'
 import type { SymlinkFact } from '../repository/symlinks'
-import type { ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
+import type { LoadSnapshotResult, ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
 import { mkdir as fsMkdir, unlink as fsUnlink, lstat } from 'node:fs/promises'
 import path from 'pathe'
 import { validateBody } from '../domain/body-schemas'
@@ -65,6 +65,7 @@ import { directoryIdentity, isDirectory, isRegularFile, isSymlink, readFileBytes
 import { publishViaHardLink, writeTempFileComplete } from '../platform/hard-link-publish'
 import { generateNonce } from '../platform/nonce'
 import { checkManagedSymlinks } from '../repository/symlinks'
+import { loadSnapshotFromWorkingTree } from './snapshot'
 
 // ---------------------------------------------------------------------------
 // Type tokens and required skeleton headings (13-cli-contract.md, 08-artifact-schemas.md)
@@ -112,7 +113,7 @@ export interface ComputeCreatePlanInput {
 }
 
 export interface ArtifactCreatePlan {
-	type: ArtifactType
+	type: Exclude<ArtifactType, 'project'>
 	id: string
 	/** Project-relative canonical path, `/` separators. */
 	path: string
@@ -386,6 +387,18 @@ export interface ApplyCreatePlanDeps {
 	 * managed-directory-chain checkpoints.
 	 */
 	fileIdentity: (path: string) => Promise<FileIdentity | undefined>
+	/**
+	 * A fresh, bounded re-enumeration of the full Artifact discovery scope
+	 * (Finding 2, ninth round) -- never the possibly-stale `snapshot`
+	 * `computeCreatePlan` was originally computed from. Used immediately
+	 * before publication to re-run the identical identity/allocation witness
+	 * that computed the plan in the first place (see
+	 * `verifyAllocationStillValid`), so a competing writer that made a higher
+	 * same-prefix Artifact (or an identity-uncertain file) visible strictly
+	 * between plan computation and this call is caught even though it never
+	 * touches the plan's own candidate `targetPath` at all.
+	 */
+	loadSnapshot: (projectRoot: string) => Promise<LoadSnapshotResult>
 }
 
 async function defaultFileIdentity(target: string): Promise<FileIdentity | undefined> {
@@ -417,6 +430,7 @@ export const defaultApplyCreatePlanDeps: ApplyCreatePlanDeps = {
 	},
 	directoryIdentity,
 	fileIdentity: defaultFileIdentity,
+	loadSnapshot: projectRoot => loadSnapshotFromWorkingTree(projectRoot),
 }
 
 export type ApplyCreatePlanResult
@@ -582,6 +596,60 @@ async function safeUnlink(deps: ApplyCreatePlanDeps, tempPath: string): Promise<
 	}
 }
 
+export type VerifyAllocationStillValidResult
+	= | { ok: true }
+		| { ok: false, message: string }
+
+/**
+ * Re-establish, immediately before publication, that `plan`'s requested
+ * prefix's allocation is still exactly what `computeCreatePlan` computed it
+ * to be (Finding 2, ninth round; 13-cli-contract.md "verify again that
+ * allocation and the canonical target remain valid"; 02-identity.md
+ * Allocation: the next ID must be exactly max(visible same-prefix
+ * component) + 1).
+ *
+ * The pre-publication `targetExists` re-check alone proves only that THIS
+ * invocation's own candidate ID is still unclaimed at its own canonical
+ * path -- it proves nothing about whether some OTHER writer made a HIGHER
+ * same-prefix Artifact visible (at a DIFFERENT path) between plan
+ * computation and this call. Concretely: the plan selected `REQ-002`;
+ * before this call runs, another writer publishes a valid `REQ-999`. Every
+ * `targetExists` check against `REQ-002.md` keeps passing (that exact path
+ * was never touched), yet the true required next allocation is now
+ * `REQ-1000`, not `REQ-002` -- publishing `REQ-002` anyway would violate
+ * 02-identity.md's max(visible)+1 rule.
+ *
+ * Re-enumerates the FULL discovery scope fresh via `deps.loadSnapshot`
+ * (never the `snapshot` `plan` was originally computed from, which can only
+ * grow staler the longer `applyCreatePlan` runs) and re-runs the identical
+ * witness `computeCreatePlan` used: the identity-uncertainty scan
+ * (`findIdentityUncertainArtifact`) must still be clean, and `nextId` over
+ * every now-visible same-prefix ID must still equal `plan.id` exactly. A
+ * failure of either check, or of the re-enumeration itself, is reported as
+ * a rejection -- the caller treats this the same as any other typed race.
+ */
+async function verifyAllocationStillValid(deps: ApplyCreatePlanDeps, projectRoot: string, plan: ArtifactCreatePlan): Promise<VerifyAllocationStillValidResult> {
+	const reloaded = await deps.loadSnapshot(projectRoot)
+	if (!reloaded.ok) {
+		return { ok: false, message: `The allocation for '${plan.path}' could not be re-verified immediately before publication: ${reloaded.message}` }
+	}
+
+	const snapshot = reloaded.snapshot
+	const prefix = ID_PREFIX_BY_TYPE[plan.type]
+
+	const uncertainArtifact = findIdentityUncertainArtifact(snapshot)
+	if (uncertainArtifact) {
+		return { ok: false, message: `Cannot publish '${plan.path}': '${uncertainArtifact.path}' does not have a decodable, identity-certain envelope, so the greatest visible '${prefix}' component is no longer known.` }
+	}
+
+	const currentNextId = domainNextId(prefix, collectVisibleIds(snapshot))
+	if (currentNextId !== plan.id) {
+		return { ok: false, message: `The next '${prefix}' allocation changed from '${plan.id}' to '${currentNextId}' immediately before publication; another writer made a higher '${prefix}' Artifact visible.` }
+	}
+
+	return { ok: true }
+}
+
 /**
  * Perform the exact 13-cli-contract.md "Draft Artifact hard-link
  * publication" protocol for an already-computed `plan`. `projectRoot` is the
@@ -662,6 +730,23 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	if (await targetExists(deps, targetPath)) {
 		await safeUnlink(deps, tempPath)
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
+	}
+
+	// Post-write allocation re-verification (Finding 2, ninth round): the
+	// `targetExists` check just above proves only that THIS invocation's own
+	// candidate path is still unclaimed -- it says nothing about whether the
+	// requested prefix's ALLOCATION itself remains valid. Another writer can
+	// make a higher same-prefix Artifact visible (at a different path)
+	// strictly between plan computation and this call without ever touching
+	// `targetPath`; see `verifyAllocationStillValid`'s own doc for the exact
+	// REQ-002/REQ-999 reproduction. Any change here invalidates the plan --
+	// reported as the same typed race-rejection class as an already-published
+	// target (13-cli-contract.md's exit `1` "a race that invalidates a
+	// mutation plan").
+	const allocationCheck = await verifyAllocationStillValid(deps, projectRoot, plan)
+	if (!allocationCheck.ok) {
+		await safeUnlink(deps, tempPath)
+		return { applied: false, outcome: 'raced', message: allocationCheck.message }
 	}
 
 	// Re-verify again immediately before hard-link publication: a symlink or

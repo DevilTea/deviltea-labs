@@ -1824,3 +1824,283 @@ Result: bogus
 		}
 	})
 })
+
+describe('computeHistory: Artifact identity trust across the whole history (Finding 4, 02-identity.md permanent retention)', () => {
+	it('fails with untrusted-data when the target ID appears at a non-canonical discovery-scope path before it ever appears at its own canonical path', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-wrong-path-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// REQ-001 first appears at the WRONG canonical directory
+			// (`.engineering/prd/`, not `.engineering/req/`) -- still a
+			// perfectly well-formed `requirement` envelope declaring `id:
+			// REQ-001`, just sitting at a non-canonical Artifact discovery-scope
+			// path. `envelopeAt(treeMap, canonicalPath)` alone would see nothing
+			// at REQ-001's own canonical path at this commit and treat this as
+			// ordinary "not yet created" absence -- silently making this
+			// commit's real content invisible to the walk.
+			await writeFile(dir, '.engineering/prd/REQ-001.md', reqMd('REQ-001', 'active'))
+			const wrongPathOid = commitAll(dir, 'REQ-001 first appears at a non-canonical discovery-scope path')
+
+			// REQ-001 is later "moved" to its own canonical path.
+			await fs.rm(path.join(dir, '.engineering/prd/REQ-001.md'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const canonicalOid = commitAll(dir, 'REQ-001 moved to its canonical path')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, canonicalOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(wrongPathOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when an issued target physically disappears and later reappears at its own canonical path', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-delete-readd-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			commitAll(dir, 'bootstrap, REQ-001 present from the start')
+
+			// REQ-001 is physically deleted -- 02-identity.md forbids this for
+			// an issued ID ("its Artifact MUST remain in the authoritative
+			// files ... rather than be physically deleted"). Without this
+			// fix, `previousEnvelope` would simply reset to `undefined` here.
+			await fs.rm(path.join(dir, '.engineering/req/REQ-001.md'))
+			const deletedOid = commitAll(dir, 'REQ-001 physically deleted')
+
+			// REQ-001 reappears at its own canonical path. Without this fix, this
+			// would be silently accepted as a fresh `absent -> present` creation.
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const reappearOid = commitAll(dir, 'REQ-001 reappears at its canonical path')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, reappearOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(deletedOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: CHG historical lifecycle/retention (Finding 5, 03-lifecycle.md ALLOWED_TRANSITIONS)', () => {
+	it('fails with untrusted-data when a CHG regresses from a terminal `retired` status back to `completed`', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-retired-to-completed-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 first appears already `retired` (a legitimate first
+			// appearance -- Core permits a CHG to be abandoned without ever
+			// completing). This is a terminal status.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'retired', '  - type: modifies\n    target: REQ-001'))
+			commitAll(dir, 'CHG-001 first appears retired')
+
+			// CHG-001 later flips to `completed` and declares a qualifying
+			// effect -- `retired -> completed` is not in `ALLOWED_TRANSITIONS`
+			// for `change` (only `draft -> completed` and `draft -> retired`
+			// exist), and a terminal status must never regress. Checking only
+			// the IMMEDIATELY PREVIOUS status (as before this fix) would see
+			// `wasCompleted === false` here and wrongly treat this as a fresh,
+			// trustworthy completion.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const regressedOid = commitAll(dir, 'CHG-001 illegally regresses retired -> completed')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, regressedOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a completed CHG is physically deleted and later reappears completed again', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-completed-delete-reappear-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 completes, genuinely introducing REQ-001 (absent -> present:
+			// REQ-001 does not exist anywhere before this commit).
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			commitAll(dir, 'CHG-001 completes, introduces REQ-001')
+
+			// CHG-001 is physically deleted -- an issued, terminal CHG can never
+			// disappear (02-identity.md).
+			await fs.rm(path.join(dir, '.engineering/chg/CHG-001.md'))
+			const deletedOid = commitAll(dir, 'CHG-001 physically deleted after completing')
+
+			// CHG-001 reappears, again `completed`, declaring another effect.
+			// Checking only the immediately previous commit (as before this
+			// fix) would see no prior status at all here (the disappearance
+			// having erased it from tracking) and wrongly accept this as a
+			// fresh completion.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active')
+				.replace('Body text', 'Revised body text'))
+			const reappearOid = commitAll(dir, 'CHG-001 reappears completed')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, reappearOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(deletedOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: relation compatibility matrix applied to the historical target type (Finding 6, 04-relations.md RELATION_COMPATIBILITY)', () => {
+	it('fails with untrusted-data when a completing CHG declares a `modifies` effect targeting another CHG (a CHG cannot effect a CHG)', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-effects-chg-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			const chg002Draft = `---
+schema: ef/change@1
+type: change
+id: CHG-002
+title: Title of CHG-002
+status: draft
+summary: Summary of CHG-002.
+tags: []
+relations: []
+resources: []
+---
+
+## Rationale
+
+Rationale text.
+`
+			await writeFile(dir, '.engineering/chg/CHG-002.md', chg002Draft)
+			commitAll(dir, 'CHG-002 created (draft)')
+
+			// CHG-002's own content changes in the SAME commit as CHG-001's
+			// completion, so CHG-002's aggregate genuinely transitioned
+			// (`actualEffect` would otherwise classify this as a truthful
+			// `modifies`). CHG-001 completes declaring `modifies -> CHG-002` --
+			// forbidden by `RELATION_COMPATIBILITY['modifies'].targets` (never
+			// includes `change`: a CHG cannot effect another CHG). Without the
+			// compatibility check, this would pass the existing `actualEffect`
+			// truth check and be emitted as an impossible completed effect for
+			// CHG-002's own history.
+			await writeFile(dir, '.engineering/chg/CHG-002.md', chg002Draft.replace('Rationale text.', 'Revised rationale text.'))
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: CHG-002'))
+			const completingOid = commitAll(dir, 'CHG-001 completes, illegally declaring modifies -> CHG-002')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'CHG-002', 'change', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: genuine transition required for a `retires` effect (Finding 7, 07-change-transactions.md)', () => {
+	it('fails with untrusted-data when a completing CHG declares `retires` against a target that is already terminal (retired) and byte-identical', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-retires-already-retired-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// REQ-001 is created POST-bootstrap already `retired` -- unlike the
+			// bootstrap boundary itself (which forbids any terminal knowledge
+			// Artifact, EF-VAL-010), a later commit has no such restriction, so
+			// this is a legitimate way for the target to already be terminal
+			// before the completing commit below.
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'retired'))
+			commitAll(dir, 'REQ-001 created already retired')
+
+			// REQ-001's own file is left BYTE-FOR-BYTE UNCHANGED -- no genuine
+			// transition into `retired` occurs in this commit (it already WAS
+			// retired) -- while CHG-001 newly completes declaring
+			// `retires -> REQ-001`. `currentEnvelope.status === 'retired'`
+			// alone (the previous implementation) would still match, ignoring
+			// that `previousEnvelope.status` was ALREADY `retired`.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: retires\n    target: REQ-001'))
+			const completingOid = commitAll(dir, 'chg-001 completes claiming retires against an already-retired, unchanged target')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: exactly-once target claim across the whole commit (Finding 8, EF-CHG-007)', () => {
+	it('fails with untrusted-data when two different CHGs both newly complete in the same commit and both claim the same target', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-two-chgs-same-target-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 and CHG-002 BOTH newly complete in this SAME commit, and
+			// BOTH declare a qualifying `modifies -> REQ-001` effect. Checked
+			// only within one CHG at a time (as before this fix), each
+			// independently sees a truthful `actualEffect` (REQ-001 genuinely
+			// transitions `draft -> active` in this commit) and both would be
+			// pushed -- violating the exactly-once rule (EF-CHG-007): multiple
+			// CHGs completing at the same integration boundary cannot claim the
+			// same target.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/chg/CHG-002.md', chgMd('CHG-002', 'completed', '  - type: modifies\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const completingOid = commitAll(dir, 'CHG-001 and CHG-002 both complete claiming REQ-001')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})

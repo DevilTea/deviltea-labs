@@ -22,24 +22,38 @@
  * that touch the target aggregate. Acceptable for EF Core v1's correctness
  * requirements; a real performance-sensitive implementation would want a
  * cheaper per-commit existence/oid probe instead.
+ *
+ * Finding 4 (02-identity.md permanent retention): the target's own aggregate
+ * lives at a small candidate path set as above, but PROVING `targetId` is not
+ * ALSO sitting at some other, non-canonical path (or has disappeared after
+ * having genuinely appeared) requires enumerating every OTHER Artifact
+ * candidate path this commit's Artifact discovery scope contains
+ * (`repository/layout.ts`'s own `listArtifactFiles`) and decoding each one far
+ * enough to read its declared `id`. This is therefore an ADDITIONAL, full
+ * discovery-scope decode pass per consumed commit, on top of the small
+ * candidate-path comparison above -- a real cost, accepted here for
+ * correctness (identity trust) rather than working around it with a cheaper
+ * but weaker probe.
  */
 
 import type { Diagnostic } from '../domain/diagnostics'
 import type { ArtifactType, Envelope, Status } from '../domain/model'
 import type { GitRepository, GitTreeEntry } from '../git/repository'
+import type { WalkEntry } from '../platform/fs-facts'
 import type { HistoryCommitData, HistoryEffectData } from './query-types'
 import type { SnapshotArtifactRecord } from './snapshot-validation'
 import { validateBody } from '../domain/body-schemas'
 import { decodeEnvelope } from '../domain/envelope'
 import { validateFilename } from '../domain/identity'
 import { validateStatus } from '../domain/lifecycle'
-import { compareBytewise } from '../domain/model'
+import { ALLOWED_TRANSITIONS, compareBytewise, RELATION_COMPATIBILITY, TERMINAL_STATUSES } from '../domain/model'
 import { validateRelationEntries } from '../domain/relations'
 import { validateResourceDescriptors } from '../domain/resources'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
 import { extractSections, parseBody } from '../parsing/markdown'
 import { detectInvalidUtf8 } from '../platform/text-checks'
 import { decodeConfig } from '../repository/config'
+import { listArtifactFiles } from '../repository/layout'
 import { buildArtifactSummary, canonicalArtifactPath } from './query-projection'
 import { loadSnapshotFromCommit } from './snapshot'
 import { rawArrayField } from './snapshot-raw-fields'
@@ -183,6 +197,53 @@ function isValidLocalResourceLocation(location: string): boolean {
 		return false
 	return !location.split('/')
 		.some(segment => segment === '' || segment === '.' || segment === '..')
+}
+
+/**
+ * Finding 4 (10-query-and-trace.md; 02-identity.md "ID immutability and
+ * permanent retention"): the target's own canonical-path lookup
+ * (`envelopeAt(treeMap, canonicalPath)`) only proves what sits at THAT one
+ * path -- it says nothing about whether `targetId` is ALSO present at some
+ * OTHER path this commit's Artifact discovery scope contains (a wrong/
+ * non-canonical placement) or has disappeared entirely after having once
+ * been genuinely present (a physical deletion, which 02-identity.md
+ * forbids: "its Artifact MUST remain in the authoritative files ... rather
+ * than be physically deleted"). Reusing `repository/layout.ts`'s own
+ * `listArtifactFiles` -- the same canonical-layout candidate enumeration
+ * `application/snapshot.ts` uses for the CURRENT snapshot -- over a
+ * `WalkEntry[]` synthesized from this historical commit's own tree entries
+ * gives the exact same "Artifact discovery scope" for a historical commit,
+ * without redefining that scope's rules here.
+ */
+function engineeringWalkEntries(treeMap: ReadonlyMap<string, GitTreeEntry>): WalkEntry[] {
+	const entries: WalkEntry[] = []
+	for (const entry of treeMap.values()) {
+		if (entry.pathValid === false)
+			// Already reported separately by `hasInvalidUtf8PathUnderEngineering`
+			// (which runs, and can already return `untrusted-data`, before this
+			// scan is ever reached for a given commit) -- never a genuine
+			// discovery-scope candidate here.
+			continue
+		if (entry.path !== '.engineering' && !entry.path.startsWith('.engineering/'))
+			continue
+		if (entry.path === '.engineering')
+			continue
+		const isDirectory = entry.type === 'tree'
+		const isSymlink = entry.mode === '120000'
+		const isRegularFile = !isDirectory && !isSymlink && entry.type === 'blob'
+		entries.push({
+			relativePath: entry.path.slice('.engineering/'.length),
+			isRegularFile,
+			isDirectory,
+			isSymlink,
+		})
+	}
+	return entries
+}
+
+/** Every canonical Artifact candidate path (`listArtifactFiles`' own "Artifact discovery scope") visible in this historical commit's tree. */
+function artifactDiscoveryPaths(treeMap: ReadonlyMap<string, GitTreeEntry>): string[] {
+	return listArtifactFiles(engineeringWalkEntries(treeMap)).artifactFiles
 }
 
 export interface HistoryOutcome {
@@ -411,7 +472,25 @@ export async function computeHistory(
 
 	let previousTreeMap: Map<string, GitTreeEntry> | undefined
 	let previousEnvelope: Envelope | undefined
-	let previousChgStatus = new Map<string, Status>()
+	// Finding 4: whether `targetId` has EVER been observed present (at its own
+	// canonical path, with matching type) at any consumed commit so far --
+	// never reset per commit, unlike `previousEnvelope` (which only reflects
+	// the immediately preceding commit). Once true, a later commit where the
+	// target is absent from its entire Artifact discovery scope is a physical
+	// deletion of an issued ID (02-identity.md forbids this), not ordinary
+	// "not yet created" absence, and must fail the query rather than silently
+	// resetting `previousEnvelope` back to `undefined` and letting a later
+	// re-appearance be accepted as a fresh `introduces`.
+	let targetEverAppeared = false
+	// Finding 5 (03-lifecycle.md `ALLOWED_TRANSITIONS`; 07-change-transactions.md):
+	// every CHG id's own MOST RECENTLY OBSERVED status across the WHOLE walk so
+	// far -- never reset per commit (unlike the previous `previousChgStatus`/
+	// `currentChgStatus` pair, which only ever compared one commit against its
+	// immediate predecessor and therefore forgot a CHG entirely the moment it
+	// was absent from even one commit's tree). Read as `priorStatus` before
+	// this commit's own occurrence of a given CHG id is processed below, then
+	// updated to that occurrence's status.
+	const chgLifecycleStatus = new Map<string, Status>()
 
 	const commits: HistoryCommitData[] = []
 	const effects: HistoryEffectData[] = []
@@ -456,10 +535,11 @@ export async function computeHistory(
 	//   skipped in favor of a later commit. See `evaluateBootstrapBoundary`'s
 	//   own doc for why `validateBootstrap` itself is not called here.
 	//
-	// `previousTreeMap`/`previousEnvelope`/`previousChgStatus` are left at
-	// their initial (empty) values through every skipped pre-boundary commit,
-	// so the first commit actually processed -- the bootstrap commit itself --
-	// is diffed exactly as if it were `oidsOldestFirst[0]`.
+	// `previousTreeMap`/`previousEnvelope`/`targetEverAppeared`/
+	// `chgLifecycleStatus` are left at their initial (empty) values through
+	// every skipped pre-boundary commit, so the first commit actually
+	// processed -- the bootstrap commit itself -- is diffed exactly as if it
+	// were `oidsOldestFirst[0]`.
 	let reachedBootstrap = false
 	let previousEfYamlIdentity: EfYamlTreeEntryIdentity | undefined
 	// The `integration_ref` the walk's OWN bootstrap commit declared -- the
@@ -679,6 +759,43 @@ export async function computeHistory(
 		if (currentEnvelope && (currentEnvelope.id !== targetId || currentEnvelope.type !== targetType))
 			return { kind: 'untrusted-data' }
 
+		// Finding 4: the canonical-path lookup above only proves what sits at
+		// THAT one path. `targetId` may ALSO (or instead) be sitting at some
+		// OTHER path this commit's Artifact discovery scope contains -- a
+		// wrong/non-canonical placement (10-query-and-trace.md: history uses
+		// the stable Artifact ID and MUST NOT rely only on current path) -- or
+		// have vanished entirely after having genuinely appeared before
+		// (02-identity.md: an issued ID's Artifact "MUST remain in the
+		// authoritative files ... rather than be physically deleted"). Any of
+		// these makes this commit's content untrustworthy for the aggregate
+		// this walk is diffing: a wrong-path or duplicate occurrence is
+		// ambiguous about which content is really `targetId`'s own, and a
+		// disappearance-then-later-reappearance would otherwise reset
+		// `previousEnvelope` to `undefined` and let the reappearance be
+		// silently accepted as a fresh `introduces` effect.
+		for (const candidatePath of artifactDiscoveryPaths(treeMap)) {
+			if (candidatePath === canonicalPath)
+				continue
+			const candidateLookup = await envelopeAt(treeMap, candidatePath)
+			if (candidateLookup.kind === 'error')
+				return { kind: 'untrusted-data' }
+			if (candidateLookup.kind === 'resolved' && candidateLookup.envelope.id === targetId)
+				// A second, non-canonical occurrence of `targetId` -- whether or
+				// not the canonical path ALSO currently resolves to it -- is
+				// either a wrong-path placement or an ambiguous duplicate; either
+				// way this walk cannot trust which content is `targetId`'s own.
+				return { kind: 'untrusted-data' }
+		}
+		if (currentEnvelope === undefined && targetEverAppeared)
+			// `targetId` was genuinely present (at its own canonical path) in an
+			// earlier consumed commit and is now absent everywhere in this
+			// commit's Artifact discovery scope -- a physical deletion of an
+			// issued ID, never a legitimate "not yet created" state at this
+			// point in the walk.
+			return { kind: 'untrusted-data' }
+		if (currentEnvelope !== undefined)
+			targetEverAppeared = true
+
 		// `ownedPathsOf` is about to treat every non-external declared Resource
 		// `location` as a literal path into this commit's tree (owned-set
 		// membership and OID comparison). This walk reuses the SAME
@@ -737,7 +854,21 @@ export async function computeHistory(
 			commits.push({ oid, changed_paths: changed.sort(compareBytewise) })
 
 		// ---- Engineering effects: newly completed CHGs targeting this Artifact ----
-		const currentChgStatus = new Map<string, Status>()
+		// Finding 8 (EF-CHG-007, exactly-once at one integration boundary):
+		// collected here, across EVERY completing CHG this commit's
+		// `.engineering/chg/` scan discovers, and only pushed to `effects`
+		// once the whole commit has been scanned -- never pushed one CHG at a
+		// time -- so that two DIFFERENT CHGs both newly completing in this
+		// SAME commit and both claiming `targetId` can be caught together
+		// (below) instead of each independently looking like a single valid
+		// claim.
+		const pendingEffectsThisCommit: HistoryEffectData[] = []
+		// Finding 5: which CHG ids this commit's tree actually contains (by
+		// declared id, not path) -- used after this scan to detect a
+		// previously-terminal (`completed`/`retired`) CHG that has vanished
+		// from this commit's tree entirely (02-identity.md: an issued ID's
+		// Artifact must never be physically deleted).
+		const presentChgIds = new Set<string>()
 		for (const path of treeMap.keys()) {
 			if (!path.startsWith('.engineering/chg/') || !path.endsWith('.md'))
 				continue
@@ -766,8 +897,8 @@ export async function computeHistory(
 
 			// This walk discovers every CHG purely by scanning blob paths under
 			// `.engineering/chg/` and indexes each one's completion status
-			// (`currentChgStatus`/`previousChgStatus`, keyed by the CHG's own
-			// declared `id`) across commits to detect the exact commit where it
+			// (`chgLifecycleStatus`, keyed by the CHG's own declared `id`)
+			// across the WHOLE walk to detect the exact commit where it
 			// transitions to `completed`. Unlike `snapshot-validation.ts`'s
 			// `graphTrustworthy` -- whose `byId` indexing already keys correctly
 			// on the declared `id` regardless of filename, so `EF-ID-005`/`014`
@@ -783,9 +914,34 @@ export async function computeHistory(
 			if (hasErrorDiagnostic(chgFilenameDiagnostics))
 				return { kind: 'untrusted-data' }
 
-			currentChgStatus.set(chgEnvelope.id, chgEnvelope.status)
+			presentChgIds.add(chgEnvelope.id)
 
-			const wasCompleted = previousChgStatus.get(chgEnvelope.id) === 'completed'
+			// Finding 5 (03-lifecycle.md `ALLOWED_TRANSITIONS`): `priorStatus` is
+			// this CHG id's MOST RECENTLY OBSERVED status across the ENTIRE walk
+			// so far (never merely the immediately preceding commit -- see
+			// `chgLifecycleStatus`'s own doc). A first appearance (`priorStatus
+			// === undefined`) MAY itself be `completed` or `retired` directly
+			// (a CHG can be created and completed in the same commit). Once an
+			// id HAS appeared, though, its status sequence must obey Core's own
+			// lifecycle rules: a terminal status (`completed`/`retired`) is
+			// frozen -- it can never change to a different status again, and
+			// (checked once the whole commit's scan completes, below) it can
+			// never simply disappear either -- and any other status change must
+			// be one of the type's own `ALLOWED_TRANSITIONS`. Without this, a
+			// CHG that regresses `retired -> completed`, `completed -> draft ->
+			// completed`, or `completed -> <deleted> -> completed` would make
+			// `wasCompleted` false again at the illegitimate re-completion,
+			// letting it emit another authoritative effect for content Core
+			// itself would never have permitted to reach that state.
+			const priorStatus = chgLifecycleStatus.get(chgEnvelope.id)
+			if (priorStatus !== undefined && priorStatus !== chgEnvelope.status) {
+				const isLegalTransition = !TERMINAL_STATUSES.includes(priorStatus)
+					&& ALLOWED_TRANSITIONS.change.some(([from, to]) => from === priorStatus && to === chgEnvelope.status)
+				if (!isLegalTransition)
+					return { kind: 'untrusted-data' }
+			}
+			const wasCompleted = priorStatus === 'completed'
+			chgLifecycleStatus.set(chgEnvelope.id, chgEnvelope.status)
 			if (chgEnvelope.status !== 'completed' || wasCompleted)
 				continue
 
@@ -821,11 +977,32 @@ export async function computeHistory(
 			if (relationValidation.diagnostics.some(d => d.severity === 'error' && d.code !== 'EF-REL-015'))
 				return { kind: 'untrusted-data' }
 
-			const qualifyingRelations = relationValidation.entries.filter(
+			const effectRelationsOnTarget = relationValidation.entries.filter(
 				(relation): relation is typeof relation & { type: 'introduces' | 'modifies' | 'retires' } =>
 					relation.target === targetId
 					&& (relation.type === 'introduces' || relation.type === 'modifies' || relation.type === 'retires'),
 			)
+
+			// Finding 6 (04-relations.md `RELATION_COMPATIBILITY`; EF-CHG-017): an
+			// effect relation's (source `change`, `type`, target type) triple must
+			// satisfy the SAME compatibility matrix `domain/relations.ts`'s own
+			// `validateRelationGraph` applies for the current graph -- CHG-only
+			// `introduces`/`retires` targets are restricted to
+			// prd/requirement/decision/policy, and `modifies` additionally allows
+			// `project`, but NONE of the three ever allow another `change` as their
+			// target (a CHG cannot effect another CHG). This walk only has ONE
+			// target's own historical type on hand (`targetType`, fixed for the
+			// whole call), so it applies the matrix narrowly against that type
+			// rather than re-deriving the full graph. A relation that names
+			// `targetId` with an effect type the matrix forbids for `targetType`
+			// is not a plausible historical fact this CHG could ever have
+			// legitimately declared -- Core's own commit-time transaction
+			// validation would already have rejected it -- so its mere presence
+			// here makes this commit's data untrustworthy, rather than being
+			// silently dropped as though it simply did not qualify.
+			if (effectRelationsOnTarget.some(relation => !RELATION_COMPATIBILITY[relation.type].targets.includes(targetType)))
+				return { kind: 'untrusted-data' }
+			const qualifyingRelations = effectRelationsOnTarget
 
 			if (qualifyingRelations.length > 0) {
 				// Finding 7(a) (EF-CHG-004 class): `EF-REL-006` above only
@@ -920,10 +1097,20 @@ export async function computeHistory(
 			// (`changed`, computed above for `commits`) -- reused here rather
 			// than re-derived.
 			const targetContentChanged = changed.length > 0
+			// Finding 7: `retires` requires a GENUINE transition INTO `retired`
+			// (present, not already retired -> present, retired) -- not merely
+			// "currently retired", which an already-terminal, byte-identical
+			// target (`previousEnvelope.status === 'retired'` already) would also
+			// satisfy. 07-change-transactions.md's own `retires` definition is
+			// "before: present and not retired -> after: retired"; terminal
+			// content is frozen, so a target that was ALREADY `retired` before
+			// this commit can never be the subject of a fresh `retires` effect,
+			// regardless of what a completing CHG declares.
 			const actualEffect: 'introduces' | 'modifies' | 'retires' | undefined
 				= previousEnvelope === undefined && currentEnvelope !== undefined
 					? 'introduces'
-					: previousEnvelope !== undefined && currentEnvelope !== undefined && currentEnvelope.status === 'retired'
+					: previousEnvelope !== undefined && currentEnvelope !== undefined
+						&& currentEnvelope.status === 'retired' && previousEnvelope.status !== 'retired'
 						? 'retires'
 						: previousEnvelope !== undefined && currentEnvelope !== undefined && targetContentChanged
 							? 'modifies'
@@ -941,7 +1128,12 @@ export async function computeHistory(
 				// from the authoritative integration commit).
 				const chgSummary = buildArtifactSummary(chgEnvelope, path)
 
-				effects.push({
+				// Finding 8: NOT pushed directly to `effects` -- collected in
+				// `pendingEffectsThisCommit` and only released after every CHG in
+				// this commit has been scanned, so a second, DIFFERENT completing
+				// CHG that ALSO qualifies for `targetId` in this SAME commit can
+				// still be caught (below) before either reaches the caller.
+				pendingEffectsThisCommit.push({
 					chg: chgSummary,
 					effect: relation.type,
 					status_before: previousEnvelope?.status ?? null,
@@ -951,9 +1143,30 @@ export async function computeHistory(
 			}
 		}
 
+		// Finding 5: a CHG id previously observed at a TERMINAL status
+		// (`completed`/`retired`) that is no longer present anywhere in this
+		// commit's `.engineering/chg/` scan has been physically deleted --
+		// 02-identity.md forbids this ("its Artifact MUST remain in the
+		// authoritative files ... rather than be physically deleted"), so this
+		// commit's content is untrustworthy rather than merely "this CHG has no
+		// history at this point".
+		for (const [chgId, status] of chgLifecycleStatus) {
+			if (TERMINAL_STATUSES.includes(status) && !presentChgIds.has(chgId))
+				return { kind: 'untrusted-data' }
+		}
+
+		// Finding 8 (EF-CHG-007): more than one completing CHG's qualifying claim
+		// on `targetId` at this SAME integration boundary is exactly the
+		// exactly-once violation Core's own commit-time validation exists to
+		// prevent -- this walk must fail the whole query rather than emitting
+		// either (or both) as though only one CHG had ever claimed this target
+		// here.
+		if (pendingEffectsThisCommit.length > 1)
+			return { kind: 'untrusted-data' }
+		effects.push(...pendingEffectsThisCommit)
+
 		previousTreeMap = treeMap
 		previousEnvelope = currentEnvelope
-		previousChgStatus = currentChgStatus
 	}
 
 	// The walk never found a commit whose tree contained `.engineering/ef.yaml`

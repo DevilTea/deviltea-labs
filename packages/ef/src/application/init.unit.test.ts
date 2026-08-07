@@ -1014,4 +1014,126 @@ describe('applyInitPlan', () => {
 				.toBe('do-not-delete')
 		})
 	})
+
+	// FINDING 1 (P0, ninth-round review): `currentEntries.every(name =>
+	// createdTopLevelNames.has(name))` proved only that every PRESENT name is
+	// allowed -- never that every name this invocation already created is
+	// STILL present. A same-claimed-identity replacement directory containing
+	// only `.tmp/init-state.json` (copied with the invocation's own nonce)
+	// passed that one-directional check, the nonce check, and every
+	// subsequent check, so `applyInitPlan` could report `applied: true` even
+	// though `ef.yaml`, `PROJECT.md`, and every planned canonical directory
+	// had disappeared. Ownership must instead be an EXACT witness (set
+	// equality, plus a per-entry identity re-check), and destructive cleanup
+	// must re-prove each individual tracked entry's identity -- not merely
+	// the top-level claim's -- before deleting it.
+	describe('exact-witness ownership proof (Finding 1, ninth-round regression)', () => {
+		it('never reports applied:true when the claim is replaced after the last file verification by a same-identity directory containing only a copied-nonce marker, and deletes nothing', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const lastFile = plan.files[plan.files.length - 1]!
+			const lastFilePath = path.join(tempDir, lastFile.path)
+			let claimedIdentity: { dev: number, ino: number } | undefined
+			let swapped = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				claimDirectory: async (target: string) => {
+					const result = await defaultApplyInitPlanDeps.claimDirectory(target)
+					if (result.outcome === 'claimed')
+						claimedIdentity = result.identity
+					return result
+				},
+				// Forced ABA, exactly like the existing dedicated fake-identity
+				// test above: `engineeringPath`'s identity always reports the
+				// value captured at claim time, regardless of which real
+				// directory instance is actually there right now, so this
+				// regression is deterministic on every platform rather than
+				// depending on inode-reuse behavior.
+				directoryIdentity: async (target: string) => {
+					if (target === engineeringPath && claimedIdentity !== undefined)
+						return claimedIdentity
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
+				},
+				readFileBytes: async (targetPath: string) => {
+					const bytes = await defaultApplyInitPlanDeps.readFileBytes(targetPath)
+					if (targetPath === lastFilePath && !swapped) {
+						swapped = true
+						// The reviewer's exact reproduction, timed to land after the
+						// last planned-file byte verification reads this file's
+						// correct (pre-swap) bytes: replace the whole claimed
+						// directory with a fresh, same-claimed-identity (via the
+						// forced ABA above) real directory containing nothing but
+						// `.tmp/init-state.json`, copied byte-for-byte -- including
+						// this invocation's own real nonce -- so the marker-nonce
+						// check alone cannot distinguish it either.
+						const markerBytes = await fs.readFile(path.join(engineeringPath, '.tmp', 'init-state.json'))
+						await fs.rm(engineeringPath, { recursive: true, force: true })
+						await fs.mkdir(engineeringPath)
+						await fs.mkdir(path.join(engineeringPath, '.tmp'))
+						await fs.writeFile(path.join(engineeringPath, '.tmp', 'init-state.json'), markerBytes)
+					}
+					return bytes
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// Nothing was ever deleted: the foreign replacement directory's
+			// copied marker survives completely untouched, because ownership of
+			// every individually tracked entry (not just the top-level claim) is
+			// re-proven before any deletion, and the very first entry checked
+			// (the most recently created file) is already provably gone.
+			expect(await fs.readdir(engineeringPath))
+				.toEqual(['.tmp'])
+			expect(await fs.readdir(path.join(engineeringPath, '.tmp')))
+				.toEqual(['init-state.json'])
+		})
+
+		it('never deletes a foreign entry substituted at a previously-created path under the same name but a different identity', async () => {
+			const plan = await computeValidPlan()
+			const lastFile = plan.files[plan.files.length - 1]!
+			const lastFilePath = path.join(tempDir, lastFile.path)
+			let substituted = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				isDirectory: async (targetPath: string) => {
+					if (targetPath.endsWith(path.join('.engineering', 'chg')) && !substituted) {
+						substituted = true
+						// By this point in the protocol every planned file
+						// (including `lastFilePath`) is already created and tracked.
+						// Substitute a genuinely different real file under the
+						// identical, already-tracked name -- same path, different
+						// `dev`/`ino` -- simulating the destructive variant the
+						// reviewer described: a foreign entry at an
+						// already-tracked expected path.
+						await fs.rm(lastFilePath, { force: true })
+						await fs.writeFile(lastFilePath, 'foreign replacement content')
+						return false
+					}
+					return defaultApplyInitPlanDeps.isDirectory(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The substituted foreign file must survive completely untouched:
+			// cleanup halts at the first identity mismatch (this file, the most
+			// recently created entry) instead of blindly unlinking whatever real
+			// file currently occupies the tracked path.
+			expect(await fs.readFile(lastFilePath, 'utf8'))
+				.toBe('foreign replacement content')
+		})
+	})
 })
