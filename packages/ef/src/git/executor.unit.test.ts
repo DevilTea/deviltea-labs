@@ -6,6 +6,22 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor, sanitizeGitEnv } from './executor'
 
+/**
+ * Initializes a fixture Git repository at `dir`, then disables background
+ * maintenance (`gc --auto`'s detached repack, and `maintenance.auto`'s
+ * scheduled runs): a stray background process can still be writing
+ * `.git/objects/pack` when this file's teardown removes the fixture, racing
+ * the rmdir and intermittently failing with `ENOTEMPTY` (observed in CI).
+ * Disabling it right after `init` removes the writer instead of just
+ * tolerating the race.
+ */
+function initGitFixture(dir: string): void {
+	execFileSync('git', ['init', '-q', '-b', 'main', dir])
+	execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+	execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+	execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+}
+
 describe('sanitizeGitEnv', () => {
 	it('strips the fixed repository-selecting Git variables', () => {
 		const result = sanitizeGitEnv({
@@ -99,7 +115,7 @@ describe('createGitExecutor', () => {
 	})
 
 	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true })
+		rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	it('runs a repository-independent command and returns stdout, exit code, and null signal', async () => {
@@ -134,7 +150,7 @@ describe('createGitExecutor', () => {
 	})
 
 	it('prepends -C <root> for execIn so the result reflects the given root, not process.cwd()', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		const executor = createGitExecutor()
 
 		// The test process cwd (inside this monorepo) is itself a Git worktree
@@ -272,9 +288,9 @@ describe('createGitExecutor', () => {
 	})
 
 	it('sanitizes a poisoned parent GIT_DIR so it cannot redirect execIn to another repository', async () => {
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		initGitFixture(tempDir)
 		const poisonedDir = mkdtempSync(join(tmpdir(), 'ef-git-executor-poison-'))
-		execFileSync('git', ['init', '-q', '-b', 'main', poisonedDir])
+		initGitFixture(poisonedDir)
 
 		const previousGitDir = process.env.GIT_DIR
 		process.env.GIT_DIR = join(poisonedDir, '.git')
@@ -297,7 +313,7 @@ describe('createGitExecutor', () => {
 				delete process.env.GIT_DIR
 			else
 				process.env.GIT_DIR = previousGitDir
-			rmSync(poisonedDir, { recursive: true, force: true })
+			rmSync(poisonedDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })

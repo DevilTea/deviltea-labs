@@ -50,7 +50,20 @@ const GIT_TEST_ENV = {
 }
 
 function git(dir: string, args: string[]): string {
-	return execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	const result = execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	// A freshly initialized fixture repository must not run background
+	// maintenance (`gc --auto`'s detached repack, or `maintenance.auto`'s
+	// scheduled runs): a stray background process can still be writing
+	// `.git/objects/pack` when this file's teardown removes the fixture,
+	// racing the rmdir and intermittently failing with `ENOTEMPTY` (observed
+	// in CI). Disabling it right after `init` removes the writer instead of
+	// just tolerating the race.
+	if (args[0] === 'init') {
+		execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+		execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+		execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+	}
+	return result
 }
 
 function commitAll(dir: string, message: string): string {
@@ -140,11 +153,11 @@ describe('runQueryCommand', () => {
 
 	beforeEach(async () => {
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-query-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', root])
+		git(root, ['init', '-q', '-b', 'main'])
 	})
 
 	afterEach(async () => {
-		await fs.rm(root, { recursive: true, force: true })
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	function deps() {
@@ -437,7 +450,7 @@ describe('runQueryCommand', () => {
 
 		const linkedDir = path.join(root, 'linked')
 		await fs.mkdir(linkedDir)
-		execFileSync('git', ['init', '-q', '-b', 'main', linkedDir])
+		git(linkedDir, ['init', '-q', '-b', 'main'])
 
 		// The rewrite (to config B, no linked repositories) lands during
 		// discovery's own `findWorktreeRoot` probe -- strictly after discovery
@@ -482,7 +495,7 @@ describe('runQueryCommand', () => {
 		// 11-filesystem-and-config.md's exception that "an otherwise-rejected
 		// nested worktree can supply another explicit project root instead."
 		const unrelatedCwd = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-query-unrelated-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', unrelatedCwd])
+		git(unrelatedCwd, ['init', '-q', '-b', 'main'])
 		try {
 			const outcome = await runQueryCommand({ kind: 'lookup', id: 'PROJECT' }, { format: 'json', noColor: false, project: root }, { cwd: unrelatedCwd, executor: createGitExecutor() })
 			expect(outcome.exitCode)
@@ -494,7 +507,7 @@ describe('runQueryCommand', () => {
 				.toBe(true)
 		}
 		finally {
-			await fs.rm(unrelatedCwd, { recursive: true, force: true })
+			await fs.rm(unrelatedCwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 })

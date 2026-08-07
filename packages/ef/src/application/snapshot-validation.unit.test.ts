@@ -126,7 +126,20 @@ const GIT_TEST_ENV = {
 }
 
 function git(dir: string, args: string[]): string {
-	return execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	const result = execFileSync('git', ['-C', dir, ...args], { env: { ...process.env, ...GIT_TEST_ENV }, encoding: 'utf8' })
+	// A freshly initialized fixture repository must not run background
+	// maintenance (`gc --auto`'s detached repack, or `maintenance.auto`'s
+	// scheduled runs): a stray background process can still be writing
+	// `.git/objects/pack` when this file's teardown removes the fixture,
+	// racing the rmdir and intermittently failing with `ENOTEMPTY` (observed
+	// in CI). Disabling it right after `init` removes the writer instead of
+	// just tolerating the race.
+	if (args[0] === 'init') {
+		execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+		execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+		execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+	}
+	return result
 }
 
 function commitAll(dir: string, message: string): string {
@@ -1995,11 +2008,11 @@ describe('validateSnapshot: loadSnapshotFromCommit equivalence', () => {
 
 	beforeEach(async () => {
 		tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-validate-git-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		git(tempDir, ['init', '-q', '-b', 'main'])
 	})
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true })
+		await fs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	it('produces the same validation result from a committed tree as from the working tree', async () => {

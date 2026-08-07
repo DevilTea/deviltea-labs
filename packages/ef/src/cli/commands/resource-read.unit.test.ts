@@ -158,10 +158,18 @@ describe('runResourceReadCommand', () => {
 	beforeEach(async () => {
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-resource-')))
 		execFileSync('git', ['init', '-q', '-b', 'main', root])
+		// A freshly initialized fixture repository must not run background
+		// maintenance (`gc --auto`'s detached repack, or `maintenance.auto`'s
+		// scheduled runs): a stray background process can still be writing
+		// `.git/objects/pack` when `afterEach` removes the fixture, racing the
+		// rmdir and intermittently failing with `ENOTEMPTY` (observed in CI).
+		execFileSync('git', ['-C', root, 'config', 'gc.auto', '0'])
+		execFileSync('git', ['-C', root, 'config', 'gc.autoDetach', 'false'])
+		execFileSync('git', ['-C', root, 'config', 'maintenance.auto', 'false'])
 	})
 
 	afterEach(async () => {
-		await fs.rm(root, { recursive: true, force: true })
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	function deps() {

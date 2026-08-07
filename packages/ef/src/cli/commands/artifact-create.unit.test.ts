@@ -10,6 +10,22 @@ import { createGitExecutor } from '../../git/executor'
 import { runArtifactCreateCommand } from './artifact-create'
 
 /**
+ * Initializes a fixture Git repository at `dir`, then disables background
+ * maintenance (`gc --auto`'s detached repack, and `maintenance.auto`'s
+ * scheduled runs): a stray background process can still be writing
+ * `.git/objects/pack` when this file's teardown removes the fixture, racing
+ * the rmdir and intermittently failing with `ENOTEMPTY` (observed in CI).
+ * Disabling it right after `init` removes the writer instead of just
+ * tolerating the race.
+ */
+function initGitFixture(dir: string): void {
+	execFileSync('git', ['init', '-q', '-b', 'main', dir])
+	execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+	execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+	execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+}
+
+/**
  * Wraps a real executor, running `sideEffect` once, immediately BEFORE the
  * first `execIn` call matching `matches`, then passing that call through to
  * the real executor unchanged. Used to simulate `.engineering` being replaced
@@ -146,7 +162,7 @@ describe('runArtifactCreateCommand', () => {
 
 	beforeEach(async () => {
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-create-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', root])
+		initGitFixture(root)
 		await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
 		await writeFile(root, '.engineering/.gitignore', GITIGNORE)
 		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
@@ -156,7 +172,7 @@ describe('runArtifactCreateCommand', () => {
 	})
 
 	afterEach(async () => {
-		await fs.rm(root, { recursive: true, force: true })
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		unlinkMock.mockClear()
 		linkMock.mockClear()
 		lstatMock.mockClear()
@@ -238,14 +254,14 @@ describe('runArtifactCreateCommand', () => {
 
 	it('reports exit 2 when no EF project can be discovered', async () => {
 		const bareDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-create-bare-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', bareDir])
+		initGitFixture(bareDir)
 		try {
 			const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), { cwd: bareDir, executor: createGitExecutor(), prompts: neverPrompts() })
 			expect(outcome.exitCode)
 				.toBe(2)
 		}
 		finally {
-			await fs.rm(bareDir, { recursive: true, force: true })
+			await fs.rm(bareDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 
@@ -296,7 +312,7 @@ describe('runArtifactCreateCommand', () => {
 
 	it('reports EF-VAL-012 (incomplete-initialization) when .engineering exists without ef.yaml', async () => {
 		const bareDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-create-incomplete-')))
-		execFileSync('git', ['init', '-q', '-b', 'main', bareDir])
+		initGitFixture(bareDir)
 		await fs.mkdir(path.join(bareDir, '.engineering'))
 		try {
 			const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), { cwd: bareDir, executor: createGitExecutor(), prompts: neverPrompts() })
@@ -307,7 +323,7 @@ describe('runArtifactCreateCommand', () => {
 				.toBe('EF-VAL-012')
 		}
 		finally {
-			await fs.rm(bareDir, { recursive: true, force: true })
+			await fs.rm(bareDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		}
 	})
 

@@ -445,6 +445,18 @@ describe('discoverProject (real filesystem and Git)', () => {
 
 	async function git(cwd: string, args: string[]): Promise<void> {
 		execFileSync('git', args, { cwd, stdio: 'ignore' })
+		// A freshly initialized fixture repository must not run background
+		// maintenance (`gc --auto`'s detached repack, or `maintenance.auto`'s
+		// scheduled runs): a stray background process can still be writing
+		// `.git/objects/pack` when this file's teardown removes the fixture,
+		// racing the rmdir and intermittently failing with `ENOTEMPTY`
+		// (observed in CI). Disabling it right after `init` removes the writer
+		// instead of just tolerating the race.
+		if (args[0] === 'init') {
+			execFileSync('git', ['config', 'gc.auto', '0'], { cwd, stdio: 'ignore' })
+			execFileSync('git', ['config', 'gc.autoDetach', 'false'], { cwd, stdio: 'ignore' })
+			execFileSync('git', ['config', 'maintenance.auto', 'false'], { cwd, stdio: 'ignore' })
+		}
 	}
 
 	beforeEach(async () => {
@@ -452,7 +464,7 @@ describe('discoverProject (real filesystem and Git)', () => {
 	})
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true })
+		await fs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	it('resolves a single-repository project from a nested working directory inside its own worktree', async () => {

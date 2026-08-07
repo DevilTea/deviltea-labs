@@ -14,6 +14,19 @@ import { executeQuery, incompleteInitializationQueryResult } from './query'
 import { loadSnapshotFromWorkingTree } from './snapshot'
 import { validateSnapshot } from './snapshot-validation'
 
+/**
+ * Disables background maintenance (`gc --auto`'s detached repack, and
+ * `maintenance.auto`'s scheduled runs) on the fixture repository at `dir`,
+ * right after `git init`. A stray background process can still be writing
+ * `.git/objects/pack` when `afterEach`'s `fs.rm` removes the fixture, racing
+ * the rmdir and intermittently failing with `ENOTEMPTY` (observed in CI).
+ */
+function disableGitAutoMaintenance(dir: string): void {
+	execFileSync('git', ['-C', dir, 'config', 'gc.auto', '0'])
+	execFileSync('git', ['-C', dir, 'config', 'gc.autoDetach', 'false'])
+	execFileSync('git', ['-C', dir, 'config', 'maintenance.auto', 'false'])
+}
+
 const CONFIG_YAML = `schema: ef/config@1
 repository:
   integration_ref: refs/heads/main
@@ -904,7 +917,7 @@ describe('executeQuery', () => {
 	})
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true })
+		await fs.rm(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 	})
 
 	/** Reloads `context` from `tempDir`'s current contents, for tests that add extra fixture files after `beforeEach`. */
@@ -3141,6 +3154,7 @@ Finding 8 (eighth-round) positive-control regression fixture.
 			await fs.rm(path.join(tempDir, '.engineering/req/REQ-010.md'))
 			await fs.rm(path.join(tempDir, '.engineering/req/REQ-011.md'))
 			execFileSync('git', ['-C', tempDir, 'init', '-q', '-b', 'main'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			disableGitAutoMaintenance(tempDir)
 			execFileSync('git', ['-C', tempDir, 'add', '-A'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			execFileSync('git', ['-C', tempDir, 'commit', '-q', '-m', 'bootstrap'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			const tipOid = execFileSync('git', ['-C', tempDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
@@ -3175,6 +3189,7 @@ Finding 8 (eighth-round) positive-control regression fixture.
 				GIT_COMMITTER_EMAIL: 'ef-test@example.com',
 			}
 			execFileSync('git', ['-C', tempDir, 'init', '-q', '-b', 'main'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			disableGitAutoMaintenance(tempDir)
 			execFileSync('git', ['-C', tempDir, 'add', '-A'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			execFileSync('git', ['-C', tempDir, 'commit', '-q', '-m', 'bootstrap'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			const tipOid = execFileSync('git', ['-C', tempDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
@@ -3226,6 +3241,7 @@ Finding 8 (eighth-round) positive-control regression fixture.
 			await fs.rm(path.join(tempDir, '.engineering/req/REQ-001.md'))
 			await fs.rm(path.join(tempDir, '.engineering/adr/ADR-001.md'))
 			execFileSync('git', ['-C', tempDir, 'init', '-q', '-b', 'main'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			disableGitAutoMaintenance(tempDir)
 			execFileSync('git', ['-C', tempDir, 'add', '-A'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			execFileSync('git', ['-C', tempDir, 'commit', '-q', '-m', 'bootstrap'], { env: { ...process.env, ...GIT_TEST_ENV } })
 
