@@ -28,25 +28,24 @@
  */
 
 import type { OperationStartRefState } from '../../application/bootstrap-validation'
-import type { ValidationPolicy } from '../../application/snapshot-validation'
+import type { validateSnapshot, ValidationPolicy } from '../../application/snapshot-validation'
 import type { OperationStartRefOid } from '../../application/transition-validation'
 import type { GitExecutor } from '../../git/executor'
 import type { GitRepository } from '../../git/repository'
-import type { FileIdentity } from '../../platform/fs-facts'
 import type { Config } from '../../repository/config'
 import type { CommandOutcome } from '../command-outcome'
+import type { LoadWorkingTreeContextResult } from '../working-tree-context'
 import { validateBootstrap } from '../../application/bootstrap-validation'
-import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
-import { summarizeValidation, validateSnapshot } from '../../application/snapshot-validation'
+import { summarizeValidation } from '../../application/snapshot-validation'
 import { validateTransition } from '../../application/transition-validation'
 import { severityOf } from '../../domain/diagnostic-codes'
-import { findWorktreeRoot, REGULAR_FILE_GIT_MODES } from '../../git/repository'
+import { REGULAR_FILE_GIT_MODES } from '../../git/repository'
 import { decodeConfig } from '../../repository/config'
-import { checkWorkingDirectoryAssociation } from '../../repository/discovery'
 import { validateWorkspace } from '../../repository/workspace'
 import { buildValidationResultJson } from '../envelopes'
 import { renderValidationHuman } from '../human-render'
 import { resolveCommitBoundProject, resolveProject } from '../project-context'
+import { loadWorkingTreeContext } from '../working-tree-context'
 import { createWorkspaceDeps } from '../workspace-deps'
 
 export type ValidateScope = 'snapshot' | 'transition' | 'bootstrap'
@@ -174,6 +173,29 @@ async function applyWorkspaceChecks(
 	return result
 }
 
+/**
+ * Maps a `loadWorkingTreeContext` failure to snapshot scope's diagnostic
+ * code, preserving each stage's existing identity (Finding 10): the
+ * association-recheck failure (`stage: 'association'`) uses the SAME
+ * generic invocation/resolution class `resolveProject`'s own
+ * `'unassociated'` reason already maps to below (`EF-VAL-001`), never
+ * `EF-VAL-012` -- that code is registry-owned by "an incomplete working-tree
+ * initialization claim exists," a condition association re-checking never
+ * establishes (association can fail against a project whose initialization
+ * is perfectly complete).
+ */
+function workingTreeContextFailureCode(failure: Exclude<LoadWorkingTreeContextResult, { ok: true }>): 'EF-VAL-001' | 'EF-VAL-006' | 'EF-VAL-012' {
+	switch (failure.stage) {
+		case 'resolve':
+			return failure.reason === 'incomplete-initialization'
+				? 'EF-VAL-012'
+				: failure.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-001'
+		case 'load':
+		case 'association':
+			return failure.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-001'
+	}
+}
+
 export async function runValidateCommand(options: ValidateCommandOptions, deps: ValidateCommandDeps): Promise<CommandOutcome> {
 	// ---- Scope/option applicability (13-cli-contract.md "Validation Command") ----
 
@@ -186,21 +208,57 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	if (options.scope !== 'snapshot' && options.proposed === undefined)
 		return earlyFailure(options, 'EF-VAL-011', `'--proposed' is required for '${options.scope}' scope.`)
 
-	// ---- Project resolution (13-cli-contract.md "Common Options"; ----------
-	// ---- 11-filesystem-and-config.md "Project Discovery" commit-bound -----
-	// ---- exception) ----------------------------------------------------------
+	// ---- Snapshot scope: single, shared working-tree resolution -------------
+	// ---- (13-cli-contract.md "Common Options"; consolidated per Findings ----
+	// ---- 9-10, eighth round) --------------------------------------------------
+
+	if (options.scope === 'snapshot') {
+		// `loadWorkingTreeContext` (Findings 3-5, 9-10, consolidated): resolves
+		// the project, loads its snapshot bound to discovery's own
+		// `.engineering` identity observation (Finding 4), and -- for implicit
+		// discovery only (an explicit `--project` is exempt per
+		// 11-filesystem-and-config.md "Project Discovery") -- re-checks
+		// working-directory association against the snapshot's own freshest
+		// configuration (Finding 5), never against project resolution's
+		// separate, earlier read (Finding 3).
+		const loaded = await loadWorkingTreeContext({ cwd: deps.cwd, explicitProject: options.project }, deps.executor)
+		if (!loaded.ok)
+			return earlyFailure(options, workingTreeContextFailureCode(loaded), loaded.message)
+
+		const { root, validation, config } = loaded.context
+		let diagnostics = validation.diagnostics
+		let complete = validation.complete
+
+		if (options.workspace) {
+			const linked = config?.linkedRepositories ?? []
+			const workspaceResult = await applyWorkspaceChecks(root, deps.executor, linked)
+			diagnostics = [...diagnostics, ...workspaceResult.diagnostics]
+			complete = complete && workspaceResult.complete
+		}
+
+		const summary = summarizeValidation({
+			scope: 'snapshot',
+			diagnostics,
+			complete,
+			policy: policyFrom(options),
+			refs: { integrationRef: config?.repository.integrationRef ?? null },
+		})
+		return outcomeFor(options.format, options.noColor, options.workspace, summary, diagnostics)
+	}
+
+	// ---- Transition/bootstrap project resolution (11-filesystem-and-config.md
+	// ---- "Project Discovery" commit-bound exception) ------------------------
+	//
+	// Neither scope loads a working-tree snapshot at all: authoritative
+	// configuration comes from the relevant trusted commit(s) via
+	// `peekConfigAt` below, never from this working tree, so
+	// `loadWorkingTreeContext`'s snapshot-loading/association-recheck
+	// machinery does not apply here.
 
 	let root: string
 	let git: GitRepository
-	// `.engineering`'s identity as project resolution observed it (Finding 4,
-	// "single observation"); populated only via the `resolveProject` branch
-	// below (scope `'snapshot'` always takes it -- see that branch's own
-	// comment), and threaded into `loadSnapshotFromWorkingTree` so its own
-	// directory walk is bound to the exact `.engineering` resolution already
-	// approved.
-	let engineeringIdentity: FileIdentity | undefined
 
-	if (options.scope !== 'snapshot' && options.project !== undefined) {
+	if (options.project !== undefined) {
 		// Commit-bound transition/bootstrap validation may target a working
 		// tree whose checked-out state does not (yet) contain the candidate
 		// configuration -- e.g. bootstrapping from a pre-EF checkout. An
@@ -225,71 +283,6 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 		}
 		root = resolved.context.root
 		git = resolved.context.git
-		engineeringIdentity = resolved.context.engineeringIdentity
-		// `resolved.context.config` is discovery's OWN, separate read of
-		// `.engineering/ef.yaml` and is deliberately never consulted for
-		// scope: 'snapshot' semantics below (Finding 3): an in-place rewrite
-		// landing between that read and `loadSnapshotFromWorkingTree`'s later,
-		// separate read of the same file would otherwise let the ref summary
-		// and `--workspace` checks derive from a DIFFERENT observation than
-		// the one the snapshot itself was validated against. `snapshot` scope
-		// instead derives every config-dependent semantic exclusively from
-		// `loaded.snapshot.config.config` below -- the single, freshest
-		// observation the validated snapshot itself was built from.
-	}
-
-	// ---- Scope-specific validation ------------------------------------------
-
-	if (options.scope === 'snapshot') {
-		const loaded = await loadSnapshotFromWorkingTree(root, undefined, { expectedEngineeringIdentity: engineeringIdentity })
-		if (!loaded.ok) {
-			const code = loaded.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-001'
-			return earlyFailure(options, code, loaded.message)
-		}
-
-		const validation = validateSnapshot(loaded.snapshot)
-		let diagnostics = validation.diagnostics
-		let complete = validation.complete
-
-		// Single observation (Finding 3): both the ref summary below and the
-		// `--workspace` linked-repositories check derive from the SAME config
-		// this snapshot was itself validated against -- never from project
-		// resolution's separate, earlier discovery read.
-		const config = loaded.snapshot.config.config
-
-		// Re-run the working-directory association decision (Finding 5, "single
-		// observation") against `config`, the freshest configuration `loaded`
-		// itself was built from -- not `resolveProject`'s own, earlier read
-		// (`resolved.context.config`, deliberately unused above). An in-place
-		// rewrite of `ef.yaml` landing between that earlier read and this
-		// snapshot load could otherwise leave a now-undeclared nested worktree
-		// authorized only by a stale association decision
-		// (11-filesystem-and-config.md "Project Discovery": "validate
-		// working-directory association with the project").
-		const association = await checkWorkingDirectoryAssociation(
-			{ cwd: deps.cwd, candidateRoot: root, config },
-			{ findWorktreeRoot: absolutePath => findWorktreeRoot(deps.executor, absolutePath) },
-		)
-		if (association.kind === 'unassociated')
-			return earlyFailure(options, 'EF-VAL-012', `The current directory is no longer associated with the project at '${root}': its configuration was rewritten and no longer declares this working directory's worktree as the project's own or as a linked repository.`)
-		if (association.kind === 'git-unavailable')
-			return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while re-checking working-directory association: ${association.message}`)
-
-		if (options.workspace) {
-			const linked = config?.linkedRepositories ?? []
-			const workspaceResult = await applyWorkspaceChecks(root, deps.executor, linked)
-			diagnostics = [...diagnostics, ...workspaceResult.diagnostics]
-			complete = complete && workspaceResult.complete
-		}
-
-		const summary = summarizeValidation({
-			scope: 'snapshot',
-			diagnostics,
-			complete,
-			policy: policyFrom(options),
-			refs: { integrationRef: config?.repository.integrationRef ?? null },
-		})
-		return outcomeFor(options.format, options.noColor, options.workspace, summary, diagnostics)
 	}
 
 	if (options.scope === 'transition') {

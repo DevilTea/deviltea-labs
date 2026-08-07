@@ -37,6 +37,23 @@ resources: []
 ## Vision
 
 Deliver a well-governed engineering workflow.
+
+## Scope
+
+This project covers the Artifacts and query behavior exercised by these tests.
+
+## Non-goals
+
+This project does not manage unrelated deployment tooling.
+
+## Context
+
+The project operates as a single-repository workspace with no linked repositories.
+
+## Terminology
+
+| Term | Definition | Avoid or aliases |
+| --- | --- | --- |
 `
 
 const PRD_001 = `---
@@ -51,13 +68,25 @@ relations: []
 resources: []
 ---
 
-## Vision
+## Problem
+
+Users cannot find relevant results quickly.
+
+## User Need
+
+Users need fast, relevant search results.
+
+## Desired Outcome
 
 Provide best-in-class search.
 
-## Objectives
+## Success Criteria
 
-Improve findability.
+- Improve findability.
+
+## Non-goals
+
+This PRD does not cover unrelated administrative tooling.
 `
 
 const REQ_001 = `---
@@ -221,6 +250,14 @@ ${relations}resources: []
 ## Requirement
 
 Body text for ${id}.
+
+## Rationale
+
+Rationale text for ${id}.
+
+## Acceptance Criteria
+
+- Acceptance criterion for ${id}.
 ${status === 'superseded' || status === 'retired'
 	? '\n## Lifecycle\n\nSuperseded by its replacement.\n'
 	: ''}`
@@ -248,6 +285,10 @@ Filtering context.
 
 We will filter.
 
+## Alternatives
+
+We considered not filtering at all.
+
 ## Consequences
 
 Better filtering.
@@ -265,13 +306,21 @@ relations: []
 resources: []
 ---
 
-## Policy Statement
+## Policy
 
 Handle data responsibly.
 
+## Scope
+
+Applies to all search data processing.
+
 ## Rationale
 
-Compliance.
+Protects user data.
+
+## Compliance
+
+- Data must be encrypted at rest.
 `
 
 const CHG_001 = `---
@@ -804,6 +853,7 @@ function fabricatedContext(byId: Map<string, SnapshotArtifactRecord>, incomingRe
 		resourceLossArtifactIds: new Set(),
 		tagLossArtifactIds: new Set(),
 		envelopeWideLossArtifactIds: new Set(),
+		envelopeFieldLossById: new Map(),
 		extensionValueLossArtifactIds: new Set(),
 		envelopeStructuralLossArtifactIds: new Set(),
 		byteDecodingLossArtifactIds: new Set(),
@@ -2272,6 +2322,96 @@ Finding 8 regression fixture.
 			expect(result.data!.artifacts.map(a => a.id))
 				.not.toEqual(expect.arrayContaining(['REQ-971', 'REQ-972']))
 		})
+
+		// Eighth-round Finding 8: envelope loss precision (`envelopeFieldLossById`
+		// intersected against exactly the core fields THIS request's
+		// filters/pagination consume), replacing the field-unscoped
+		// `envelopeWideLossArtifactIds` bucket as a list-membership-risk signal.
+		describe('envelope loss precision (Finding 8, eighth-round)', () => {
+			it('a duplicate-title requirement outside the returned page does not gate an unrelated --type list filter', async () => {
+				await writeFile(tempDir, '.engineering/req/REQ-999.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-999
+title: Duplicate Title Requirement
+title: Duplicated Title
+status: active
+summary: A requirement whose title key is duplicated (EF-ENV-005), for Finding 8's list-membership-risk precision regression -- a duplicate-title loss is projection-only and must not gate an unrelated --type filter when this record sits outside the returned page.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Exercises EF-ENV-005 confined to the 'title' field.
+
+## Rationale
+
+Finding 8 (eighth-round) regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+				const withLoss = await reloadContext()
+				expect([...(withLoss.validation.envelopeFieldLossById.get('REQ-999') ?? [])])
+					.toEqual(['title'])
+
+				// REQ-999 genuinely matches the '--type requirement' filter (its
+				// own 'type' field is fully trustworthy) and so counts toward
+				// `total`, but its title loss is projection-only, and REQ-999 sorts
+				// (bytewise) after every existing requirement, so `limit: 5` keeps
+				// it off the returned page entirely. Before the fix, the coarse
+				// `envelopeWideLossArtifactIds` bucket added REQ-999 to the
+				// membership-risk set unconditionally (any filter, any field),
+				// failing this entire unrelated request.
+				const result = await executeQuery(withLoss, { kind: 'list', type: ['requirement'], limit: 5 })
+				expect(result.complete)
+					.toBe(true)
+				expect(result.data!.total)
+					.toBe(6)
+				expect(result.data!.artifacts.map(a => a.id))
+					.toEqual(['REQ-001', 'REQ-002', 'REQ-010', 'REQ-011', 'REQ-012'])
+			})
+
+			it('positive control: a duplicate-schema requirement gates an unrelated --schema list filter even outside the returned page, since \'schema\' IS the consumed field', async () => {
+				await writeFile(tempDir, '.engineering/req/REQ-998.md', `---
+schema: ef/requirement@1
+schema: ef/requirement@1
+type: requirement
+id: REQ-998
+title: Duplicate Schema Requirement
+status: active
+summary: A requirement whose schema key is duplicated (EF-ENV-005), for Finding 8's positive control -- unlike the duplicate-title case above, 'schema' IS the field this request's own filter reads, so it must still gate even though REQ-998 sits outside the returned page.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Exercises EF-ENV-005 confined to the 'schema' field.
+
+## Rationale
+
+Finding 8 (eighth-round) positive-control regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+				const withLoss = await reloadContext()
+				expect([...(withLoss.validation.envelopeFieldLossById.get('REQ-998') ?? [])])
+					.toEqual(['schema'])
+
+				const result = await executeQuery(withLoss, { kind: 'list', schema: 'ef/requirement@1', limit: 1 })
+				expect(result.complete)
+					.toBe(false)
+				expect(result.diagnostics[0]!.code)
+					.toBe('EF-QRY-013')
+			})
+		})
 	})
 
 	describe('search', () => {
@@ -2388,6 +2528,95 @@ Finding 9 regression fixture.
 				.toBeNull()
 			expect(result.diagnostics[0]!.code)
 				.toBe('EF-QRY-013')
+		})
+
+		// Eighth-round Finding 8: the same envelope-loss precision extended to
+		// search's own consumed surfaces (`SEARCH_CONSUMED_CORE_FIELDS`:
+		// title/summary/tags/resources).
+		describe('envelope loss precision (Finding 8, eighth-round)', () => {
+			it('a duplicate top-level \'relations\' key does not gate an unrelated search request: search never reads \'relations\'', async () => {
+				await writeFile(tempDir, '.engineering/req/REQ-997.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-997
+title: Duplicate Relations Key
+status: active
+summary: A requirement whose relations key is duplicated (EF-ENV-005), for Finding 8's search-membership precision regression -- search never reads 'relations', so this loss must not gate an unrelated search request.
+tags: []
+relations:
+  - type: references
+    target: PROJECT
+relations:
+  - type: references
+    target: PROJECT
+resources: []
+---
+
+## Requirement
+
+Exercises EF-ENV-005 confined to the 'relations' field.
+
+## Rationale
+
+Finding 8 (eighth-round) search-membership regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+				const withLoss = await reloadContext()
+				expect([...(withLoss.validation.envelopeFieldLossById.get('REQ-997') ?? [])])
+					.toEqual(['relations'])
+
+				// Before the fix, the field-unscoped `envelopeWideLossArtifactIds`
+				// bucket gated EVERY search request while REQ-997 existed anywhere
+				// in the project, regardless of what its loss actually touched.
+				const result = await executeQuery(withLoss, { kind: 'search', terms: ['filtering'] })
+				expect(result.complete)
+					.toBe(true)
+				expect(result.data!.results.map(r => r.artifact.id))
+					.toContain('REQ-001')
+			})
+
+			it('positive control: a duplicate-title requirement gates an unrelated search request, since \'title\' IS a surface search reads', async () => {
+				await writeFile(tempDir, '.engineering/req/REQ-996.md', `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-996
+title: Duplicate Title Requirement
+title: Duplicated Title
+status: active
+summary: A requirement whose title key is duplicated (EF-ENV-005), for Finding 8's positive control -- unlike the duplicate-relations case above, title is a surface buildSurfaces reads for every Artifact, so this loss must still gate search even for an unrelated term.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Exercises EF-ENV-005 confined to the 'title' field.
+
+## Rationale
+
+Finding 8 (eighth-round) positive-control regression fixture.
+
+## Acceptance Criteria
+
+- N/A.
+`)
+				const withLoss = await reloadContext()
+				expect([...(withLoss.validation.envelopeFieldLossById.get('REQ-996') ?? [])])
+					.toEqual(['title'])
+
+				// 'ranking' only matches REQ-002's own summary, entirely unrelated
+				// to REQ-996 -- demonstrating the risk check fires for the whole
+				// request, not merely when the lossy record itself would match.
+				const result = await executeQuery(withLoss, { kind: 'search', terms: ['ranking'] })
+				expect(result.complete)
+					.toBe(false)
+				expect(result.diagnostics[0]!.code)
+					.toBe('EF-QRY-013')
+			})
 		})
 	})
 
@@ -2898,6 +3127,19 @@ Finding 9 regression fixture.
 				GIT_COMMITTER_NAME: 'EF Test',
 				GIT_COMMITTER_EMAIL: 'ef-test@example.com',
 			}
+			// Finding 5 (bootstrap boundary full-snapshot validation): the
+			// claimed bootstrap commit must be a genuine, COMPLETE bootstrap --
+			// no CHG Artifact, no terminal (superseded/retired) knowledge
+			// Artifact. `writeRichProject`'s fixture set (used elsewhere as a
+			// plain working-tree snapshot, never itself committed to Git) is not
+			// bootstrap-eligible as a whole: `CHG-001` is a completed change,
+			// and `REQ-010`/`REQ-011` are superseded requirements. Excluded here
+			// so the single commit this test commits qualifies as a valid
+			// bootstrap boundary; neither file is needed to walk REQ-001's own
+			// history.
+			await fs.rm(path.join(tempDir, '.engineering/chg/CHG-001.md'))
+			await fs.rm(path.join(tempDir, '.engineering/req/REQ-010.md'))
+			await fs.rm(path.join(tempDir, '.engineering/req/REQ-011.md'))
 			execFileSync('git', ['-C', tempDir, 'init', '-q', '-b', 'main'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			execFileSync('git', ['-C', tempDir, 'add', '-A'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			execFileSync('git', ['-C', tempDir, 'commit', '-q', '-m', 'bootstrap'], { env: { ...process.env, ...GIT_TEST_ENV } })
@@ -2966,9 +3208,31 @@ Finding 9 regression fixture.
 				GIT_COMMITTER_NAME: 'EF Test',
 				GIT_COMMITTER_EMAIL: 'ef-test@example.com',
 			}
+			// Finding 5 (bootstrap boundary full-snapshot validation): the
+			// `readBlob` override below must target REQ-001.md's blob at a
+			// commit that is NOT itself the claimed bootstrap boundary --
+			// otherwise the failure surfaces one level higher, as the
+			// boundary's own full-snapshot materialization failing
+			// (`history-unavailable`, EF-QRY-010) rather than the walk's later,
+			// more specific untrustworthy-data check (EF-QRY-013). REQ-001.md
+			// (and ADR-001.md, which `addresses` it) are therefore committed
+			// in a SECOND commit, after a bootstrap commit that excludes them
+			// -- along with `CHG-001` (a completed change) and
+			// `REQ-010`/`REQ-011` (superseded knowledge Artifacts), neither of
+			// which is a valid bootstrap-boundary state at all.
+			await fs.rm(path.join(tempDir, '.engineering/chg/CHG-001.md'))
+			await fs.rm(path.join(tempDir, '.engineering/req/REQ-010.md'))
+			await fs.rm(path.join(tempDir, '.engineering/req/REQ-011.md'))
+			await fs.rm(path.join(tempDir, '.engineering/req/REQ-001.md'))
+			await fs.rm(path.join(tempDir, '.engineering/adr/ADR-001.md'))
 			execFileSync('git', ['-C', tempDir, 'init', '-q', '-b', 'main'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			execFileSync('git', ['-C', tempDir, 'add', '-A'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			execFileSync('git', ['-C', tempDir, 'commit', '-q', '-m', 'bootstrap'], { env: { ...process.env, ...GIT_TEST_ENV } })
+
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001)
+			await writeFile(tempDir, '.engineering/adr/ADR-001.md', ADR_001)
+			execFileSync('git', ['-C', tempDir, 'add', '-A'], { env: { ...process.env, ...GIT_TEST_ENV } })
+			execFileSync('git', ['-C', tempDir, 'commit', '-q', '-m', 'introduce REQ-001'], { env: { ...process.env, ...GIT_TEST_ENV } })
 			const tipOid = execFileSync('git', ['-C', tempDir, 'rev-parse', 'HEAD'], { encoding: 'utf8' })
 				.trim()
 

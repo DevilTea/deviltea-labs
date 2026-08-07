@@ -1,4 +1,4 @@
-import type { Envelope } from '../domain/model'
+import type { ArtifactType, Envelope } from '../domain/model'
 import type { ArtifactCreatePlan } from './artifact-create'
 import type { ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
 import fs from 'node:fs/promises'
@@ -103,6 +103,32 @@ function fakeArtifactWithRawId(rawId: string, path: string = `.engineering/req/$
 
 function fakeArtifactWithId(id: string): SnapshotArtifactFile {
 	return fakeArtifactWithRawId(id)
+}
+
+/** A well-formed, fully decoded artifact file of an arbitrary (non-requirement) `type`, declaring `id` at `path`. Its identity is exactly known -- it decodes to completion with a syntactically valid ID -- so it is safely ignorable by an allocator for any OTHER prefix. */
+function fakeDecodedArtifactOfType(type: Exclude<ArtifactType, 'project'>, id: string, path: string): SnapshotArtifactFile {
+	const envelope: Envelope = {
+		schema: SCHEMA_BY_TYPE[type],
+		type,
+		id,
+		title: 'Fake existing artifact of a different, known type',
+		status: 'draft',
+		summary: 'Used to prove a known, non-matching-prefix envelope does not block allocation.',
+		tags: [],
+		relations: [],
+		resources: [],
+		extensions: {},
+	}
+	return {
+		path,
+		bytes: new Uint8Array(),
+		text: '',
+		frontmatter: { ok: true, frontmatterText: '', bodyText: '', bodyStartLine: 2 },
+		document: undefined,
+		envelope: { envelope, diagnostics: [] },
+		body: undefined,
+		sections: undefined,
+	}
 }
 
 /** An artifact file whose frontmatter/envelope never decoded (`envelope` stays `undefined`), as `snapshot.ts` produces for a file that fails the frontmatter split. `path` defaults to the canonical REQ path for `id`. */
@@ -255,9 +281,33 @@ describe('computeCreatePlan', () => {
 				.toBe('allocation-incomplete')
 		})
 
-		it('does not block REQ allocation when the identity-uncertain file sits under a different type\'s canonical directory', () => {
+		// FINDING 4 (P1): a file's directory placement alone can never prove its
+		// declared type or ID. `.engineering/adr/junk.md` never decoded at all,
+		// so its true identity is unknown -- it might, once decoded, actually
+		// have declared `id: REQ-999` in a wrong-directory placement. Scoping the
+		// uncertainty scan to the requested prefix's OWN canonical directory
+		// (the prior, buggy behavior) would let `req` allocation proceed as if
+		// this file did not exist, blind to a possible higher REQ reservation.
+		it('blocks REQ allocation when a wrong-directory identity-uncertain file sits under a DIFFERENT type\'s canonical directory (full discovery scope)', () => {
 			const snapshot = emptySnapshot()
-			snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('ADR-999', '.engineering/adr/ADR-999.md'), fakeArtifactWithId('REQ-005'))
+			snapshot.artifacts.push(fakeArtifactWithUndecodedEnvelope('junk', '.engineering/adr/junk.md'), fakeArtifactWithId('REQ-005'))
+			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
+			expect(result.ok)
+				.toBe(false)
+			expect(result.ok === false && result.reason)
+				.toBe('allocation-incomplete')
+			expect(result.ok === false && result.message)
+				.toContain('.engineering/adr/junk.md')
+		})
+
+		// The other half of Finding 4's directive: a file whose envelope DID
+		// decode to completion, declaring a KNOWN, different type, remains
+		// safely ignorable regardless of its directory -- its true prefix is
+		// exactly known and does not match, so it cannot be hiding a higher REQ
+		// reservation.
+		it('does not block REQ allocation on a fully decoded, identity-certain artifact of a different, known type', () => {
+			const snapshot = emptySnapshot()
+			snapshot.artifacts.push(fakeDecodedArtifactOfType('decision', 'ADR-999', '.engineering/adr/ADR-999.md'), fakeArtifactWithId('REQ-005'))
 			const result = computeCreatePlan({ snapshot, type: 'req', title: 'Title', summary: 'Summary text.' })
 			expect(result.ok)
 				.toBe(true)
@@ -822,6 +872,48 @@ describe('applyCreatePlan', () => {
 			expect(onDisk)
 				.not.toBe(new TextDecoder()
 					.decode(plan.bytes))
+		})
+
+		// FINDING 2 (P1): once publication is confirmed byte-for-byte and
+		// identity-for-identity, the temporary file's removal is a "cleanup or
+		// internal operation" (13-cli-contract.md), not the publication itself.
+		// Swallowing its failure and returning a plain, unqualified success would
+		// misreport the state exactly as 13-cli-contract.md forbids in the other
+		// direction: silently downgrading a "publication succeeded, cleanup
+		// failed" outcome to a fully-clean success.
+		it('reports applied+cleanup-failed (never a plain success) when the verified temporary file cannot be unlinked after a successful, fully-verified publish', async () => {
+			const plan = computePlanOrThrow()
+			const targetPath = path.join(tempDir, plan.path)
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				unlink: async (target: string) => {
+					if (target.includes('.tmp-'))
+						throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+					await defaultApplyCreatePlanDeps.unlink(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect('outcome' in result && result.outcome)
+				.toBe('cleanup-failed')
+			expect('outcome' in result && result.outcome === 'cleanup-failed' && result.path)
+				.toBe(plan.path)
+
+			// The publication itself is genuine and complete: the file is on disk
+			// with exactly the planned bytes. Only the superfluous temporary file
+			// (whose removal failed) is left behind.
+			const onDisk = await fs.readFile(targetPath)
+			expect(new Uint8Array(onDisk))
+				.toEqual(plan.bytes)
+
+			const leftoverTempFiles = (await fs.readdir(path.dirname(targetPath)))
+				.filter(name => name.includes('.tmp-'))
+			expect(leftoverTempFiles.length)
+				.toBe(1)
 		})
 	})
 

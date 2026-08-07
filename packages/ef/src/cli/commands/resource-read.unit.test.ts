@@ -1,3 +1,4 @@
+import type { GitExecOutcome, GitExecutor } from '../../git/executor'
 import { Buffer } from 'node:buffer'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
@@ -6,6 +7,28 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runResourceReadCommand } from './resource-read'
+
+/**
+ * Wraps a real executor, running `sideEffect` once, immediately BEFORE the
+ * first `execIn` call matching `matches`, then passing that call through to
+ * the real executor unchanged. Used to simulate `.engineering` being replaced
+ * by a DIFFERENT real directory landing exactly in the window between
+ * project resolution's own `.engineering` identity observation and this
+ * command's later, separate snapshot walk (Finding 4/12).
+ */
+function withSideEffectBeforeCall(base: GitExecutor, matches: (args: readonly string[]) => boolean, sideEffect: () => Promise<void>): GitExecutor {
+	let triggered = false
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: async (root, args, options): Promise<GitExecOutcome> => {
+			if (!triggered && matches(args)) {
+				triggered = true
+				await sideEffect()
+			}
+			return base.execIn(root, args, options)
+		},
+	}
+}
 
 const CONFIG_YAML = `schema: ef/config@1
 repository:
@@ -208,6 +231,47 @@ describe('runResourceReadCommand', () => {
 		expect(viaRogueOwner.exitCode)
 			.toBe(1)
 		expect(viaRogueOwner.stdout)
+			.toEqual(new Uint8Array(0))
+	})
+
+	// ---- Finding 12: bound-load -- `.engineering` identity threaded into ------
+	// ---- the snapshot walk, exactly like query/validate ------------------------
+
+	it('never returns bytes when `.engineering` is replaced by a substitute directory that hides the second (rogue) owner between project resolution and the snapshot walk', async () => {
+		// `REQ-002` improperly declares the identical `location` `REQ-001`
+		// legitimately owns (an `EF-RES-009` violation, present at the moment
+		// project resolution observes `.engineering`). If this command failed
+		// to bind the snapshot walk to project resolution's own `.engineering`
+		// identity observation (Finding 4/12), a substitute directory that
+		// OMITS `REQ-002` entirely would make `resourceOwnership` falsely
+		// report `location` as uniquely owned by `REQ-001`, and the raw bytes
+		// would be served even though the repository is genuinely invalid.
+		await setupProject()
+		const location = '.engineering/resources/REQ-001/example.json'
+		await writeFile(root, '.engineering/req/REQ-001.md', requirementMdWithResource('REQ-001', location))
+		await writeFile(root, '.engineering/req/REQ-002.md', requirementMdWithResource('REQ-002', location))
+		await writeFile(root, location, 'secret content that must never be served')
+
+		const originalEngineeringPath = path.join(root, '.engineering')
+		const executor = withSideEffectBeforeCall(
+			createGitExecutor(),
+			args => args[0] === 'rev-parse' && args[1] === '--show-toplevel',
+			async () => {
+				const asideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-resource-orig-'))
+				const asideEngineeringPath = path.join(asideDir, '.engineering')
+				await fs.rename(originalEngineeringPath, asideEngineeringPath)
+				// A genuinely different real directory (fresh `dev`/`ino`) carrying
+				// every file EXCEPT the rogue second owner.
+				await fs.cp(asideEngineeringPath, originalEngineeringPath, { recursive: true })
+				await fs.rm(path.join(originalEngineeringPath, 'req', 'REQ-002.md'), { force: true })
+			},
+		)
+
+		const outcome = await runResourceReadCommand('REQ-001', location, {}, { cwd: root, executor })
+		expect(outcome.exitCode)
+			.not
+			.toBe(0)
+		expect(outcome.stdout)
 			.toEqual(new Uint8Array(0))
 	})
 
