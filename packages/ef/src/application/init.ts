@@ -742,6 +742,40 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	}
 
 	/**
+	 * Delete `entry` if, and only if, `entrySafeToDelete` proves -- right now,
+	 * immediately before the actual `unlink`/`rmdir` call this function makes
+	 * -- that `entry.path` still denotes the exact entry this invocation
+	 * created there. Returns `true` only when that proof AND the deletion
+	 * itself both succeed; otherwise `entry.path` is left completely
+	 * untouched. This is the ONE ownership-proven deletion primitive every
+	 * destructive step in `applyInitPlan` routes through: `abort`'s own
+	 * per-entry cleanup loop, and the success path's final removal of the
+	 * marker itself. Routing both through the same primitive closes a gap a
+	 * bespoke, ad hoc final deletion could otherwise reopen: a same-path
+	 * replacement (a forced-inode-ABA reusing a tracked FILE's captured
+	 * `(dev, ino)` for foreign content) landing strictly after an earlier
+	 * checkpoint -- `readInitMarker`'s nonce-field parse, or
+	 * `verifyClaimIntact`'s identity-only re-check -- but before a deletion
+	 * that skipped this exact re-proof would otherwise have its foreign bytes
+	 * silently deleted, exactly like `abort`'s own documentation describes for
+	 * every other tracked FILE entry.
+	 */
+	async function deleteOwnedEntry(entry: CreatedEntry): Promise<boolean> {
+		if (!(await entrySafeToDelete(entry)))
+			return false
+		try {
+			if (entry.kind === 'file')
+				await deps.unlink(entry.path)
+			else
+				await deps.rmdir(entry.path)
+		}
+		catch {
+			return false
+		}
+		return true
+	}
+
+	/**
 	 * `true` iff ALL of the following hold:
 	 *
 	 * 1. `plan.targetRoot` is still a real, non-symlink directory with the
@@ -880,17 +914,8 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		// unexpected content is ever silently discarded.
 		for (let i = createdStack.length - 1; i >= 0; i--) {
 			const entry = createdStack[i]!
-			if (!(await entrySafeToDelete(entry)))
+			if (!(await deleteOwnedEntry(entry)))
 				return { applied: false, outcome: 'incomplete', message }
-			try {
-				if (entry.kind === 'file')
-					await deps.unlink(entry.path)
-				else
-					await deps.rmdir(entry.path)
-			}
-			catch {
-				return { applied: false, outcome: 'incomplete', message }
-			}
 		}
 
 		return { applied: false, outcome: 'incomplete', message }
@@ -1015,15 +1040,28 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	if (!(await verifyClaimIntact()))
 		return abort(claimIntactFailureMessage)
 
-	await deps.unlink(markerPath)
+	// The marker's own removal is this success path's one and only destructive
+	// step, so it must be held to exactly the same ownership-proof standard as
+	// every deletion `abort` performs -- routed through the very same
+	// `deleteOwnedEntry` primitive, never a bespoke direct `unlink`. Neither
+	// `finalMarker`'s nonce-field match above nor `verifyClaimIntact`'s
+	// identity-only re-check is sufficient alone (see `entrySafeToDelete`'s own
+	// documentation): a same-path, same-(forced-)identity, foreign-content
+	// replacement landing strictly in the narrow window between them and this
+	// deletion -- a forced-inode-ABA reusing the marker's captured
+	// `(dev, ino)`, reformatted to still parse with the identical `nonce` --
+	// is caught HERE, immediately before deletion, by the additional
+	// byte-content proof, and never reaches `deps.unlink`.
+	const markerEntryIndex = createdStack.findIndex(entry => entry.path === markerPath)
+	const markerEntry = markerEntryIndex !== -1 ? createdStack[markerEntryIndex] : undefined
+	if (markerEntry === undefined || !(await deleteOwnedEntry(markerEntry)))
+		return abort('The initialization marker could not be safely removed: its ownership could not be re-proven immediately before deletion.')
 	// The marker was just removed intentionally (not by `abort`'s cleanup):
 	// `createdStack` must stop tracking it as an entry `verifyClaimIntact`
 	// expects to still be present, or every subsequent check would spuriously
 	// fail simply because the marker this invocation itself just deleted is,
 	// correctly, no longer there.
-	const markerEntryIndex = createdStack.findIndex(entry => entry.path === markerPath)
-	if (markerEntryIndex !== -1)
-		createdStack.splice(markerEntryIndex, 1)
+	createdStack.splice(markerEntryIndex, 1)
 
 	if (!(await verifyClaimIntact())) {
 		// The claim was swapped out from under us in the narrow window between

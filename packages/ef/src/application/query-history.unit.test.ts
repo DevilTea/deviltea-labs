@@ -224,6 +224,9 @@ resources:
 Body text for REQ-001.
 `
 
+/** Same content as `REQ_001_WITH_RESOURCE`, but still `active` -- used while REQ-001's Resource is added before supersession. */
+const REQ_001_WITH_RESOURCE_ACTIVE = REQ_001_WITH_RESOURCE.replace('status: superseded', 'status: active')
+
 describe('computeHistory', () => {
 	let tempDir: string
 	const oids: Record<string, string> = {}
@@ -252,19 +255,31 @@ describe('computeHistory', () => {
 			.replace('Body text', 'Revised body text'))
 		oids.commit4 = commitAll(tempDir, 'edit draft REQ-002')
 
-		// Commit 5: CHG-002 (completed) modifies REQ-001 (active -> superseded).
-		await writeFile(tempDir, '.engineering/chg/CHG-002.md', chgMd('CHG-002', 'completed', '  - type: modifies\n    target: REQ-001'))
-		await writeFile(tempDir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'superseded'))
-		oids.commit5 = commitAll(tempDir, 'supersede REQ-001 via CHG-002')
-
-		// Commit 6: add REQ-001's local Resource file and declare it.
+		// Commit 5: CHG-003 (completed) modifies REQ-001 -- adds its local
+		// Resource file while REQ-001 remains `active` (07-change-transactions.md
+		// "any content, location, addition, or removal change to a local
+		// Resource owned by an active Artifact" is CHG-required). Tenth-round
+		// review Finding 5(a): a terminal Artifact's aggregate is byte-frozen,
+		// so this Resource addition MUST happen before REQ-001 is superseded
+		// below, not after.
 		await writeFile(tempDir, '.engineering/resources/REQ-001/notes.md', '# Notes\n')
-		await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE)
-		oids.commit6 = commitAll(tempDir, 'add REQ-001 resource')
+		await writeFile(tempDir, '.engineering/chg/CHG-003.md', chgMd('CHG-003', 'completed', '  - type: modifies\n    target: REQ-001'))
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE_ACTIVE)
+		oids.commit5 = commitAll(tempDir, 'add REQ-001 resource via CHG-003')
 
-		// Commit 7: control-file-only change (PROJECT aggregate).
+		// Commit 6: CHG-002 (completed) modifies REQ-001 (active -> superseded).
+		await writeFile(tempDir, '.engineering/chg/CHG-002.md', chgMd('CHG-002', 'completed', '  - type: modifies\n    target: REQ-001'))
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE)
+		oids.commit6 = commitAll(tempDir, 'supersede REQ-001 via CHG-002')
+
+		// Commit 7: control-file-only change (PROJECT aggregate), covered by a
+		// completing CHG. Tenth-round review Finding 5(b): a PROJECT aggregate
+		// change (any `.engineering/ef.yaml`/`.gitignore` change is attributed
+		// to PROJECT) with no completing CHG at all is now an exactly-once
+		// coverage violation, not a silent no-op.
 		await writeFile(tempDir, '.engineering/ef.yaml', `${CONFIG_YAML}\n`)
-		oids.commit7 = commitAll(tempDir, 'touch ef.yaml')
+		await writeFile(tempDir, '.engineering/chg/CHG-004.md', chgMd('CHG-004', 'completed', '  - type: modifies\n    target: PROJECT'))
+		oids.commit7 = commitAll(tempDir, 'touch ef.yaml via CHG-004')
 	})
 
 	afterEach(async () => {
@@ -285,11 +300,14 @@ describe('computeHistory', () => {
 		expect(outcome.effects)
 			.toEqual([
 				expect.objectContaining({ effect: 'introduces', status_before: null, status_after: 'active', commit_oid: oids.commit3 }),
-				expect.objectContaining({ effect: 'modifies', status_before: 'active', status_after: 'superseded', commit_oid: oids.commit5 }),
+				expect.objectContaining({ effect: 'modifies', status_before: 'active', status_after: 'active', commit_oid: oids.commit5 }),
+				expect.objectContaining({ effect: 'modifies', status_before: 'active', status_after: 'superseded', commit_oid: oids.commit6 }),
 			])
 		expect(outcome.effects[0]!.chg.id)
 			.toBe('CHG-001')
 		expect(outcome.effects[1]!.chg.id)
+			.toBe('CHG-003')
+		expect(outcome.effects[2]!.chg.id)
 			.toBe('CHG-002')
 	})
 
@@ -304,11 +322,13 @@ describe('computeHistory', () => {
 			.toEqual([oids.commit3, oids.commit5, oids.commit6])
 		expect(outcome.commits[0]!.changed_paths)
 			.toEqual(['.engineering/req/REQ-001.md'])
-		expect(outcome.commits[2]!.changed_paths)
+		expect(outcome.commits[1]!.changed_paths)
 			.toEqual([
 				'.engineering/req/REQ-001.md',
 				'.engineering/resources/REQ-001/notes.md',
 			])
+		expect(outcome.commits[2]!.changed_paths)
+			.toEqual(['.engineering/req/REQ-001.md'])
 	})
 
 	it('tracks draft-only Git history (no CHG effects) for an Artifact aggregate', async () => {
@@ -539,33 +559,45 @@ describe('computeHistory', () => {
 	it('does not report an engineering effect for a non-effect relation (references) alongside an effect relation on the same completed CHG', async () => {
 		// Finding 7(c): a completed CHG's declared effect must match the
 		// target's own before/after aggregate transition ACROSS THIS COMMIT --
-		// so REQ-001's own file is edited alongside CHG-003 in the SAME commit
+		// so REQ-001's own file is edited alongside CHG-005 in the SAME commit
 		// (a genuine `modifies` transition), not left byte-for-byte unchanged.
-		await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE.replace('Supplementary notes.', 'Supplementary notes, revised.'))
-		await writeFile(tempDir, '.engineering/chg/CHG-003.md', chgMd('CHG-003', 'completed', '  - type: modifies\n    target: REQ-001\n  - type: references\n    target: REQ-001'))
-		const commitOid = commitAll(tempDir, 'chg-003 mixed relations')
+		// Branches off `oids.commit5` (REQ-001 still `active`) rather than the
+		// current `main` tip -- tenth-round review Finding 5(a): REQ-001 is
+		// already `superseded` (terminal, byte-frozen) from `oids.commit6`
+		// onward, so mutating it any later would itself be untrustworthy
+		// regardless of CHG coverage.
+		git(tempDir, ['checkout', '-q', oids.commit5!])
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE_ACTIVE.replace('Supplementary notes.', 'Supplementary notes, revised.'))
+		await writeFile(tempDir, '.engineering/chg/CHG-005.md', chgMd('CHG-005', 'completed', '  - type: modifies\n    target: REQ-001\n  - type: references\n    target: REQ-001'))
+		const commitOid = commitAll(tempDir, 'chg-005 mixed relations')
 
 		const outcome = await computeHistory(gitRepo(), commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome.kind)
 			.toBe('complete')
 		if (outcome.kind !== 'complete')
 			return
-		const chg3Effects = outcome.effects.filter(e => e.chg.id === 'CHG-003')
-		expect(chg3Effects)
+		const chg5Effects = outcome.effects.filter(e => e.chg.id === 'CHG-005')
+		expect(chg5Effects)
 			.toEqual([
 				expect.objectContaining({ effect: 'modifies', commit_oid: commitOid }),
 			])
 	})
 
 	it('excludes an external (http/https) Resource location from the tracked Artifact aggregate', async () => {
-		const reqWithExternalResource = REQ_001_WITH_RESOURCE.replace(
+		const reqWithExternalResource = REQ_001_WITH_RESOURCE_ACTIVE.replace(
 			'resources:\n  - type: reference\n    location: .engineering/resources/REQ-001/notes.md\n    role: reference\n    media_type: text/markdown\n    normative: false\n    description: Supplementary notes.\n',
 			'resources:\n  - type: reference\n    location: .engineering/resources/REQ-001/notes.md\n    role: reference\n    media_type: text/markdown\n    normative: false\n    description: Supplementary notes.\n  - type: reference\n    location: https://example.com/spec\n    role: reference\n    media_type: text/html\n    normative: false\n    description: External spec reference.\n',
 		)
 		expect(reqWithExternalResource)
-			.not.toBe(REQ_001_WITH_RESOURCE)
+			.not.toBe(REQ_001_WITH_RESOURCE_ACTIVE)
+		// Branches off `oids.commit5` (REQ-001 still `active`) for the same
+		// terminal-freeze reason as above, and declares a covering CHG since
+		// tenth-round review Finding 5(b) now requires exactly-once CHG
+		// coverage for an active target's own aggregate change.
+		git(tempDir, ['checkout', '-q', oids.commit5!])
 		await writeFile(tempDir, '.engineering/req/REQ-001.md', reqWithExternalResource)
-		const commitOid = commitAll(tempDir, 'add external resource to REQ-001')
+		await writeFile(tempDir, '.engineering/chg/CHG-006.md', chgMd('CHG-006', 'completed', '  - type: modifies\n    target: REQ-001'))
+		const commitOid = commitAll(tempDir, 'add external resource to REQ-001 via CHG-006')
 
 		const outcome = await computeHistory(gitRepo(), commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome.kind)
@@ -598,7 +630,14 @@ describe('computeHistory: PROJECT control-path availability', () => {
 			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
 			const bootstrapOid = commitAll(dir, 'bootstrap, full control files')
 			await fs.rm(path.join(dir, '.engineering/.gitignore'))
-			const controlRemovedOid = commitAll(dir, 'remove .gitignore')
+			// Tenth-round review Finding 5(b): a PROJECT aggregate change
+			// (removing a control file changes PROJECT's own aggregate state,
+			// 07-change-transactions.md) with no completing CHG at all is now
+			// an exactly-once coverage violation, not a silent no-op -- a
+			// completing CHG declaring `modifies -> PROJECT` is required
+			// alongside the removal for this to remain `complete`.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: PROJECT'))
+			const controlRemovedOid = commitAll(dir, 'remove .gitignore via CHG-001')
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, controlRemovedOid, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
@@ -2096,6 +2135,301 @@ describe('computeHistory: exactly-once target claim across the whole commit (Fin
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: canonical-layout-violating entries hide unparsed Artifacts (tenth-round review Finding 3, EF-FS-003)', () => {
+	it('fails with untrusted-data when the target first appears at an unexpected discovery-scope path (EF-FS-003) before it ever appears at its own canonical path', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-fs003-nested-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// REQ-001 first appears at `.engineering/other/REQ-001.md` -- an
+			// entry `listArtifactFiles` reports as `EF-FS-003` (an unexpected
+			// top-level directory, never a canonical Artifact directory,
+			// control file, or managed root) rather than including in its own
+			// `artifactFiles` candidate set. Before this fix, this walk's
+			// candidate-path scan (`artifactDiscoveryPaths`) only ever looked at
+			// `artifactFiles` and silently never decoded this entry at all --
+			// `targetEverAppeared` stayed `false` through this commit.
+			await writeFile(dir, '.engineering/other/REQ-001.md', reqMd('REQ-001', 'active'))
+			const wrongPathOid = commitAll(dir, 'REQ-001 first appears at an EF-FS-003-violating path')
+
+			// REQ-001 is later "moved" to its own canonical path.
+			await fs.rm(path.join(dir, '.engineering/other/REQ-001.md'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const canonicalOid = commitAll(dir, 'REQ-001 moved to its canonical path')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, canonicalOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(wrongPathOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: declared local Resource file existence (tenth-round review Finding 4, 06-resources.md EF-RES-006)', () => {
+	it('fails with untrusted-data when a declared local Resource location never resolves to a file at all', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-res006-missing-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 introduces REQ-001, which declares a local Resource
+			// location -- but the file itself is never written anywhere in this
+			// commit's tree. Before this fix, an absent tree entry at a declared
+			// location was treated exactly like ordinary "not created yet"
+			// absence, so this commit still reported `complete: true`.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE_ACTIVE)
+			const completingOid = commitAll(dir, 'CHG-001 introduces REQ-001 declaring a Resource whose file does not exist')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a declared local Resource file is removed while its descriptor remains', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-res006-removed-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 introduces REQ-001 with its Resource file genuinely
+			// present.
+			await writeFile(dir, '.engineering/resources/REQ-001/notes.md', '# Notes\n')
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE_ACTIVE)
+			commitAll(dir, 'CHG-001 introduces REQ-001 with its Resource file present')
+
+			// The Resource FILE is removed while REQ-001's own descriptor still
+			// declares it -- covered by a completing CHG (so the exactly-once
+			// coverage check this round's Finding 5(b) added is satisfied and
+			// cannot itself explain a failure here). Before this fix, the
+			// now-absent tree entry at this declared location was silently
+			// treated as ordinary "not created yet" absence.
+			await fs.rm(path.join(dir, '.engineering/resources/REQ-001/notes.md'))
+			await writeFile(dir, '.engineering/chg/CHG-002.md', chgMd('CHG-002', 'completed', '  - type: modifies\n    target: REQ-001'))
+			const removedOid = commitAll(dir, 'CHG-002 removes REQ-001\'s Resource file while its descriptor remains')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, removedOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: terminal freeze and exactly-once CHG coverage for the target aggregate (tenth-round review Finding 5, 07-change-transactions.md)', () => {
+	it('fails with untrusted-data when an already-terminal target\'s content changes while its status stays terminal, even when a completing CHG claims the mutation', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-terminal-freeze-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			commitAll(dir, 'CHG-001 introduces REQ-001')
+
+			await writeFile(dir, '.engineering/chg/CHG-002.md', chgMd('CHG-002', 'completed', '  - type: modifies\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'superseded'))
+			commitAll(dir, 'CHG-002 supersedes REQ-001')
+
+			// REQ-001's OWN status stays `superseded` (terminal) in this commit,
+			// yet its body content changes, and CHG-003 newly completes claiming
+			// `modifies -> REQ-001`. A terminal Artifact's aggregate is
+			// byte-frozen regardless of what any CHG claims -- before this fix,
+			// `targetContentChanged` fell through to a truthful-looking
+			// `modifies` classification and this commit was accepted.
+			await writeFile(dir, '.engineering/chg/CHG-003.md', chgMd('CHG-003', 'completed', '  - type: modifies\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'superseded')
+				.replace('Body text', 'Illegally revised body text'))
+			const frozenMutationOid = commitAll(dir, 'CHG-003 illegally mutates already-superseded REQ-001')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, frozenMutationOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when an active target\'s aggregate changes in a commit with no completing CHG claiming it at all', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-active-no-chg-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			commitAll(dir, 'CHG-001 introduces REQ-001')
+
+			// REQ-001's own file changes in this commit -- a genuine aggregate
+			// mutation of an ACTIVE Artifact, which 07-change-transactions.md's
+			// "CHG-required mutations" makes mandatory ("any content change to
+			// an active Artifact file") -- yet no CHG completes here at all.
+			// Before this fix, the Git commit was still recorded
+			// (`commits.push`) and this query still reported `complete: true`
+			// with no engineering effect explaining the change.
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active')
+				.replace('Body text', 'Uncovered revised body text'))
+			const uncoveredOid = commitAll(dir, 'REQ-001 mutated with no completing CHG')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, uncoveredOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when the PROJECT aggregate changes in a commit with no completing CHG claiming it at all', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-project-no-chg-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// `.engineering/ef.yaml` changes post-bootstrap -- attributed to the
+			// PROJECT aggregate (07-change-transactions.md) -- with no
+			// completing CHG at all. Before this fix, PROJECT's own aggregate
+			// changes were never checked for CHG coverage.
+			await writeFile(dir, '.engineering/ef.yaml', `${CONFIG_YAML}\n`)
+			const uncoveredOid = commitAll(dir, 'ef.yaml touched with no completing CHG')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, uncoveredOid, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: CHG identity permanence and terminal-aggregate freeze (tenth-round review Finding 6, 02-identity.md)', () => {
+	it('fails with untrusted-data when a draft CHG disappears and later reappears completed', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-draft-absent-completed-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 first appears `draft` -- not a terminal status.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', `---
+schema: ef/change@1
+type: change
+id: CHG-001
+title: Title of CHG-001
+status: draft
+summary: Summary of CHG-001.
+tags: []
+relations: []
+resources: []
+---
+
+## Rationale
+
+Rationale text.
+`)
+			commitAll(dir, 'CHG-001 first appears draft')
+
+			// CHG-001 is physically deleted. Before this fix, disappearance was
+			// only ever checked for a PREVIOUSLY TERMINAL id -- a draft CHG's
+			// disappearance was silently ignored.
+			await fs.rm(path.join(dir, '.engineering/chg/CHG-001.md'))
+			const deletedOid = commitAll(dir, 'CHG-001 physically deleted while still draft')
+
+			// CHG-001 reappears, now completed, declaring a qualifying effect.
+			// Before this fix, `chgLifecycleStatus` had forgotten CHG-001
+			// entirely, so this looked like a fresh, legitimate `draft ->
+			// completed` first-time completion.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const reappearOid = commitAll(dir, 'CHG-001 reappears completed')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, reappearOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(deletedOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a completed CHG\'s own content changes while it remains completed', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-completed-same-status-mutation-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 completes, genuinely introducing REQ-001.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			commitAll(dir, 'CHG-001 completes, introduces REQ-001')
+
+			// CHG-001's own title changes in a LATER commit while its status
+			// stays `completed` -- a completed CHG's "frontmatter, body, and
+			// owned Resources are frozen after integration"
+			// (07-change-transactions.md). `chgLifecycleStatus` alone only
+			// tracks status: a same-status recurrence would previously never
+			// be re-examined at all once past its first completion.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001', 'Illegally revised title of CHG-001'))
+			const mutatedOid = commitAll(dir, 'CHG-001 illegally mutated while remaining completed')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, mutatedOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}

@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
+import { directoryIdentity } from '../platform/fs-facts'
 import { loadWorkingTreeContext } from './working-tree-context'
 
 /**
@@ -156,6 +157,28 @@ describe('loadWorkingTreeContext', () => {
 			.toBe(true)
 		expect(result.context.validation.byId.has('PROJECT'))
 			.toBe(true)
+	})
+
+	// FINDING 2 (P1, tenth round): `artifact create`'s `applyCreatePlan` binds
+	// its own later, separate re-verifications back to discovery's OWN
+	// `.engineering` identity observation -- exposed here on `WorkingTreeContext`
+	// so that later call site can carry it through its plan (see
+	// `application/artifact-create.ts`).
+	it('exposes `.engineering`\'s discovery-time identity on the returned context', async () => {
+		await writeMinimalProject(root)
+		commitAll(root, 'bootstrap')
+
+		const result = await loadWorkingTreeContext({ cwd: root }, createGitExecutor())
+		expect(result.ok)
+			.toBe(true)
+		if (!result.ok)
+			return
+
+		const expectedIdentity = await directoryIdentity(path.join(root, '.engineering'))
+		expect(expectedIdentity)
+			.not.toBeUndefined()
+		expect(result.context.engineeringIdentity)
+			.toEqual(expectedIdentity)
 	})
 
 	it('reports stage "resolve" when no EF project can be discovered', async () => {
