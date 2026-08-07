@@ -28,7 +28,14 @@
  * immediately afterward (attempting an ownership-proven retraction on
  * mismatch rather than ever misreporting either state -- see
  * `ApplyCreatePlanResult`'s `applied: true, outcome: 'incomplete'` variant),
- * and unlink the temporary name. Every `lstat`-based re-verification here is
+ * and unlink the temporary name -- a failure of that final, otherwise
+ * best-effort cleanup step is itself reported as its own typed
+ * `applied: true, outcome: 'cleanup-failed'` variant rather than silently
+ * folded into a plain success (13-cli-contract.md "the implementation MUST
+ * NOT misreport the published state as unapplied" -- a verified publication
+ * followed only by a failed cleanup step is exactly the "publication
+ * succeeds but a later cleanup or internal operation fails" case that
+ * provision describes). Every `lstat`-based re-verification here is
  * the strongest available mitigation, not a claim of race-freedom: Node
  * exposes no `openat`-style, file-descriptor-relative primitive on any
  * platform this package targets, so a swap that lands strictly inside the
@@ -201,17 +208,26 @@ function hasIdentityCertainEnvelope(artifact: SnapshotArtifactFile): boolean {
 }
 
 /**
- * The first Artifact file directly inside `canonicalDir` whose envelope is
- * not identity-certain (see {@link hasIdentityCertainEnvelope}), or
- * `undefined` when every such file's contribution to the greatest visible
- * numeric component for this prefix is exactly known. Scoped to
- * `canonicalDir` (rather than the whole graph) because an identity-uncertain
- * file under a DIFFERENT type's canonical directory cannot hide a higher
- * reservation for THIS prefix.
+ * The first Artifact file ANYWHERE in the full discovery scope (`02-identity.md`
+ * Allocation: "every ... provisional Artifact visible in the working graph")
+ * whose envelope is not identity-certain (see {@link hasIdentityCertainEnvelope}),
+ * or `undefined` when every discovered file's contribution to the greatest
+ * visible numeric component is exactly known.
+ *
+ * NOT scoped to the requested prefix's canonical directory (Finding 4): a
+ * file's directory placement alone can never prove its declared type or ID.
+ * A file whose envelope failed to decode -- or whose declared `id` could not
+ * be established -- is identity-uncertain regardless of which canonical
+ * directory it physically sits in; `.engineering/adr/junk.md` might, once
+ * decoded, have actually declared `id: REQ-999` in a wrong-directory
+ * placement, and restricting the scan to `.engineering/req` would let a
+ * `req` allocation select a candidate without ever knowing the true greatest
+ * visible REQ component. A file whose envelope DID decode to completion,
+ * declaring a KNOWN, different type, remains safely ignorable regardless of
+ * its directory: its true prefix is exactly known and does not match.
  */
-function findIdentityUncertainArtifact(snapshot: ProjectSnapshot, canonicalDir: string): SnapshotArtifactFile | undefined {
-	const directoryPrefix = `${canonicalDir}/`
-	return snapshot.artifacts.find(artifact => artifact.path.startsWith(directoryPrefix) && !hasIdentityCertainEnvelope(artifact))
+function findIdentityUncertainArtifact(snapshot: ProjectSnapshot): SnapshotArtifactFile | undefined {
+	return snapshot.artifacts.find(artifact => !hasIdentityCertainEnvelope(artifact))
 }
 
 /** Structural self-validation of freshly built draft bytes: parsing, envelope decoding, identity syntax, filename, status, and body schema. Does not require the full project graph. */
@@ -272,11 +288,13 @@ export function computeCreatePlan(input: ComputeCreatePlanInput): ComputeCreateP
 	const prefix = ID_PREFIX_BY_TYPE[artifactType]
 	const canonicalDir = CANONICAL_DIR_BY_TYPE[artifactType]
 
-	// The allocator contract requires inspecting every visible Artifact for
-	// this prefix before selecting a candidate (02-identity.md Allocation).
-	// An identity-uncertain file's greatest visible component is not
-	// actually known, so it must never be silently treated as absent.
-	const uncertainArtifact = findIdentityUncertainArtifact(snapshot, canonicalDir)
+	// The allocator contract requires inspecting every visible Artifact
+	// before selecting a candidate (02-identity.md Allocation). An
+	// identity-uncertain file's greatest visible component is not actually
+	// known -- and, per Finding 4, its directory placement alone can never
+	// prove it is NOT this prefix -- so it must never be silently treated as
+	// absent, regardless of which canonical directory it physically sits in.
+	const uncertainArtifact = findIdentityUncertainArtifact(snapshot)
 	if (uncertainArtifact) {
 		return {
 			ok: false,
@@ -402,7 +420,7 @@ export const defaultApplyCreatePlanDeps: ApplyCreatePlanDeps = {
 }
 
 export type ApplyCreatePlanResult
-	= | { applied: true, path: string }
+	= | { applied: true, outcome: 'applied', path: string }
 		/**
 		 * The hard-link publication call itself reported success, but an
 		 * immediate post-publication re-verification (managed directory chain
@@ -419,6 +437,22 @@ export type ApplyCreatePlanResult
 		 * explicit operator action".
 		 */
 		| { applied: true, outcome: 'incomplete', path: string, message: string }
+		/**
+		 * Publication succeeded AND every post-publication verification (managed
+		 * chain identity, published-path identity bound back to the temporary
+		 * file) confirmed the published file is exactly what this invocation
+		 * wrote -- but the best-effort removal of the now-superfluous temporary
+		 * file itself failed. The publication is genuinely complete and MUST NOT
+		 * be misreported as unapplied (13-cli-contract.md "the implementation
+		 * MUST NOT misreport the published state as unapplied"); distinct from
+		 * the `outcome: 'incomplete'` variant above, which reports an UNVERIFIED
+		 * publication, not a verified one with a merely-failed cleanup step. Both
+		 * are `applied: true` with a non-`'applied'` outcome, so a caller that
+		 * maps every such state to the same "publication succeeded but a later
+		 * cleanup or internal operation failed" contract need not distinguish
+		 * them further.
+		 */
+		| { applied: true, outcome: 'cleanup-failed', path: string, message: string }
 		| { applied: false, outcome: 'raced', message: string }
 		| { applied: false, outcome: 'unsupported', message: string }
 		| { applied: false, outcome: 'incomplete', message: string }
@@ -525,12 +559,26 @@ async function verifyManagedDirectoryChain(deps: ApplyCreatePlanDeps, projectRoo
 	return { ok: true, identity: { engineering: engineeringResult.identity, typeDir: typeDirResult.identity } }
 }
 
-async function safeUnlink(deps: ApplyCreatePlanDeps, tempPath: string): Promise<void> {
+/**
+ * Best-effort removal of the temporary file, reporting whether it actually
+ * succeeded. Most call sites intentionally ignore the return value: the
+ * outcome they already report does not depend on it (13-cli-contract.md's
+ * eight-step protocol only requires the CANONICAL publication or the
+ * pre-publication cleanup to be correct; a leftover uniquely-nonced temp file
+ * from an already-failed or already-rejected attempt is not itself a
+ * completeness failure). The one call site that DOES depend on it is the
+ * verified-publish success path in `applyCreatePlan` (Finding 2): once
+ * publication is confirmed byte-for-byte and identity-for-identity, cleanup
+ * failing there must be surfaced as its own typed, non-silently-swallowed
+ * outcome rather than folded into a plain, unqualified success.
+ */
+async function safeUnlink(deps: ApplyCreatePlanDeps, tempPath: string): Promise<boolean> {
 	try {
 		await deps.unlink(tempPath)
+		return true
 	}
 	catch {
-		// Best-effort cleanup only; the outcome already reported does not depend on it.
+		return false
 	}
 }
 
@@ -644,8 +692,11 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		const contentIntact = publishedIdentity !== undefined && sameFileIdentity(publishedIdentity, tempIdentity)
 
 		if (postChain.ok && contentIntact) {
-			await safeUnlink(deps, tempPath)
-			return { applied: true, path: plan.path }
+			const cleanedUp = await safeUnlink(deps, tempPath)
+			if (!cleanedUp) {
+				return { applied: true, outcome: 'cleanup-failed', path: plan.path, message: `'${plan.path}' was published and verified successfully, but its now-superfluous temporary file at '${tempPath}' could not be removed afterward.` }
+			}
+			return { applied: true, outcome: 'applied', path: plan.path }
 		}
 
 		// A mismatch was found. Attempt recovery ONLY when ownership of the

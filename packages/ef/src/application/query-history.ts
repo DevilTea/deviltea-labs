@@ -29,6 +29,7 @@ import type { ArtifactType, Envelope, Status } from '../domain/model'
 import type { GitRepository, GitTreeEntry } from '../git/repository'
 import type { HistoryCommitData, HistoryEffectData } from './query-types'
 import type { SnapshotArtifactRecord } from './snapshot-validation'
+import { validateBody } from '../domain/body-schemas'
 import { decodeEnvelope } from '../domain/envelope'
 import { validateFilename } from '../domain/identity'
 import { validateStatus } from '../domain/lifecycle'
@@ -36,14 +37,28 @@ import { compareBytewise } from '../domain/model'
 import { validateRelationEntries } from '../domain/relations'
 import { validateResourceDescriptors } from '../domain/resources'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
+import { extractSections, parseBody } from '../parsing/markdown'
 import { detectInvalidUtf8 } from '../platform/text-checks'
 import { decodeConfig } from '../repository/config'
 import { buildArtifactSummary, canonicalArtifactPath } from './query-projection'
+import { loadSnapshotFromCommit } from './snapshot'
 import { rawArrayField } from './snapshot-raw-fields'
+import { summarizeValidation, validateSnapshot } from './snapshot-validation'
 
 const EF_YAML_PATH = '.engineering/ef.yaml'
-const PROJECT_MD_PATH = '.engineering/PROJECT.md'
 const PROJECT_CONTROL_PATHS = [EF_YAML_PATH, '.engineering/.gitignore'] as const
+/**
+ * Bootstrap-only state rules (09-validation.md "Bootstrap exception"): no CHG
+ * Artifact, and no terminal (`superseded`/`retired`) knowledge Artifact, may
+ * be present at the very first EF state. Mirrors `bootstrap-validation.ts`'s
+ * own (unexported) `KNOWLEDGE_TYPES` constant of the same name -- duplicated
+ * here rather than imported because neither that constant nor the small
+ * state-rule loop it drives is exported (Finding 5; see this round's review
+ * report for the extraction that would let this module import it instead).
+ */
+const BOOTSTRAP_KNOWLEDGE_TYPES = new Set(['prd', 'requirement', 'decision', 'policy'])
+/** Mirrors `bootstrap-validation.ts`'s own `DEFAULT_POLICY`: neither `strict` nor `warningsAsErrors`, so only error-severity diagnostics fail the boundary. */
+const BOOTSTRAP_POLICY = { strict: false, warningsAsErrors: false }
 const ENGINEERING_DIR_BYTES = new TextEncoder()
 	.encode('.engineering')
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false })
@@ -51,6 +66,45 @@ const utf8Decoder = new TextDecoder('utf-8', { fatal: false })
 /** A tree entry that is an ordinary file readable as a blob -- not a directory, gitlink, or symlink-mode (`120000`) blob. */
 function isRegularBlobEntry(entry: GitTreeEntry | undefined): entry is GitTreeEntry {
 	return entry !== undefined && entry.type === 'blob' && entry.mode !== '120000'
+}
+
+/**
+ * Finding 6: Git's tree-entry `mode` is stored independently of the blob
+ * object it names -- a later commit can rewrite `.engineering/ef.yaml`'s mode
+ * from `100644` to the forbidden symlink mode `120000` while reusing the
+ * EXACT SAME blob OID (the blob's content, and therefore its OID, never
+ * changed). Caching only the entry's `oid` across commits (as this per-commit
+ * re-check used to) would see no OID change on such a commit and wrongly skip
+ * `evaluateEfYamlConfig` entirely, letting a now-forbidden symlink control
+ * path pass through unnoticed. The cache key is therefore the full relevant
+ * tree-entry identity -- `{ oid, mode, pathValid }` -- so a mode-only (or
+ * path-validity-only) change still re-triggers the cheap regularity/decode
+ * check even when the OID alone is unchanged. `pathValid` is included for the
+ * same reason `isRegularBlobEntry` treats it as part of an entry's identity
+ * elsewhere in this walk; in practice it is always `true` here (an entry
+ * reached via this exact-string `treeMap.get(EF_YAML_PATH)` lookup can never
+ * be a `pathValid: false` placeholder, which is keyed under a synthesized,
+ * never-colliding path instead), but tracking it keeps this cache key
+ * expressed as the complete identity rather than one accidentally-sufficient
+ * field.
+ */
+interface EfYamlTreeEntryIdentity {
+	oid: string
+	mode: string
+	pathValid: boolean
+}
+
+function efYamlIdentityOf(treeMap: ReadonlyMap<string, GitTreeEntry>): EfYamlTreeEntryIdentity | undefined {
+	const entry = treeMap.get(EF_YAML_PATH)
+	if (!entry)
+		return undefined
+	return { oid: entry.oid, mode: entry.mode, pathValid: entry.pathValid !== false }
+}
+
+function sameEfYamlIdentity(a: EfYamlTreeEntryIdentity | undefined, b: EfYamlTreeEntryIdentity | undefined): boolean {
+	if (a === undefined || b === undefined)
+		return a === b
+	return a.oid === b.oid && a.mode === b.mode && a.pathValid === b.pathValid
 }
 
 /**
@@ -148,22 +202,24 @@ export interface HistoryOutcome {
  * - `history-unavailable`: the required first-parent history itself could
  *   not be completely materialized (shallow, unresolved, or otherwise
  *   inaccessible Git history), a historical commit's tree could not be read
- *   mid-walk, the claimed bootstrap boundary commit's `ef.yaml`/`PROJECT.md`
- *   blob could not be read due to an execution/read failure (see
- *   `evaluateBootstrapBoundary` below), or the walked history never contains
- *   a commit whose tree even contains `.engineering/ef.yaml` at all -- no
- *   authoritative EF history exists on this ref at all. This maps to
- *   `EF-QRY-010` ("Requested history context is unavailable",
- *   diagnostic-registry.md).
+ *   mid-walk, a blob the claimed bootstrap boundary commit's COMPLETE
+ *   snapshot materialization needed could not be read due to an
+ *   execution/read failure (Finding 5, see `evaluateBootstrapBoundary`
+ *   below), or the walked history never contains a commit whose tree even
+ *   contains `.engineering/ef.yaml` at all -- no authoritative EF history
+ *   exists on this ref at all. This maps to `EF-QRY-010` ("Requested history
+ *   context is unavailable", diagnostic-registry.md).
  * - `untrusted-data`: the target's current record sits at a path that
  *   violates its canonical placement (`EF-ID-005`/`EF-ID-014`; see the
  *   authoritative-path check below), the claimed bootstrap boundary commit
- *   exists but is not a valid, complete bootstrap (a non-regular-blob or
- *   undecodable `ef.yaml`, an `ef.yaml` that decodes but declares a DIFFERENT
- *   `integration_ref` than the one this walk was asked to walk, when the
- *   caller supplied one (Finding 11, see `evaluateEfYamlConfig`), or a
- *   missing/invalid minimal-witness `PROJECT.md` -- see
- *   `evaluateBootstrapBoundary`), a LATER authoritative EF-bearing commit
+ *   exists but is not a valid, complete bootstrap (an undecodable `ef.yaml`,
+ *   an `ef.yaml` that decodes but declares a DIFFERENT `integration_ref` than
+ *   the one this walk was asked to walk, when the caller supplied one
+ *   (Finding 11, see `evaluateEfYamlConfig`), or the claimed boundary's
+ *   COMPLETE tree fails full snapshot validation or a bootstrap-only state
+ *   rule -- Finding 5: a non-canonical/missing control file, more than one
+ *   active PROJECT, any CHG Artifact, or any terminal knowledge Artifact --
+ *   see `evaluateBootstrapBoundary`), a LATER authoritative EF-bearing commit
  *   whose own `ef.yaml` blob changes and either fails to decode, is removed,
  *   or retargets `integration_ref` away from what the walk's OWN bootstrap
  *   commit declared (Finding 11, `integration_ref` is fixed by bootstrap and
@@ -380,30 +436,32 @@ export async function computeHistory(
 	//
 	// Once the boundary is claimed, it is evaluated exactly once, with no
 	// fallback to a later commit either way:
-	// - a read/execution failure while resolving or decoding ANY blob this
-	//   probe needs (the `ef.yaml` blob itself, or the bootstrap witness
-	//   `.engineering/PROJECT.md` blob) makes the required history itself
-	//   unavailable (`history-unavailable`, `EF-QRY-010`) -- a transient read
-	//   failure at the true boundary must never be papered over by silently
-	//   accepting a later commit's successful read as though history started
-	//   there instead (that would be a silent late start).
-	// - a structural/validity failure -- the `ef.yaml` entry is not a regular
-	//   blob (a directory, gitlink, or `120000` symlink-mode blob), it fails
-	//   to decode as a valid `ef/config@1` configuration, or the tree lacks a
-	//   regular-blob `.engineering/PROJECT.md` that itself decodes with
-	//   `id: PROJECT`, `type: project`, `status: active` (the minimal
-	//   bootstrap witness) -- makes this claimed boundary untrustworthy
-	//   (`untrusted-data`, `EF-QRY-013`): a pre-EF commit that merely happens
-	//   to carry a syntactically valid config (or any other partial EF-shaped
-	//   state) but is not a genuine, complete bootstrap must be reported as
-	//   untrusted, never silently skipped in favor of a later commit.
+	// - a read/execution failure while resolving or decoding ANY blob the
+	//   boundary's complete snapshot materialization needs makes the required
+	//   history itself unavailable (`history-unavailable`, `EF-QRY-010`) -- a
+	//   transient read failure at the true boundary must never be papered over
+	//   by silently accepting a later commit's successful read as though
+	//   history started there instead (that would be a silent late start).
+	// - a structural/validity failure -- `ef.yaml` fails to decode as a valid
+	//   `ef/config@1` configuration, or the claimed boundary's COMPLETE tree
+	//   fails `validateSnapshot` (Finding 5: `application/snapshot-validation.ts`'s
+	//   full pipeline -- every required control file in canonical form, exactly
+	//   one active PROJECT, every Artifact decodable) or violates a
+	//   bootstrap-only state rule (`bootstrap-validation.ts`'s own EF-VAL-010
+	//   rules: no CHG Artifact, no terminal knowledge Artifact) -- makes this
+	//   claimed boundary untrustworthy (`untrusted-data`, `EF-QRY-013`): a
+	//   pre-EF commit that merely happens to carry a syntactically valid
+	//   config (or any other partial EF-shaped state) but is not a genuine,
+	//   complete bootstrap must be reported as untrusted, never silently
+	//   skipped in favor of a later commit. See `evaluateBootstrapBoundary`'s
+	//   own doc for why `validateBootstrap` itself is not called here.
 	//
 	// `previousTreeMap`/`previousEnvelope`/`previousChgStatus` are left at
 	// their initial (empty) values through every skipped pre-boundary commit,
 	// so the first commit actually processed -- the bootstrap commit itself --
 	// is diffed exactly as if it were `oidsOldestFirst[0]`.
 	let reachedBootstrap = false
-	let previousEfYamlOid: string | undefined
+	let previousEfYamlIdentity: EfYamlTreeEntryIdentity | undefined
 	// The `integration_ref` the walk's OWN bootstrap commit declared -- the
 	// baseline every later authoritative EF-bearing commit's own `ef.yaml` is
 	// compared against (Finding 11's ALWAYS-ON self-consistency requirement,
@@ -456,17 +514,46 @@ export async function computeHistory(
 
 	type BootstrapBoundaryOutcome = 'not-present' | 'valid' | 'invalid' | 'read-error'
 
-	async function evaluateBootstrapBoundary(treeMap: Map<string, GitTreeEntry>): Promise<BootstrapBoundaryOutcome> {
-		// From here on, once `ef.yaml` is present at all, this commit IS the
-		// claimed boundary -- every path below returns 'invalid' or
-		// 'read-error', never falls through to let the caller consider a
-		// later commit instead.
-		const efYamlOutcome = await evaluateEfYamlConfig(treeMap)
-		if (efYamlOutcome.kind === 'not-present')
+	/**
+	 * Finding 5: a decodable `ef.yaml` plus a minimal `id`/`type`/`status`
+	 * witness at `PROJECT.md` is NOT sufficient proof that the claimed boundary
+	 * commit is a genuine, COMPLETE bootstrap (09-validation.md "Bootstrap
+	 * exception"; 11-filesystem-and-config.md). Core bootstrap requires
+	 * complete snapshot validation, every required control file in canonical
+	 * form, no terminal knowledge Artifact, and no CHG Artifact at all -- so
+	 * the claimed boundary's ENTIRE tree is materialized
+	 * (`application/snapshot.ts`'s `loadSnapshotFromCommit`, the same
+	 * commit-materialization `bootstrap-validation.ts` itself uses) and run
+	 * through the SAME `validateSnapshot` pipeline every ordinary snapshot/
+	 * transition validation uses, plus the bootstrap-only state rules
+	 * `bootstrap-validation.ts`'s own `validateBootstrap` applies (EF-VAL-010:
+	 * no CHG, no terminal knowledge). `validateBootstrap` itself is not called
+	 * here -- it also drives ref-resolution/parentage orchestration for a
+	 * caller-supplied CANDIDATE commit, which this walk has no use for: the
+	 * boundary commit here is already GIVEN by the walk's own first-parent
+	 * history scan, not a proposal needing its own proof of ref/parentage.
+	 */
+	async function evaluateBootstrapBoundary(oid: string, treeMap: Map<string, GitTreeEntry>): Promise<BootstrapBoundaryOutcome> {
+		const efYamlEntry = treeMap.get(EF_YAML_PATH)
+		if (!efYamlEntry)
 			return 'not-present'
-		if (efYamlOutcome.kind === 'read-error')
+
+		// From here on, this commit IS the claimed boundary -- every path below
+		// returns 'invalid' or 'read-error', never falls through to let the
+		// caller consider a later commit instead.
+		const loadResult = await loadSnapshotFromCommit(git, oid)
+		if (!loadResult.ok)
+			// `loadSnapshotFromCommit` fails this way only on a genuine
+			// execution/read problem (Git unavailable, or a tree/blob already
+			// proven to exist that then fails to read) -- never merely because
+			// the boundary's content is invalid -- so this is
+			// `history-unavailable`, mirroring every other read/execution
+			// failure this probe already treats that way.
 			return 'read-error'
-		if (efYamlOutcome.kind === 'invalid')
+
+		const snapshot = loadResult.snapshot
+		const config = snapshot.config.config
+		if (!config)
 			return 'invalid'
 		// Finding 11: `integration_ref` is fixed by bootstrap and MUST NOT
 		// change within Core v1 (11-filesystem-and-config.md). When the caller
@@ -476,31 +563,31 @@ export async function computeHistory(
 		// all -- accepting it would let a config that was schema-validly
 		// edited to select a different ref be silently accepted merely
 		// because THAT ref's own history happens to be internally consistent.
-		if (expectedIntegrationRef !== undefined && efYamlOutcome.integrationRef !== expectedIntegrationRef)
-			return 'invalid'
-		bootstrapIntegrationRef = efYamlOutcome.integrationRef
-
-		const projectEntry = treeMap.get(PROJECT_MD_PATH)
-		if (!isRegularBlobEntry(projectEntry))
+		if (expectedIntegrationRef !== undefined && config.repository.integrationRef !== expectedIntegrationRef)
 			return 'invalid'
 
-		const projectBlobResult = await git.readBlob(projectEntry.oid)
-		if (projectBlobResult.kind === 'git-unavailable' || projectBlobResult.kind === 'error')
-			return 'read-error'
-		if (projectBlobResult.kind !== 'resolved')
-			return 'read-error'
-
-		const projectText = utf8Decoder.decode(projectBlobResult.bytes)
-		const projectSplit = splitFrontmatter(projectText)
-		if (!projectSplit.ok)
-			return 'invalid'
-		const projectDocument = parseFrontmatterDocument(projectSplit.frontmatterText, PROJECT_MD_PATH, { startLine: 2 })
-		const projectDecoded = decodeEnvelope({ mapping: projectDocument.mapping, locate: projectDocument.locate }, PROJECT_MD_PATH)
-		if (!projectDecoded.envelope)
-			return 'invalid'
-		if (projectDecoded.envelope.id !== 'PROJECT' || projectDecoded.envelope.type !== 'project' || projectDecoded.envelope.status !== 'active')
+		const validation = validateSnapshot(snapshot)
+		const summary = summarizeValidation({
+			scope: 'bootstrap',
+			diagnostics: validation.diagnostics,
+			complete: true,
+			policy: BOOTSTRAP_POLICY,
+		})
+		if (!summary.valid)
 			return 'invalid'
 
+		// Bootstrap-only state rules (mirrors `bootstrap-validation.ts`'s own
+		// `validateBootstrap` loop over `validation.byId`): no CHG Artifact, and
+		// no terminal (`superseded`/`retired`) knowledge Artifact, may be
+		// present before the first EF state.
+		for (const record of validation.byId.values()) {
+			if (record.type === 'change')
+				return 'invalid'
+			if (BOOTSTRAP_KNOWLEDGE_TYPES.has(record.type) && (record.status === 'superseded' || record.status === 'retired'))
+				return 'invalid'
+		}
+
+		bootstrapIntegrationRef = config.repository.integrationRef
 		return 'valid'
 	}
 
@@ -510,7 +597,7 @@ export async function computeHistory(
 			return { kind: 'history-unavailable' }
 
 		if (!reachedBootstrap) {
-			const boundary = await evaluateBootstrapBoundary(treeMap)
+			const boundary = await evaluateBootstrapBoundary(oid, treeMap)
 			if (boundary === 'not-present')
 				continue
 			if (boundary === 'read-error')
@@ -519,13 +606,13 @@ export async function computeHistory(
 				return { kind: 'untrusted-data' }
 			reachedBootstrap = true
 			// The boundary commit's `ef.yaml` was just proven (by
-			// `evaluateBootstrapBoundary` above, via `evaluateEfYamlConfig`) to
-			// be a regular blob decoding to a valid config, and
-			// `bootstrapIntegrationRef` now holds its declared
-			// `integration_ref` (matched against `expectedIntegrationRef`
-			// already, when supplied). Record its OID as the baseline every
-			// later commit's own `ef.yaml` OID is compared against (Finding 11).
-			previousEfYamlOid = treeMap.get(EF_YAML_PATH)?.oid
+			// `evaluateBootstrapBoundary` above) to be a regular blob decoding
+			// to a valid config, and `bootstrapIntegrationRef` now holds its
+			// declared `integration_ref` (matched against
+			// `expectedIntegrationRef` already, when supplied). Record its full
+			// tree-entry identity as the baseline every later commit's own
+			// `ef.yaml` entry is compared against (Finding 11, Finding 6).
+			previousEfYamlIdentity = efYamlIdentityOf(treeMap)
 		}
 		else {
 			// Finding 11: `integration_ref` is fixed by bootstrap and MUST NOT
@@ -534,13 +621,19 @@ export async function computeHistory(
 			// `bootstrapIntegrationRef` (this SAME walk's own bootstrap
 			// commit's declared ref): a self-consistency requirement that
 			// needs no external input. Re-validate only when THIS commit's own
-			// `.engineering/ef.yaml` blob actually changed since the last
-			// commit this walk checked it at -- an unchanged blob was already
+			// `.engineering/ef.yaml` TREE ENTRY actually changed since the last
+			// commit this walk checked it at -- an unchanged entry was already
 			// proven to declare `bootstrapIntegrationRef` (either at the
 			// boundary, or at whichever later commit last changed it), so
 			// re-decoding it again here would be redundant, not more correct.
-			const efYamlEntry = treeMap.get(EF_YAML_PATH)
-			if (efYamlEntry?.oid !== previousEfYamlOid) {
+			// Finding 6: comparing `oid` ALONE would miss a commit that
+			// rewrites this same path's MODE (e.g. `100644` -> the forbidden
+			// symlink mode `120000`) while reusing the identical blob OID --
+			// `efYamlIdentityOf`'s `{ oid, mode, pathValid }` cache key re-runs
+			// the cheap regularity/decode check on any such change, not only an
+			// OID change.
+			const currentEfYamlIdentity = efYamlIdentityOf(treeMap)
+			if (!sameEfYamlIdentity(currentEfYamlIdentity, previousEfYamlIdentity)) {
 				const configOutcome = await evaluateEfYamlConfig(treeMap)
 				if (configOutcome.kind === 'read-error')
 					return { kind: 'history-unavailable' }
@@ -559,7 +652,7 @@ export async function computeHistory(
 				// bootstrap commit declared.
 				if (configOutcome.integrationRef !== bootstrapIntegrationRef)
 					return { kind: 'untrusted-data' }
-				previousEfYamlOid = efYamlEntry?.oid
+				previousEfYamlIdentity = currentEfYamlIdentity
 			}
 		}
 
@@ -660,8 +753,16 @@ export async function computeHistory(
 			if (chgLookup.kind === 'absent')
 				continue
 			const chgEnvelope = chgLookup.envelope
+			// Finding 7(d): a managed path shaped exactly like a CHG
+			// (`.engineering/chg/*.md`) whose envelope decodes to a NON-`change`
+			// type is not a CHG this walk may simply ignore -- it is a
+			// managed-path/type mismatch this walk cannot make sense of at all
+			// (an Artifact of some OTHER declared type occupying a path this
+			// commit's `.engineering/chg/` layout convention reserves for CHGs).
+			// Silently `continue`-ing here would let such a commit still report
+			// `complete: true` over content this walk never actually trusted.
 			if (chgEnvelope.type !== 'change')
-				continue
+				return { kind: 'untrusted-data' }
 
 			// This walk discovers every CHG purely by scanning blob paths under
 			// `.engineering/chg/` and indexes each one's completion status
@@ -727,6 +828,49 @@ export async function computeHistory(
 			)
 
 			if (qualifyingRelations.length > 0) {
+				// Finding 7(a) (EF-CHG-004 class): `EF-REL-006` above only
+				// excludes a literal DUPLICATE `(type, target)` pair -- it does
+				// NOT catch a single completed CHG declaring TWO DIFFERENT
+				// effect types for the SAME target (e.g. both `introduces ->
+				// REQ-001` AND `modifies -> REQ-001`). Those are not duplicate
+				// pairs, so both entries survive `relationValidation.entries`
+				// and would otherwise reach the emission loop below, making
+				// this walk emit two conflicting authoritative effects for the
+				// same commit -- violating the exactly-once/net-effect contract
+				// (07-change-transactions.md). A CHG whose own relations are
+				// this internally contradictory about ITS OWN target cannot be
+				// trusted to report which (if either) effect is real.
+				const qualifyingRelationTypes = new Set(qualifyingRelations.map(relation => relation.type))
+				if (qualifyingRelationTypes.size > 1)
+					return { kind: 'untrusted-data' }
+
+				// Finding 7(b): a completed CHG's effects are only trustworthy
+				// when its body actually satisfies 07-change-transactions.md's
+				// completed-CHG structural requirements -- Rationale/Sources/
+				// Changes/Verification each present exactly once, with a
+				// well-formed Verification result marker compatible with
+				// `status: completed`. `envelopeAt` only validates the
+				// FRONTMATTER envelope; the body is independently re-parsed and
+				// re-validated here via the SAME `parseBody`/`extractSections`/
+				// `validateBody` pipeline `application/snapshot.ts`/
+				// `snapshot-validation.ts` run for the current snapshot,
+				// applied to this historical CHG blob's own bytes. A
+				// `splitFrontmatter` re-run over the SAME bytes `envelopeAt`
+				// already split successfully cannot newly fail here.
+				const chgText = utf8Decoder.decode(chgLookup.bytes)
+				const chgSplit = splitFrontmatter(chgText)
+				const chgBody = chgSplit.ok ? parseBody(chgSplit.bodyText, chgSplit.bodyStartLine - 1) : undefined
+				if (!chgSplit.ok || !chgBody || !chgBody.ok)
+					return { kind: 'untrusted-data' }
+				const chgBodyDiagnostics = validateBody({
+					type: 'change',
+					status: 'completed',
+					path,
+					body: extractSections(chgBody.root),
+				})
+				if (hasErrorDiagnostic(chgBodyDiagnostics))
+					return { kind: 'untrusted-data' }
+
 				// `EF-REL-015` was deliberately excluded from the FACT-trust gate
 				// just above -- the `(relation.type, relation.target)` pair this
 				// loop reads is unaffected by an invalid relation-extension field.
@@ -760,6 +904,32 @@ export async function computeHistory(
 				if (hasRelationExtensionLoss || hasResourceProjectionLoss || hasByteDecodingLoss)
 					return { kind: 'untrusted-data' }
 			}
+
+			// Finding 7(c): a completed CHG's declared effect FACT is never
+			// taken on trust alone -- it must match the target's own before/
+			// after aggregate transition ACROSS THIS EXACT COMMIT boundary
+			// (07-change-transactions.md net-effect classification):
+			// absent -> present is `introduces`; present -> `status: retired`
+			// is `retires`; present -> present with the aggregate's own
+			// content actually changed is `modifies`; anything else (no real
+			// aggregate transition at all, or a physical absent -> absent /
+			// present -> absent shape a CHG cannot legitimately claim) matches
+			// NONE of the three effect types. This walk already tracks the
+			// target aggregate's before/after presence (`previousEnvelope`/
+			// `currentEnvelope`) and per-commit owned-path OID changes
+			// (`changed`, computed above for `commits`) -- reused here rather
+			// than re-derived.
+			const targetContentChanged = changed.length > 0
+			const actualEffect: 'introduces' | 'modifies' | 'retires' | undefined
+				= previousEnvelope === undefined && currentEnvelope !== undefined
+					? 'introduces'
+					: previousEnvelope !== undefined && currentEnvelope !== undefined && currentEnvelope.status === 'retired'
+						? 'retires'
+						: previousEnvelope !== undefined && currentEnvelope !== undefined && targetContentChanged
+							? 'modifies'
+							: undefined
+			if (qualifyingRelations.some(relation => relation.type !== actualEffect))
+				return { kind: 'untrusted-data' }
 
 			for (const relation of qualifyingRelations) {
 				// History is defined by the authoritative integration state

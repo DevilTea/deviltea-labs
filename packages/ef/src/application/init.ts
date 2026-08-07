@@ -467,17 +467,27 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		return { applied: false, outcome: 'raced', message: `'${engineeringPath}' already exists and was not modified.` }
 	if (claim.outcome === 'failed')
 		return { applied: false, outcome: 'incomplete', message: `Failed to claim '${engineeringPath}': ${claim.error.message}` }
-
-	// From here on, ownership of `engineeringPath` is proven by the successful
-	// exclusive claim above -- but only of the exact directory instance that
-	// claim created, not of whatever later resolves to this path. Capture its
-	// identity now; once the marker is written, cleanup must also compare its
-	// nonce before removing anything (13-cli-contract.md).
-	const claimedIdentity = await deps.directoryIdentity(engineeringPath)
-	if (claimedIdentity === undefined) {
-		await deps.removeTree(engineeringPath)
-		return { applied: false, outcome: 'incomplete', message: `'${engineeringPath}' could not be verified as a directory immediately after being claimed.` }
+	if (claim.outcome === 'claim-unprovable') {
+		// `claimDirectory` itself could not prove, immediately after its own
+		// `mkdir` succeeded, that `engineeringPath` still denoted the exact,
+		// empty, non-symlink directory it just created (Finding 1: a separate,
+		// later observation of `engineeringPath` by this function would itself
+		// be a second, independently racable pathname lookup, capable of
+		// binding "ownership" to a swapped-in real directory -- or, on an
+		// `undefined` observation, driving a `removeTree` of whatever now
+		// occupies the path). Ownership was never established here, so nothing
+		// this invocation created can be identified: fail closed without any
+		// destructive cleanup, exactly like any other failed claim.
+		return { applied: false, outcome: 'incomplete', message: claim.message }
 	}
+
+	// Ownership of `engineeringPath` is proven by `claimDirectory` itself,
+	// which established it via its own immediate post-`mkdir` observation --
+	// but only of the exact directory instance that claim created, not of
+	// whatever later resolves to this path. Once the marker is written,
+	// cleanup must also compare its nonce before removing anything
+	// (13-cli-contract.md).
+	const claimedIdentity = claim.identity
 
 	/**
 	 * `true` iff `plan.targetRoot` and `engineeringPath` are both still real,

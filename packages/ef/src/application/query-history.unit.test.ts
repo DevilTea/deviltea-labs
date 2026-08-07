@@ -92,6 +92,13 @@ schemas:
 /** The `integration_ref` every `CONFIG_YAML` fixture above declares -- passed as `computeHistory`'s `expectedIntegrationRef` argument by every test in this file unless a test is deliberately exercising Finding 11 (immutable `integration_ref`) itself. */
 const INTEGRATION_REF = 'refs/heads/main'
 
+// Eighth-round Finding 5: the bootstrap boundary now runs COMPLETE snapshot
+// validation (`validateSnapshot`), which includes body-schema validation
+// (`domain/body-schemas.ts`) over every Artifact present at that commit --
+// PROJECT's own required sections always among them (`requiresCompleteness`
+// is unconditionally `true` for `type: project`). `PROJECT_MD` must therefore
+// carry every required section with meaningful content, not just a minimal
+// `id`/`type`/`status` witness.
 const PROJECT_MD = `---
 schema: ef/project@1
 type: project
@@ -107,8 +114,32 @@ resources: []
 ## Vision
 
 Deliver a well-governed engineering workflow.
+
+## Scope
+
+This project covers the Artifacts and history exercised by these tests.
+
+## Non-goals
+
+This project does not manage unrelated deployment tooling.
+
+## Context
+
+The project operates as a single-repository workspace with no linked repositories.
+
+## Terminology
+
+| Term | Definition | Avoid or aliases |
+| --- | --- | --- |
 `
 
+// Every required heading must be PRESENT regardless of `status`
+// (`requiresHeadingPresence` is unconditionally `true` for non-`change`
+// types) -- so `reqMd` always emits Requirement/Rationale/Acceptance Criteria,
+// with real (non-placeholder) content so the fixture remains valid whichever
+// status a test passes (`draft` never requires meaningful content, but
+// `active`/`superseded` do; supplying it unconditionally keeps this one
+// helper correct for every caller).
 function reqMd(id: string, status: string, resourcesYaml = '[]'): string {
 	return `---
 schema: ef/requirement@1
@@ -125,6 +156,14 @@ resources: ${resourcesYaml}
 ## Requirement
 
 Body text for ${id}.
+
+## Rationale
+
+Rationale text for ${id}.
+
+## Acceptance Criteria
+
+- ${id} behaves as described.
 `
 }
 
@@ -148,7 +187,7 @@ Rationale text.
 
 ## Sources
 
-Sources text.
+- Sources text.
 
 ## Changes
 
@@ -498,6 +537,11 @@ describe('computeHistory', () => {
 	})
 
 	it('does not report an engineering effect for a non-effect relation (references) alongside an effect relation on the same completed CHG', async () => {
+		// Finding 7(c): a completed CHG's declared effect must match the
+		// target's own before/after aggregate transition ACROSS THIS COMMIT --
+		// so REQ-001's own file is edited alongside CHG-003 in the SAME commit
+		// (a genuine `modifies` transition), not left byte-for-byte unchanged.
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE.replace('Supplementary notes.', 'Supplementary notes, revised.'))
 		await writeFile(tempDir, '.engineering/chg/CHG-003.md', chgMd('CHG-003', 'completed', '  - type: modifies\n    target: REQ-001\n  - type: references\n    target: REQ-001'))
 		const commitOid = commitAll(tempDir, 'chg-003 mixed relations')
 
@@ -537,30 +581,36 @@ describe('computeHistory', () => {
 })
 
 describe('computeHistory: PROJECT control-path availability', () => {
-	it('omits a control file from the PROJECT aggregate at a commit predating its creation', async () => {
+	it('omits a control file from the PROJECT aggregate at a commit where it does not exist', async () => {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-controls-')))
 		try {
 			git(dir, ['init', '-q', '-b', 'main'])
-			// The bootstrap commit MUST carry `.engineering/ef.yaml` -- it is the
-			// first authoritative EF state -- but `.gitignore` need not exist yet;
-			// this still exercises `ownedPathsOf` correctly omitting a control
-			// path that is genuinely absent from a given historical commit's tree.
+			// Finding 5: the bootstrap commit MUST be a genuine, COMPLETE
+			// bootstrap -- every required control file already present in
+			// canonical form (`.gitignore` included) -- so, unlike before this
+			// round, `.gitignore` cannot legitimately be absent AT bootstrap
+			// itself. This still exercises `ownedPathsOf` correctly omitting a
+			// control path that is genuinely absent from a given historical
+			// commit's tree, just at a LATER, non-boundary commit instead (here,
+			// `.gitignore` is removed after a fully valid bootstrap).
 			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
 			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
-			const bootstrapOid = commitAll(dir, 'bootstrap, no .gitignore yet')
-			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
-			const withControlsOid = commitAll(dir, 'add .gitignore')
+			const bootstrapOid = commitAll(dir, 'bootstrap, full control files')
+			await fs.rm(path.join(dir, '.engineering/.gitignore'))
+			const controlRemovedOid = commitAll(dir, 'remove .gitignore')
 
 			const repo = createGitRepository(dir, createGitExecutor())
-			const outcome = await computeHistory(repo, withControlsOid, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
+			const outcome = await computeHistory(repo, controlRemovedOid, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
 			expect(outcome.kind)
 				.toBe('complete')
 			if (outcome.kind !== 'complete')
 				return
 			expect(outcome.commits.map(c => c.oid))
-				.toEqual([bootstrapOid, withControlsOid])
+				.toEqual([bootstrapOid, controlRemovedOid])
 			expect(outcome.commits[0]!.changed_paths)
 				.toEqual([
+					'.engineering/.gitignore',
 					'.engineering/PROJECT.md',
 					'.engineering/ef.yaml',
 				])
@@ -636,7 +686,18 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 	// earlier ordinary history happens to contain files at exactly the paths
 	// EF would use.
 
-	it('does not fabricate a commit or effect from ordinary pre-bootstrap history containing Artifact/CHG-shaped files at EF paths', async () => {
+	it('fails with untrusted-data (never treats an invalid commit as authoritative bootstrap) when the first ef.yaml commit also carries a completed CHG and a non-canonical .gitignore', async () => {
+		// Eighth-round Finding 5: this regression used to carry a completed
+		// CHG-001 into the very commit that first adds `.engineering/ef.yaml`
+		// (and used a non-canonical single-line `.gitignore`), yet asserted
+		// that this same invalid commit became authoritative bootstrap AND
+		// emitted a completed `introduces` effect from it -- exactly the bug
+		// this round fixes. Core bootstrap prohibits ANY CHG Artifact
+		// (09-validation.md "Bootstrap exception"; EF-VAL-010) and requires
+		// every control file in canonical form (EF-FS-009); a first commit
+		// that fails these bootstrap STATE rules must be reported as
+		// untrusted-data, never silently accepted as the start of complete
+		// history.
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-preboot-fabricate-')))
 		try {
 			git(dir, ['init', '-q', '-b', 'main'])
@@ -650,9 +711,12 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
 			const preBootstrapOid = commitAll(dir, 'pre-EF experimental content (no ef.yaml)')
 
-			// Bootstrap: establishes the first authoritative EF state. Both
-			// pre-existing files are left byte-for-byte unchanged -- only the
-			// project's control files and PROJECT.md are newly added.
+			// The commit that first adds `.engineering/ef.yaml` -- and so
+			// claims the bootstrap boundary -- carries BOTH pre-existing files
+			// forward byte-for-byte UNCHANGED: a completed CHG-001 (prohibited
+			// at bootstrap, EF-VAL-010) and a non-canonical single-line
+			// `.gitignore` (EF-FS-009). This is not a genuine, complete
+			// bootstrap.
 			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
 			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
 			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
@@ -660,29 +724,75 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
-			expect(outcome.kind)
-				.toBe('complete')
-			if (outcome.kind !== 'complete')
-				return
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+			expect(preBootstrapOid.length)
+				.toBeGreaterThan(0)
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
 
-			// The pre-bootstrap commit must never appear anywhere in the result.
-			expect(outcome.commits.map(c => c.oid))
-				.not.toContain(preBootstrapOid)
-			expect(outcome.effects.map(e => e.commit_oid))
-				.not.toContain(preBootstrapOid)
+	it('fails with untrusted-data when the first ef.yaml commit carries a CHG Artifact at bootstrap, even with an otherwise-complete, canonical control-file set', async () => {
+		// Isolates the CHG-at-bootstrap condition on its own (canonical
+		// `.gitignore`, no other defect) -- the walk must reject this commit
+		// as bootstrap purely because a CHG Artifact is present at all
+		// (09-validation.md "Bootstrap exception"; EF-VAL-010), independent of
+		// the CHG's own status or any other control-file defect.
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-at-bootstrap-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'draft', '  - type: introduces\n    target: REQ-001'))
+			const bootstrapOid = commitAll(dir, 'bootstrap with a draft CHG already present')
 
-			// REQ-001's first appearance in *authoritative* history is bootstrap
-			// itself (not the earlier ordinary commit), and CHG-001's completed
-			// `introduces` effect is attributed to bootstrap, not fabricated at
-			// the pre-EF commit.
-			expect(outcome.commits.map(c => c.oid))
-				.toEqual([bootstrapOid])
-			expect(outcome.commits[0]!.changed_paths)
-				.toEqual(['.engineering/req/REQ-001.md'])
-			expect(outcome.effects)
-				.toEqual([
-					expect.objectContaining({ effect: 'introduces', status_before: null, status_after: 'active', commit_oid: bootstrapOid }),
-				])
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when the first ef.yaml commit\'s .gitignore is missing entirely, even though ef.yaml/PROJECT.md are otherwise valid', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-bootstrap-missing-gitignore-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			const bootstrapOid = commitAll(dir, 'bootstrap without .gitignore at all')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when the first ef.yaml commit\'s .gitignore content does not exactly match the four canonical entries', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-bootstrap-bad-gitignore-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			// Right four entries, wrong order -- EF-FS-009 requires the exact
+			// canonical byte sequence, in order.
+			await writeFile(dir, '.engineering/.gitignore', '.lock\n.tmp/\n.generated/\n.cache/\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			const bootstrapOid = commitAll(dir, 'bootstrap with reordered .gitignore entries')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, bootstrapOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
 			await fs.rm(dir, { recursive: true, force: true })
@@ -702,9 +812,13 @@ describe('computeHistory: bootstrap boundary (11-filesystem-and-config.md)', () 
 			await writeFile(dir, '.engineering/chg/CHG-001.md', 'Also not EF-authored; unrelated pre-existing content.\n')
 			const preBootstrapOid = commitAll(dir, 'pre-EF garbage at EF-shaped paths (no ef.yaml)')
 
-			// Bootstrap replaces both with real EF content.
+			// Bootstrap replaces both with real EF content. Finding 5: the
+			// bootstrap commit must be a genuine, COMPLETE bootstrap, so its
+			// `.gitignore` is the full canonical four-entry content (not the
+			// abbreviated single-line placeholder this fixture used before this
+			// round).
 			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
-			await writeFile(dir, '.engineering/.gitignore', '.cache/\n')
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
 			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
 			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
 			await fs.rm(path.join(dir, '.engineering/chg/CHG-001.md'))
@@ -768,7 +882,7 @@ Rationale text.
 
 ## Sources
 
-Sources text.
+- Sources text.
 
 ## Changes
 
@@ -1295,7 +1409,7 @@ Rationale text.
 
 ## Sources
 
-Sources text.
+- Sources text.
 
 ## Changes
 
@@ -1516,6 +1630,192 @@ describe('computeHistory: immutable integration_ref (11-filesystem-and-config.md
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, retargetOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: mid-history ef.yaml mode change with an unchanged blob OID (Finding 6)', () => {
+	it('fails with untrusted-data when a later commit rewrites ef.yaml from a regular file to a symlink-mode (120000) blob while reusing the identical blob OID', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-efyaml-mode-change-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			const bootstrapOid = commitAll(dir, 'bootstrap')
+			const efYamlOid = git(dir, ['rev-parse', `${bootstrapOid}:.engineering/ef.yaml`])
+				.trim()
+
+			// Git's tree-entry MODE is stored independently of the blob object
+			// it names: this later commit reuses the EXACT SAME
+			// `.engineering/ef.yaml` blob OID as the bootstrap commit, only
+			// rewriting its tree-entry MODE from the regular `100644` to the
+			// forbidden symlink mode `120000`. A per-commit re-check cached on
+			// `oid` alone would see no OID change here and wrongly skip
+			// re-validating this control path entirely, letting a now-forbidden
+			// symlink control file pass through completely unnoticed.
+			addCacheinfoEntry(dir, '120000', efYamlOid, '.engineering/ef.yaml')
+			const treeOid = writeTreeOid(dir)
+			const commitOid = commitTreeOid(dir, treeOid, bootstrapOid, 'ef.yaml mode rewritten to symlink, same blob OID')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, commitOid, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: CHG net-effect trust (07-change-transactions.md, Finding 7)', () => {
+	it('fails with untrusted-data when one completed CHG declares CONFLICTING effect types (introduces and modifies) for the same target', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-conflicting-effects-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 declares BOTH `introduces -> REQ-001` AND
+			// `modifies -> REQ-001` -- not a duplicate `(type, target)` pair
+			// (EF-REL-006 does not catch this), so both entries would
+			// otherwise survive and this walk would emit TWO conflicting
+			// authoritative effects for the same commit, violating the
+			// exactly-once/net-effect contract.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001\n  - type: modifies\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const completingOid = commitAll(dir, 'chg-001 declares conflicting effect types for REQ-001')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a completed CHG has an invalid Verification result marker in its body', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-invalid-verification-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001's frontmatter/envelope is perfectly valid and its
+			// relations correctly declare `introduces -> REQ-001`, but its
+			// Verification section's result marker ("Result: bogus") is not
+			// one of the recognized `passed`/`not-applicable`/`not-completed`
+			// forms (EF-BODY-014, error severity) -- `envelopeAt` never checks
+			// body content, only the frontmatter envelope, so without an
+			// explicit body-schema check this invalid completed-CHG structure
+			// would still silently drive a trusted effect.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', `---
+schema: ef/change@1
+type: change
+id: CHG-001
+title: Title of CHG-001
+status: completed
+summary: Summary of CHG-001.
+tags: []
+relations:
+  - type: introduces
+    target: REQ-001
+resources: []
+---
+
+## Rationale
+
+Rationale text.
+
+## Sources
+
+- Sources text.
+
+## Changes
+
+- Did something.
+
+## Verification
+
+Result: bogus
+
+- Verified.
+`)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const completingOid = commitAll(dir, 'chg-001 has an invalid Verification result marker')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a managed chg/*.md path\'s envelope decodes to a non-change type', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-wrong-type-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft'))
+			commitAll(dir, 'bootstrap')
+
+			// `.engineering/chg/CHG-001.md` is a managed CHG-shaped path, but
+			// its envelope decodes to `type: requirement`, not `change` -- a
+			// managed-path/type mismatch this walk must fail on, never
+			// silently `continue` past as though no CHG existed there.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', reqMd('CHG-001', 'active'))
+			const commitOid = commitAll(dir, 'chg-shaped path decodes to a non-change type')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, commitOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a completed CHG claims a "modifies" effect but the target\'s aggregate did not actually change in this commit', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-chg-untrue-effect-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			commitAll(dir, 'bootstrap')
+
+			// CHG-001 completes claiming `modifies -> REQ-001`, but REQ-001's
+			// own file is left byte-for-byte UNCHANGED in this exact commit --
+			// no real absent->present, present->retired, or present->changed
+			// transition occurred, so this claimed effect cannot be truthful.
+			// A real EF-governed repository's own commit-time transaction
+			// validation (`EF-CHG-006`) would already have rejected this; this
+			// walk must reject it too, rather than trusting the CHG's bare
+			// declaration.
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: REQ-001'))
+			const completingOid = commitAll(dir, 'chg-001 claims modifies but REQ-001 is unchanged')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, completingOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}

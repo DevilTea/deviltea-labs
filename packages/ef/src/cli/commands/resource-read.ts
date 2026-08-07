@@ -22,11 +22,9 @@
 import type { GitExecutor } from '../../git/executor'
 import type { CommandOutcome } from '../command-outcome'
 import path from 'pathe'
-import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
-import { validateSnapshot } from '../../application/snapshot-validation'
 import { validateResourceDescriptors } from '../../domain/resources'
 import { readRegularFileNoFollow } from '../../platform/fs-facts'
-import { resolveProject } from '../project-context'
+import { loadWorkingTreeContext } from '../working-tree-context'
 
 /**
  * `EF-RES-004`/`EF-RES-007`/`EF-RES-014` are exactly the lexical/ownership
@@ -58,17 +56,26 @@ function isExternalLocation(location: string): boolean {
 }
 
 export async function runResourceReadCommand(ownerId: string, location: string, options: ResourceReadOptions, deps: ResourceReadDeps): Promise<CommandOutcome> {
-	const resolved = await resolveProject({ cwd: deps.cwd, explicitProject: options.project }, deps.executor)
-	if (!resolved.ok)
-		return failure(2, `EF project could not be resolved: ${resolved.message}`)
+	// `loadWorkingTreeContext` (Finding 12, consolidated): resolves the
+	// project, loads its snapshot bound to discovery's own `.engineering`
+	// identity observation (Finding 4 -- previously missing here entirely, so
+	// a transient snapshot that hid a second Artifact also declaring
+	// `location` during enumeration could make `resourceOwnership` falsely
+	// unique and let this command return bytes it should have refused), and
+	// -- for implicit discovery only -- re-checks working-directory
+	// association against the snapshot's own freshest configuration (Finding
+	// 5 -- also previously missing here entirely).
+	const loaded = await loadWorkingTreeContext({ cwd: deps.cwd, explicitProject: options.project }, deps.executor)
+	if (!loaded.ok) {
+		const message = loaded.stage === 'resolve'
+			? `EF project could not be resolved: ${loaded.message}`
+			: loaded.stage === 'load'
+				? `EF project snapshot could not be loaded: ${loaded.message}`
+				: `EF project working-directory association could not be verified: ${loaded.message}`
+		return failure(2, message)
+	}
 
-	const { root } = resolved.context
-
-	const loaded = await loadSnapshotFromWorkingTree(root)
-	if (!loaded.ok)
-		return failure(2, `EF project snapshot could not be loaded: ${loaded.message}`)
-
-	const validation = validateSnapshot(loaded.snapshot)
+	const { root, snapshot, validation } = loaded.context
 
 	// ---- (1) owner Artifact exists -------------------------------------------
 
@@ -129,7 +136,7 @@ export async function runResourceReadCommand(ownerId: string, location: string, 
 
 	const absolutePath = path.join(root, location)
 
-	// `loaded.snapshot.entryKinds` was built from an exact-string-keyed,
+	// `snapshot.entryKinds` was built from an exact-string-keyed,
 	// case-preserving directory listing (`walkDirectory`'s real `readdir`
 	// entries; a symlinked ancestor is recorded as `'symlink'` and never
 	// descended into, so nothing beneath it is ever recorded as `'file'`
@@ -138,7 +145,7 @@ export async function runResourceReadCommand(ownerId: string, location: string, 
 	// cannot: a file whose actual on-disk name differs from `location` only in
 	// case or Unicode normalization on a case-insensitive (but
 	// case-preserving) filesystem.
-	if (loaded.snapshot.entryKinds.get(location) !== 'file')
+	if (snapshot.entryKinds.get(location) !== 'file')
 		return failure(1, `Managed local file '${location}' is missing or is not a regular file.`)
 
 	// ---- (5)/(6) the managed path is not a forbidden symlink, and the file --

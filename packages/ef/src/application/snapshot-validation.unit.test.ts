@@ -1182,6 +1182,120 @@ Objective text.
 		})
 	})
 
+	describe('finding 8 (eighth-round): per-core-field envelope loss (envelopeFieldLossById)', () => {
+		it('a duplicate top-level \'title\' key records only \'title\'', async () => {
+			await writeMinimalProject(tempDir)
+			const duplicateTitleMd = requirementMd({ id: 'REQ-001' })
+				.replace('title: Example Requirement\n', 'title: Example Requirement\ntitle: Duplicated Title\n')
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateTitleMd)
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ENV-005')
+			expect([...(result.envelopeFieldLossById.get('REQ-001') ?? [])])
+				.toEqual(['title'])
+			// Still folded into the coarser, field-unscoped bucket for
+			// `lookup`/a returned-page projection's own completeness gate.
+			expect([...result.envelopeWideLossArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+
+		it('a duplicate top-level \'schema\' key records only \'schema\'', async () => {
+			await writeMinimalProject(tempDir)
+			const duplicateSchemaMd = requirementMd({ id: 'REQ-001' })
+				.replace('schema: ef/requirement@1\n', 'schema: ef/requirement@1\nschema: ef/requirement@1\n')
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateSchemaMd)
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ENV-005')
+			expect([...(result.envelopeFieldLossById.get('REQ-001') ?? [])])
+				.toEqual(['schema'])
+		})
+
+		it('a duplicate top-level \'summary\' key records only \'summary\'', async () => {
+			await writeMinimalProject(tempDir)
+			const duplicateSummaryMd = requirementMd({ id: 'REQ-001' })
+				.replace(
+					'summary: A minimal example requirement used for validation pipeline tests.\n',
+					'summary: A minimal example requirement used for validation pipeline tests.\nsummary: Duplicated summary.\n',
+				)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateSummaryMd)
+			const result = await load()
+
+			expect([...(result.envelopeFieldLossById.get('REQ-001') ?? [])])
+				.toEqual(['summary'])
+		})
+
+		it('a duplicate top-level \'tags\' key records \'tags\', distinct from a dropped non-string tag entry', async () => {
+			await writeMinimalProject(tempDir)
+			const duplicateTagsMd = requirementMd({ id: 'REQ-001' })
+				.replace('tags: []\n', 'tags: []\ntags: []\n')
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateTagsMd)
+			const result = await load()
+
+			expect([...(result.envelopeFieldLossById.get('REQ-001') ?? [])])
+				.toEqual(['tags'])
+			// This is a whole-array duplicate key, not a dropped non-string
+			// entry -- `tagLossArtifactIds` stays empty (its own, narrower
+			// mechanism, `tagLossArtifactIds`'s doc).
+			expect(result.tagLossArtifactIds.size)
+				.toBe(0)
+		})
+
+		it('a duplicate top-level \'resources\' key records \'resources\'', async () => {
+			await writeMinimalProject(tempDir)
+			const duplicateResourcesMd = requirementMd({ id: 'REQ-001' })
+				.replace('resources: []\n', 'resources: []\nresources: []\n')
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateResourcesMd)
+			const result = await load()
+
+			expect([...(result.envelopeFieldLossById.get('REQ-001') ?? [])])
+				.toEqual(['resources'])
+		})
+
+		it('a duplicate key nested within one relations[i] entry is attributed to the enclosing \'relations\' field', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({
+				id: 'REQ-001',
+				relations: '\n  - type: references\n    target: PROJECT\n    type: references\n',
+			}))
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ENV-005')
+			expect([...(result.envelopeFieldLossById.get('REQ-001') ?? [])])
+				.toEqual(['relations'])
+		})
+
+		it('an EF-ENV-006 unknown top-level field is NOT recorded here (it never corrupts a core field), even though it still sets envelopeWideLossArtifactIds', async () => {
+			await writeMinimalProject(tempDir)
+			const unknownFieldMd = requirementMd({ id: 'REQ-001' })
+				.replace('tags: []\n', 'tags: []\nunknown_field: some value\n')
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', unknownFieldMd)
+			const result = await load()
+
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ENV-006')
+			expect(result.envelopeFieldLossById.has('REQ-001'))
+				.toBe(false)
+			expect([...result.envelopeWideLossArtifactIds])
+				.toEqual(['REQ-001'])
+		})
+
+		it('two distinct duplicate keys on the same file record both fields', async () => {
+			await writeMinimalProject(tempDir)
+			const duplicateTitleAndTagsMd = requirementMd({ id: 'REQ-001' })
+				.replace('title: Example Requirement\n', 'title: Example Requirement\ntitle: Duplicated Title\n')
+				.replace('tags: []\n', 'tags: []\ntags: []\n')
+			await writeFile(tempDir, '.engineering/req/REQ-001.md', duplicateTitleAndTagsMd)
+			const result = await load()
+
+			expect([...(result.envelopeFieldLossById.get('REQ-001') ?? [])].sort())
+				.toEqual(['tags', 'title'])
+		})
+	})
+
 	describe('supersession graph integrity', () => {
 		it('reports EF-SUP-005 for a two-node supersession cycle', async () => {
 			await writeMinimalProject(tempDir)

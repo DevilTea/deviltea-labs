@@ -770,7 +770,7 @@ schemas:
 	// ---- Finding 5: re-run working-directory association against the -------
 	// ---- snapshot's fresher config, not project discovery's own earlier read
 
-	it('snapshot scope reports EF-VAL-012 when an in-place ef.yaml rewrite revokes the linked-repository association discovery itself relied on', async () => {
+	it('snapshot scope reports EF-VAL-001 (not EF-VAL-012, Finding 10) when an in-place ef.yaml rewrite revokes the linked-repository association discovery itself relied on', async () => {
 		// Config A declares `linked` as a linked repository, so a `cwd` inside
 		// it is associated with the project. Discovery's OWN association check
 		// uses this config; if nothing re-verified it later, the command would
@@ -799,12 +799,50 @@ schemas:
 		const outcome = await runValidateCommand({ scope: 'snapshot', strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: linkedDir, executor })
 		// Without re-running the association check against the snapshot's own,
 		// fresher config, this would incorrectly succeed from a `cwd` config B
-		// no longer declares as associated with the project.
+		// no longer declares as associated with the project. Finding 10: this
+		// MUST be `EF-VAL-001` (the generic invocation/resolution class), never
+		// `EF-VAL-012` -- that code is registry-owned by "an incomplete
+		// working-tree initialization claim exists," a condition this project's
+		// (perfectly complete) initialization never exhibits.
 		expect(outcome.exitCode)
 			.toBe(2)
 		const json = JSON.parse(outcome.stdout as string)
 		expect(json.diagnostics[0].code)
-			.toBe('EF-VAL-012')
+			.toBe('EF-VAL-001')
+	})
+
+	// ---- Finding 9/10: association is re-checked only for IMPLICIT ----------
+	// ---- discovery; an explicit --project is exempt ---------------------------
+	// ---- (11-filesystem-and-config.md "Project Discovery") --------------------
+
+	it('snapshot scope succeeds with an explicit --project even when the current working directory is an unrelated, unassociated Git worktree', async () => {
+		await writeMinimalProject(root)
+		commitAll(root, 'bootstrap')
+
+		// `unrelatedCwd` is a wholly separate Git worktree that neither
+		// contains the project nor is declared as one of its linked
+		// repositories. Re-imposing the invocation-CWD requirement after an
+		// explicit `--project` resolution (the exact bug this regression
+		// guards against) would report a project-resolution-class failure
+		// here even though the caller explicitly named this project --
+		// defeating 11-filesystem-and-config.md's exception that "an
+		// otherwise-rejected nested worktree can supply another explicit
+		// project root instead."
+		const unrelatedCwd = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-validate-unrelated-')))
+		execFileSync('git', ['init', '-q', '-b', 'main', unrelatedCwd])
+		try {
+			const outcome = await runValidateCommand({ scope: 'snapshot', strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false, project: root }, { cwd: unrelatedCwd, executor: createGitExecutor() })
+			expect(outcome.exitCode)
+				.toBe(0)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(true)
+			expect(json.valid)
+				.toBe(true)
+		}
+		finally {
+			await fs.rm(unrelatedCwd, { recursive: true, force: true })
+		}
 	})
 
 	// ---- Transition scope: `peekConfigAt` (baseline config peek) edge cases ----

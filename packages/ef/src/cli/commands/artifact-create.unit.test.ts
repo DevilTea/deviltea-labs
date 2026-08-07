@@ -1,13 +1,60 @@
-import type { GitExecutor } from '../../git/executor'
+import type { GitExecOutcome, GitExecutor } from '../../git/executor'
 import type { Prompts } from '../prompts'
 import type { ArtifactCreateCommandOptions } from './artifact-create'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runArtifactCreateCommand } from './artifact-create'
+
+/**
+ * Wraps a real executor, running `sideEffect` once, immediately BEFORE the
+ * first `execIn` call matching `matches`, then passing that call through to
+ * the real executor unchanged. Used to simulate `.engineering` being replaced
+ * by a DIFFERENT real directory landing exactly in the window between
+ * project resolution's own `.engineering` identity observation (captured
+ * during `discoverProject`'s `findWorktreeRoot` probe, matched here) and this
+ * command's later, separate snapshot walk (Finding 4/11).
+ */
+function withSideEffectBeforeCall(base: GitExecutor, matches: (args: readonly string[]) => boolean, sideEffect: () => Promise<void>): GitExecutor {
+	let triggered = false
+	return {
+		exec: (args, options) => base.exec(args, options),
+		execIn: async (root, args, options): Promise<GitExecOutcome> => {
+			if (!triggered && matches(args)) {
+				triggered = true
+				await sideEffect()
+			}
+			return base.execIn(root, args, options)
+		},
+	}
+}
+
+// `unlinkMock`/`linkMock` let a test inject a real-filesystem failure/race
+// strictly inside `applyCreatePlan`'s own internals -- exercised here through
+// the CLI's actual, non-injected dependency wiring (this command has no
+// `applyCreatePlan`-deps injection point of its own; see the exit-mapping
+// regressions below). Every test that does not explicitly arm one gets a
+// plain passthrough to the real implementation.
+const { unlinkMock, linkMock, realFns } = vi.hoisted(() => ({
+	unlinkMock: vi.fn(),
+	linkMock: vi.fn(),
+	realFns: {
+		unlink: undefined as unknown as typeof import('node:fs/promises').unlink,
+		link: undefined as unknown as typeof import('node:fs/promises').link,
+	},
+}))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('node:fs/promises')>()
+	realFns.unlink = actual.unlink
+	realFns.link = actual.link
+	unlinkMock.mockImplementation((...args: Parameters<typeof actual.unlink>) => actual.unlink(...args))
+	linkMock.mockImplementation((...args: Parameters<typeof actual.link>) => actual.link(...args))
+	return { ...actual, unlink: unlinkMock, link: linkMock }
+})
 
 /** Every `execIn` call fails; simulates Git becoming unavailable during project resolution. */
 function unavailableExecutor(message: string): GitExecutor {
@@ -99,10 +146,14 @@ describe('runArtifactCreateCommand', () => {
 		await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
 		await writeFile(root, '.engineering/.gitignore', GITIGNORE)
 		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
+		unlinkMock.mockImplementation((...args: Parameters<typeof realFns.unlink>) => realFns.unlink(...args))
+		linkMock.mockImplementation((...args: Parameters<typeof realFns.link>) => realFns.link(...args))
 	})
 
 	afterEach(async () => {
 		await fs.rm(root, { recursive: true, force: true })
+		unlinkMock.mockClear()
+		linkMock.mockClear()
 	})
 
 	function deps(prompts: Prompts = neverPrompts()) {
@@ -400,5 +451,125 @@ describe('runArtifactCreateCommand', () => {
 		finally {
 			await fs.chmod(path.join(root, '.engineering/req'), 0o755)
 		}
+	})
+
+	// ---- FINDING 3 (P1): every `applied: true` outcome other than a plain
+	// verified success maps to `complete: false, applied: true`, exit `3` --
+	// never exit `2` (reserved for missing/declined authorization) and never a
+	// plain success (13-cli-contract.md "the implementation MUST NOT
+	// misreport the published state as unapplied"). Both regressions below
+	// exercise the CLI's real, non-injected `applyCreatePlan` wiring (this
+	// command has no dependency-injection seam of its own for it), reproduced
+	// through a real filesystem failure/race rather than a mocked
+	// `applyCreatePlan` result. --------------------------------------------
+
+	it('exits 3 (applied:true, complete:false, EF-VAL-008) when the verified temporary file cannot be unlinked after a successful publish', async () => {
+		// Finding 2's cleanup-failure outcome: the publish itself, and every
+		// post-publication verification, succeeds -- only the final,
+		// otherwise-best-effort removal of the now-superfluous temporary file
+		// fails.
+		unlinkMock.mockImplementation(async (...args: Parameters<typeof realFns.unlink>) => {
+			const target = args[0]
+			if (typeof target === 'string' && target.includes('.tmp-'))
+				throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+			return realFns.unlink(...args)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(3)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(true)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-008')
+
+		// The publication itself is genuine and must not be misreported as
+		// unapplied: the file is on disk with the planned ID.
+		const written = await fs.readFile(path.join(root, '.engineering/req/REQ-001.md'), 'utf8')
+		expect(written)
+			.toContain('id: REQ-001')
+	})
+
+	it('exits 3 (applied:true, complete:false, EF-VAL-008) when the published file cannot be verified intact immediately after publication', async () => {
+		// The existing (pre-Finding-2) post-publication recovery state: the
+		// managed chain is swapped for a different real directory from inside
+		// the real `link()` call itself, strictly after that call genuinely
+		// succeeds, so `applyCreatePlan`'s post-publication re-verification
+		// cannot confirm the published file's identity and cannot safely
+		// retract it either. Reproduced here through the CLI's real dependency
+		// wiring, not a mocked `applyCreatePlan` result.
+		linkMock.mockImplementation(async (...args: Parameters<typeof realFns.link>) => {
+			const [tempPathArg, targetPathArg] = args as [string, string]
+			await realFns.link(tempPathArg, targetPathArg)
+			const typeDirPath = path.dirname(targetPathArg)
+			const shadowDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-shadow-'))
+			await fs.rm(typeDirPath, { recursive: true, force: true })
+			await fs.rename(shadowDir, typeDirPath)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(3)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(true)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-008')
+	})
+
+	// ---- Finding 11: bound-load -- `.engineering` identity threaded into ------
+	// ---- the snapshot walk, exactly like query/validate ------------------------
+
+	it('reports a typed incomplete failure, without allocating, when `.engineering` is replaced by a substitute directory hiding the highest REQ between project resolution and the snapshot walk', async () => {
+		// `REQ-001` already exists, so the correct next allocation is
+		// `REQ-002`. The substitute directory below carries the SAME
+		// `ef.yaml`/`.gitignore`/`PROJECT.md` but OMITS `req/REQ-001.md`
+		// entirely -- if this command failed to bind the snapshot walk to
+		// project resolution's own `.engineering` identity observation
+		// (Finding 4/11), it would silently enumerate the substitute instead
+		// and allocate `REQ-001` again, corrupting the project with two
+		// files both claiming that ID.
+		await writeFile(root, '.engineering/req/REQ-001.md', 'placeholder existing REQ-001, must never be duplicated')
+
+		const originalEngineeringPath = path.join(root, '.engineering')
+		const executor = withSideEffectBeforeCall(
+			createGitExecutor(),
+			args => args[0] === 'rev-parse' && args[1] === '--show-toplevel',
+			async () => {
+				const asideDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-create-orig-'))
+				await fs.rename(originalEngineeringPath, path.join(asideDir, '.engineering'))
+				await fs.mkdir(originalEngineeringPath)
+				await fs.copyFile(path.join(asideDir, '.engineering', 'ef.yaml'), path.join(originalEngineeringPath, 'ef.yaml'))
+				await fs.copyFile(path.join(asideDir, '.engineering', '.gitignore'), path.join(originalEngineeringPath, '.gitignore'))
+				await fs.copyFile(path.join(asideDir, '.engineering', 'PROJECT.md'), path.join(originalEngineeringPath, 'PROJECT.md'))
+				// `req/REQ-001.md` is deliberately never copied into the substitute.
+			},
+		)
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), { cwd: root, executor, prompts: neverPrompts() })
+
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-001')
+		expect(json.artifact)
+			.toBeNull()
+
+		// No allocation happened at all: the substitute `.engineering/req/`
+		// gained no new file.
+		await expect(fs.readdir(path.join(originalEngineeringPath, 'req'))
+			.catch(() => [])).resolves.toEqual([])
 	})
 })

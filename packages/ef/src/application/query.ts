@@ -42,7 +42,7 @@ import type {
 	TraceQueryRequest,
 } from './query-types'
 import type { ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
-import type { ResourceFieldName, SnapshotArtifactRecord, SnapshotValidationResult } from './snapshot-validation'
+import type { CoreFieldName, ResourceFieldName, SnapshotArtifactRecord, SnapshotValidationResult } from './snapshot-validation'
 import { severityOf } from '../domain/diagnostic-codes'
 import { ARTIFACT_TYPES, compareBytewise, RELATION_TYPES, STATUSES } from '../domain/model'
 import { prepareSearchTerms } from './case-folding'
@@ -562,6 +562,18 @@ function requestedResourceFilterFields(request: Pick<ListQueryRequest, 'resource
 const SEARCH_RESOURCE_SURFACE_FIELDS: ReadonlySet<ResourceFieldName> = new Set(['location', 'description'])
 
 /**
+ * Core envelope fields full-text search actually reads (`query-search.ts`'s
+ * `buildSurfaces`: `title`/`summary`/`tags`, unconditionally for every
+ * Artifact, plus `resources` for its `location`/`description` sub-fields --
+ * eighth-round Finding 8), for intersecting against `envelopeFieldLossById`.
+ * `id`/`type`/`status`/`schema`/`relations` are never read by search, so a
+ * duplicate key confined to one of those can never gate search membership
+ * (unlike the prior rounds' field-unscoped `envelopeWideLossArtifactIds`,
+ * which gated search for ANY core field's duplicate).
+ */
+const SEARCH_CONSUMED_CORE_FIELDS: ReadonlySet<CoreFieldName> = new Set(['title', 'summary', 'tags', 'resources'])
+
+/**
  * Whether `record`'s Resource field loss (`resourceFieldLossById`) intersects
  * `consumedFields` -- the exact named Resource fields the caller's request
  * surface actually reads. Ninth-round Finding 9: an `EF-RES-001` on
@@ -602,19 +614,19 @@ function hasRelevantResourceFieldLoss(validation: SnapshotValidationResult, id: 
  *   key -- either way `envelope.status`, while a genuine
  *   first-occurrence-selected decode, is not reliably this file's ONLY
  *   declared status.
- * - `schema`: no field-precise tracking exists for a duplicated/dropped
- *   `schema` key the way `type`/`status` now have, so this filter alone
- *   still falls back to the broader `envelopeWideLossArtifactIds` signal (a
- *   duplicate key ANYWHERE in the frontmatter, or a dropped unrecognized
- *   top-level field) when a `schema` filter is actually requested.
+ * - `schema`: distrusted only when `record` has a `schema` entry in
+ *   `envelopeFieldLossById` (eighth-round Finding 8) -- a duplicate
+ *   `schema` key. Prior rounds fell back to the coarser
+ *   `envelopeWideLossArtifactIds` bucket here (fires for ANY core field's
+ *   duplicate, not just `schema`'s own), which conservatively distrusted
+ *   `schema` even for a record whose only loss was on some unrelated field
+ *   like `title`.
  *
  * A duplicate key confined to `relations`/`resources`/`tags` (or a
  * non-graph-relevant field like `title`/`summary`) can never corrupt
- * `type`/`status`/`schema`, so it must not conservatively taint any of these
- * three checks -- unlike the coarser whole-Artifact
- * `envelopeWideLossArtifactIds` bucket, which is unconditioned on field and
- * so is reserved for the one filter (`schema`) that has no narrower bucket
- * of its own.
+ * `type`/`status`/`schema` (`envelopeFieldLossById`'s own per-field
+ * attribution, eighth-round Finding 8), so it must not conservatively taint
+ * any of these three checks.
  */
 function couldPossiblyMatchTrustedFilters(validation: SnapshotValidationResult, record: SnapshotArtifactRecord, request: Pick<ListQueryRequest, 'type' | 'status' | 'schema'>): boolean {
 	if (validation.envelopeStructuralLossArtifactIds.has(record.id))
@@ -629,12 +641,42 @@ function couldPossiblyMatchTrustedFilters(validation: SnapshotValidationResult, 
 			return false
 	}
 	if (request.schema !== undefined) {
-		if (validation.envelopeWideLossArtifactIds.has(record.id))
+		if (validation.envelopeFieldLossById.get(record.id)
+			?.has('schema')) {
 			return true
+		}
 		if (envelope.schema !== request.schema)
 			return false
 	}
 	return true
+}
+
+/**
+ * Exactly which core envelope fields (`snapshot-validation.ts`'s
+ * `CoreFieldName`) this `list` request's filters/pagination semantics
+ * actually read (eighth-round Finding 8), for intersecting against
+ * `envelopeFieldLossById`: `type`/`status`/`schema` when their respective
+ * filter is present, `tags` for `tagsAny`/`tagsAll`, `relations` for
+ * `relationType`/`relationTarget`, `resources` for `resourceType`/
+ * `resourceRole`/`resourceNormative`. `id`/`title`/`summary` are never
+ * consumed by any `list` filter, so a duplicate key confined to one of
+ * those can never appear in the returned set here.
+ */
+function listConsumedCoreFields(options: { hasTypeFilter: boolean, hasStatusFilter: boolean, hasSchemaFilter: boolean, hasTagsFilter: boolean, hasRelationFilter: boolean, hasResourceFilter: boolean }): ReadonlySet<CoreFieldName> {
+	const fields = new Set<CoreFieldName>()
+	if (options.hasTypeFilter)
+		fields.add('type')
+	if (options.hasStatusFilter)
+		fields.add('status')
+	if (options.hasSchemaFilter)
+		fields.add('schema')
+	if (options.hasTagsFilter)
+		fields.add('tags')
+	if (options.hasRelationFilter)
+		fields.add('relations')
+	if (options.hasResourceFilter)
+		fields.add('resources')
+	return fields
 }
 
 /**
@@ -657,16 +699,17 @@ function couldPossiblyMatchTrustedFilters(validation: SnapshotValidationResult, 
  * `resourceLossArtifactIds` bucket). Tag loss (`tagLossArtifactIds`) only
  * matters when the request filters by `tagsAny`/`tagsAll` -- a loss on a
  * surface the request never reads provably cannot have changed this result.
- * `envelopeWideLossArtifactIds` (a duplicate core key ANYWHERE in the
- * frontmatter, or a dropped unknown top-level field) is added as an
- * over-inclusive CANDIDATE set whenever the request applies any filter at
- * all -- it is narrowed back down immediately below by
- * `couldPossiblyMatchTrustedFilters`, which (duplicate-key trust-scope
- * adjudication) distrusts `type`/`status` only via their own precise buckets
- * (`envelopeStructuralLossArtifactIds`/`statusInvalidArtifactIds`), not this
- * coarser one; a duplicate confined to `relations`/`resources`/`tags`/
- * `title`/`summary` cannot have changed a `type`/`status` filter's
- * membership determination at all. A request with NO filters matches every
+ *
+ * Eighth-round Finding 8: `envelopeFieldLossById` (a duplicate core key,
+ * attributed to the EXACT core field it names) is intersected against
+ * `listConsumedCoreFields` -- the fields THIS request's own filters actually
+ * read -- rather than the prior rounds' `envelopeWideLossArtifactIds`
+ * (field-unscoped, fires for ANY core field's duplicate) being added as an
+ * over-inclusive candidate set whenever the request applies any filter AT
+ * ALL. A duplicate `title` key, for instance, can no longer gate an
+ * unrelated `--type` list request: `title` is never one of
+ * `listConsumedCoreFields`' members, so it never intersects regardless of
+ * which filters are present. A request with NO filters matches every
  * Artifact unconditionally, so no loss anywhere could have changed
  * membership/total; an own-loss Artifact that ends up on the returned page
  * is still caught by the existing per-page check below.
@@ -689,7 +732,11 @@ function listMembershipRiskArtifactIds(validation: SnapshotValidationResult, req
 	const candidates = new Set<string>()
 	if (!hasAnyFilter)
 		return candidates
-	for (const id of validation.envelopeWideLossArtifactIds) candidates.add(id)
+	const consumedCoreFields = listConsumedCoreFields({ hasTypeFilter, hasStatusFilter, hasSchemaFilter, hasTagsFilter, hasRelationFilter, hasResourceFilter })
+	for (const [id, fields] of validation.envelopeFieldLossById) {
+		if ([...fields].some(field => consumedCoreFields.has(field)))
+			candidates.add(id)
+	}
 	if (hasTagsFilter) {
 		for (const id of validation.tagLossArtifactIds) candidates.add(id)
 	}
@@ -791,18 +838,25 @@ function handleSearch(context: QueryContext, request: SearchQueryRequest): Query
 	// Finding B/9: full-text search always reads `title`/`summary`/`tags`/
 	// `resources.location`/`resources.description` for EVERY Artifact
 	// (`query-search.ts`'s `buildSurfaces`, unconditionally, regardless of the
-	// terms requested) to decide matching/total, so a lost tag, a lost/
-	// coerced envelope-wide field (duplicate core key / dropped unknown
-	// field, which can corrupt `title`/`summary` too), or a Resource field
-	// loss that actually touches `location`/`description` on ANY Artifact
-	// could have hidden or altered a match -- unlike `list`, there is no
-	// unsearched envelope-wide surface to scope this to. A Resource field
-	// loss confined to `type`/`role`/`normative`/`media_type` (none of which
-	// search reads) is excluded (`resourceFieldLossById`, Finding 9), and
-	// relation loss is excluded entirely: search never reads `relations` at
-	// all, so it cannot affect matching here (an affected Artifact that still
-	// ends up in the returned page is caught by the per-page check below
-	// instead).
+	// terms requested) to decide matching/total, so a lost tag or a Resource
+	// field loss that actually touches `location`/`description` on ANY
+	// Artifact could have hidden or altered a match -- unlike `list`, there is
+	// no unsearched envelope-wide surface to scope THOSE two signals to. A
+	// Resource field loss confined to `type`/`role`/`normative`/`media_type`
+	// (none of which search reads) is excluded (`resourceFieldLossById`,
+	// Finding 9), and relation loss is excluded entirely: search never reads
+	// `relations` at all, so it cannot affect matching here (an affected
+	// Artifact that still ends up in the returned page is caught by the
+	// per-page check below instead).
+	//
+	// Eighth-round Finding 8: a duplicate core key (`envelopeFieldLossById`)
+	// only gates search membership when it names one of
+	// `SEARCH_CONSUMED_CORE_FIELDS` -- `title`/`summary`/`tags`/`resources`,
+	// the exact surfaces `buildSurfaces` reads -- rather than the prior
+	// rounds' field-unscoped `envelopeWideLossArtifactIds`, which gated every
+	// search for ANY core field's duplicate, including `id`/`type`/`status`/
+	// `schema`/`relations`, none of which search ever reads.
+	//
 	// Seventh-round Finding 7: search reads every Artifact's best-effort
 	// decoded body text (`bodyTextFor`/`executeSearch`'s own body surface,
 	// unconditionally, for every Artifact) in addition to its
@@ -817,11 +871,13 @@ function handleSearch(context: QueryContext, request: SearchQueryRequest): Query
 	// (which never reads the body at all), there is no unsearched surface to
 	// scope this to: every search reads every Artifact's body by definition,
 	// so this is a whole-request membership risk exactly like tag/
-	// envelope-wide loss above.
+	// core-field loss above.
 	const searchMembershipRisk = new Set<string>([
 		...context.validation.tagLossArtifactIds,
-		...context.validation.envelopeWideLossArtifactIds,
 		...context.validation.byteDecodingLossArtifactIds,
+		...[...context.validation.envelopeFieldLossById.entries()]
+			.filter(([, fields]) => [...fields].some(field => SEARCH_CONSUMED_CORE_FIELDS.has(field)))
+			.map(([id]) => id),
 		...[...context.validation.resourceFieldLossById.keys()].filter(id => hasRelevantResourceFieldLoss(context.validation, id, SEARCH_RESOURCE_SURFACE_FIELDS)),
 	])
 	if (searchMembershipRisk.size > 0)

@@ -461,6 +461,95 @@ describe('applyInitPlan', () => {
 			.toBe(false)
 	})
 
+	// FINDING 1 (P0): a successful atomic claim alone is not ownership of
+	// whatever `applyInitPlan` later observes at the same pathname -- only
+	// `claimDirectory`'s own immediate post-`mkdir` observation is. These
+	// regressions wrap the REAL `claimDirectory`, substituting a real,
+	// pre-populated victim (or a symlink to one) for the claimed directory
+	// strictly between that primitive proving ownership and `applyInitPlan`
+	// ever consuming the returned identity -- simulating the exact race the
+	// reviewer described. Neither the victim's directory nor its content may
+	// ever be removed or written by this invocation, which never actually
+	// owns it.
+	describe('never removes or writes a victim swapped in for the claim after ownership was already established (Finding 1 regression)', () => {
+		it('leaves a real, pre-populated victim directory completely untouched and reports incomplete', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				claimDirectory: async (target: string) => {
+					const result = await defaultApplyInitPlanDeps.claimDirectory(target)
+					if (result.outcome === 'claimed') {
+						// The race: substitute a real, pre-populated directory for the
+						// genuinely empty one `claimDirectory` just proved ownership of,
+						// strictly after that proof and strictly before `applyInitPlan`
+						// ever looks at `target` again.
+						await fs.rm(target, { recursive: true, force: true })
+						await fs.mkdir(target)
+						await fs.writeFile(path.join(target, 'victim-marker.txt'), 'pre-existing victim data')
+					}
+					return result
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The victim must survive completely untouched: this invocation can
+			// never prove -- by the identity `claimDirectory` itself returned --
+			// that it owns this directory, so it must neither delete nor write
+			// into it.
+			expect(await fs.readdir(engineeringPath))
+				.toEqual(['victim-marker.txt'])
+			expect(await fs.readFile(path.join(engineeringPath, 'victim-marker.txt'), 'utf8'))
+				.toBe('pre-existing victim data')
+		})
+
+		it('leaves a symlink (and its external target) completely untouched and reports incomplete', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const outsideDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-init-outside-')))
+			await fs.writeFile(path.join(outsideDir, 'secret.txt'), 'must not be disturbed')
+
+			try {
+				const deps = {
+					...defaultApplyInitPlanDeps,
+					claimDirectory: async (target: string) => {
+						const result = await defaultApplyInitPlanDeps.claimDirectory(target)
+						if (result.outcome === 'claimed') {
+							await fs.rm(target, { recursive: true, force: true })
+							await fs.symlink(outsideDir, target)
+						}
+						return result
+					},
+				}
+
+				const result = await applyInitPlan(plan, deps)
+
+				expect(result.applied)
+					.toBe(false)
+				expect(result.applied === false && result.outcome)
+					.toBe('incomplete')
+
+				const lstat = await fs.lstat(engineeringPath)
+				expect(lstat.isSymbolicLink())
+					.toBe(true)
+				expect(await fs.readdir(outsideDir))
+					.toEqual(['secret.txt'])
+				expect(await fs.readFile(path.join(outsideDir, 'secret.txt'), 'utf8'))
+					.toBe('must not be disturbed')
+			}
+			finally {
+				await fs.rm(outsideDir, { recursive: true, force: true })
+			}
+		})
+	})
+
 	it('removes the whole claim (no marker to prove ownership yet) when the marker itself cannot be created', async () => {
 		const plan = await computeValidPlan()
 		const deps = {

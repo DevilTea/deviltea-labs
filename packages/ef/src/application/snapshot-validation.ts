@@ -36,7 +36,7 @@ import { severityOf } from '../domain/diagnostic-codes'
 import { aggregateDiagnostics } from '../domain/diagnostics'
 import { validateFilename, validateGraphIdentity, validateIdSyntax } from '../domain/identity'
 import { validateStatus } from '../domain/lifecycle'
-import { RELATION_TYPES } from '../domain/model'
+import { ENVELOPE_FIELD_ORDER, RELATION_TYPES } from '../domain/model'
 import { validateRelationEntries, validateRelationGraph } from '../domain/relations'
 import {
 	findOrphanResourceFiles,
@@ -243,13 +243,53 @@ export interface SnapshotValidationResult {
 	 * exactly one of the conflicting values, discarding the other
 	 * unrecoverably) or `EF-ENV-006` (an unrecognized top-level field, which
 	 * `decodeEnvelope` drops entirely rather than preserving as an
-	 * extension). Because either code can affect a field a `list`/`search`
-	 * request filters or searches on (including `type`/`status`/`schema`,
-	 * not just relations/resources/tags), a request that applies ANY filter
-	 * cannot trust its matching/total while an Artifact in this set exists
-	 * (see `query.ts`'s Finding B handling).
+	 * extension). Folded into `projectionLossArtifactIds` unconditionally:
+	 * this Artifact's raw, unsanitized envelope -- what `lookup`/`list`/
+	 * `search` project verbatim -- is untrustworthy regardless of which
+	 * field either code actually affects.
+	 *
+	 * Eighth-round Finding 8: `list` membership/total and `search`
+	 * matching/total no longer treat this coarse, field-unscoped bucket as a
+	 * risk signal for EITHER kind -- doing so let a duplicate key on a field
+	 * neither kind's filters/surfaces actually read (a duplicate `title` key
+	 * with a `--type` filter, for instance) fail an entirely unrelated
+	 * request. `envelopeFieldLossById` below gives the precise per-field
+	 * signal both kinds now intersect against their own consumed fields
+	 * instead.
 	 */
 	envelopeWideLossArtifactIds: ReadonlySet<string>
+	/**
+	 * Artifact IDs (by their own declared `id`) with an `EF-ENV-005`
+	 * duplicate mapping key, reduced to exactly WHICH core envelope field(s)
+	 * (`domain/model.ts`'s `ENVELOPE_FIELD_ORDER`: `schema`, `type`, `id`,
+	 * `title`, `status`, `summary`, `tags`, `relations`, `resources`) the
+	 * duplicate actually names -- the same per-field granularity
+	 * `resourceFieldLossById` already gives Resource entries, extended to the
+	 * core envelope itself (eighth-round Finding 8). A duplicate key nested
+	 * within one `relations[i]`/`resources[i]` entry (e.g.
+	 * `'relations[2].type'`) is attributed to its enclosing top-level field
+	 * (`'relations'`), matching `duplicateKeyFieldNames`'s own prefix
+	 * matching -- the same coarse, whole-array granularity
+	 * `edgeLossArtifactIds`/`envelopeWideLossArtifactIds` already use for
+	 * this case.
+	 *
+	 * `EF-ENV-006` (an unrecognized top-level field, entirely dropped) is
+	 * deliberately NOT recorded here: `decodeEnvelope`'s own unknown-field
+	 * classification only ever fires for a name that is NOT one of
+	 * `ENVELOPE_FIELD_ORDER`'s core names, so dropping it can never corrupt
+	 * a core field's own decoded value -- only `envelopeWideLossArtifactIds`
+	 * (folded into `projectionLossArtifactIds`) needs to reflect that the
+	 * raw envelope's projection is still incomplete overall.
+	 *
+	 * `list`'s `type`/`status`/`schema`/tag/relation/Resource filters and
+	 * `search`'s title/summary/tag/Resource surfaces each only care about
+	 * the specific core field(s) they actually read (`query.ts`'s Finding
+	 * 8): a duplicate `title` key must not gate an unrelated `--type` list
+	 * filter, for instance, even though this Artifact's own `lookup`/a
+	 * returned-page projection is untrustworthy either way
+	 * (`envelopeWideLossArtifactIds`'s doc).
+	 */
+	envelopeFieldLossById: ReadonlyMap<string, ReadonlySet<CoreFieldName>>
 	/**
 	 * Artifact IDs (by their own declared, first-occurrence-selected `id`)
 	 * whose frontmatter has an `EF-ENV-005` duplicate mapping key on `id` or
@@ -466,6 +506,9 @@ export interface SnapshotValidationResult {
 /** A Resource descriptor's named core fields (06-resources.md), for `resourceFieldLossById`'s per-field loss granularity (Finding 9). */
 export type ResourceFieldName = 'type' | 'location' | 'role' | 'media_type' | 'normative' | 'description'
 
+/** An Artifact envelope's named core fields (01-artifact-envelope.md; `domain/model.ts`'s `ENVELOPE_FIELD_ORDER`), for `envelopeFieldLossById`'s per-field loss granularity (eighth-round Finding 8). */
+export type CoreFieldName = typeof ENVELOPE_FIELD_ORDER[number]
+
 // ---------------------------------------------------------------------------
 // Diagnostic construction
 // ---------------------------------------------------------------------------
@@ -672,6 +715,17 @@ function isIdentityDuplicateKeyField(field: string | undefined): boolean {
 	return IDENTITY_DUPLICATE_KEY_FIELDS.some(name => duplicateKeyFieldNames(field, name))
 }
 
+/**
+ * The exact `ENVELOPE_FIELD_ORDER` core field an `EF-ENV-005` diagnostic's
+ * `field` names or is nested under (eighth-round Finding 8; `duplicateKeyFieldNames`'s
+ * own prefix matching), or `undefined` when `field` names something else
+ * entirely (an extension field, or a sub-key of an `EF-ENV-006`-dropped
+ * unknown field, neither of which is ever a core field name).
+ */
+function coreFieldFromDuplicateKey(field: string | undefined): CoreFieldName | undefined {
+	return ENVELOPE_FIELD_ORDER.find(name => duplicateKeyFieldNames(field, name))
+}
+
 // ---------------------------------------------------------------------------
 // Finding 7: byte-decoding loss and its frontmatter/body reach
 // ---------------------------------------------------------------------------
@@ -863,6 +917,7 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 	const resourceLossArtifactIds = new Set<string>()
 	const tagLossArtifactIds = new Set<string>()
 	const envelopeWideLossArtifactIds = new Set<string>()
+	const envelopeFieldLossById = new Map<string, Set<CoreFieldName>>()
 	// Finding 5/6/7/9 fact tracking -- see each field's doc on
 	// `SnapshotValidationResult`.
 	const envelopeStructuralLossArtifactIds = new Set<string>()
@@ -964,6 +1019,20 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		// only by `impact`/`resolve-current`.
 		if (duplicateKeyDiagnostics.some(d => duplicateKeyFieldNames(d.field, 'status')))
 			statusInvalidArtifactIds.add(envelope.id)
+		// Eighth-round Finding 8: attribute each duplicate-key diagnostic to the
+		// specific core envelope field it names, regardless of which of the
+		// buckets above (if any) it also fell into -- `list`/`search` intersect
+		// this per-field signal against exactly the fields their own
+		// filters/surfaces consume (`envelopeFieldLossById`'s doc), rather than
+		// treating any EF-ENV-005 anywhere as an opaque whole-project risk.
+		for (const d of duplicateKeyDiagnostics) {
+			const coreField = coreFieldFromDuplicateKey(d.field)
+			if (!coreField)
+				continue
+			const set = envelopeFieldLossById.get(envelope.id) ?? new Set<CoreFieldName>()
+			set.add(coreField)
+			envelopeFieldLossById.set(envelope.id, set)
+		}
 
 		const mapping = artifact.document!.mapping
 		const rawRelations = mapping ? rawArrayField(mapping, 'relations') : []
@@ -1346,6 +1415,7 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 		resourceLossArtifactIds,
 		tagLossArtifactIds,
 		envelopeWideLossArtifactIds,
+		envelopeFieldLossById,
 		extensionValueLossArtifactIds,
 		envelopeStructuralLossArtifactIds,
 		byteDecodingLossArtifactIds,

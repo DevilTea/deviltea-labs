@@ -462,4 +462,39 @@ describe('runQueryCommand', () => {
 		expect(json.diagnostics[0].code)
 			.toBe('EF-QRY-013')
 	})
+
+	// ---- Finding 9: association is re-checked only for IMPLICIT discovery; ---
+	// ---- an explicit --project is exempt (11-filesystem-and-config.md -------
+	// ---- "Project Discovery") --------------------------------------------------
+
+	it('succeeds with an explicit --project even when the current working directory is an unrelated, unassociated Git worktree', async () => {
+		await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
+		await writeFile(root, '.engineering/.gitignore', GITIGNORE)
+		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
+		commitAll(root, 'bootstrap')
+
+		// `unrelatedCwd` is a wholly separate Git worktree that neither
+		// contains the project nor is declared as one of its linked
+		// repositories. Re-imposing the invocation-CWD requirement after an
+		// explicit `--project` resolution (the exact bug this regression
+		// guards against) would report `EF-QRY-013` here even though the
+		// caller explicitly named this project -- defeating
+		// 11-filesystem-and-config.md's exception that "an otherwise-rejected
+		// nested worktree can supply another explicit project root instead."
+		const unrelatedCwd = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-query-unrelated-')))
+		execFileSync('git', ['init', '-q', '-b', 'main', unrelatedCwd])
+		try {
+			const outcome = await runQueryCommand({ kind: 'lookup', id: 'PROJECT' }, { format: 'json', noColor: false, project: root }, { cwd: unrelatedCwd, executor: createGitExecutor() })
+			expect(outcome.exitCode)
+				.toBe(0)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(true)
+			expect(json.data.found)
+				.toBe(true)
+		}
+		finally {
+			await fs.rm(unrelatedCwd, { recursive: true, force: true })
+		}
+	})
 })
