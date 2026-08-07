@@ -3,28 +3,86 @@
  * (13-cli-contract.md "Initialization claim-and-complete protocol").
  *
  * `createExclusive` is the general create-exclusive (`wx`) primitive used for
- * `.engineering/.tmp/init-state.json`. `writeInitMarker` / `readInitMarker`
- * layer the exact marker shape and its ownership-proving `nonce` on top of it.
+ * every planned `ef init` file and for `.engineering/.tmp/init-state.json`.
+ * `writeInitMarker` / `readInitMarker` layer the exact marker shape and its
+ * ownership-proving `nonce` on top of it.
+ *
+ * Finding (P0, matching `platform/hard-link-publish.ts`'s own
+ * `writeTempFileComplete` finding): a prior implementation reported only
+ * `{ outcome: 'created' }` on success -- no identity of the inode the
+ * `open(path, 'wx')` handle actually created. A caller that then needed an
+ * ownership witness for that exact file had no choice but to re-derive one
+ * from a fresh PATHNAME observation made after the handle was already closed
+ * (`application/init.ts`'s own `regularFileIdentity(filePath)` call
+ * immediately after `createExclusive` returned), and whatever real regular
+ * file happened to occupy `path` by the time that ran got adopted as "ours"
+ * -- including a foreign file a race silently substituted in at the exact
+ * same path in the interim. `createExclusive` now captures `identity` via
+ * `handle.stat()` (an `fstat` on the SAME open handle `open(..., 'wx+')`
+ * returned, taken before the handle is ever closed) and reads its
+ * verification `bytes` back through that SAME handle, at an explicit
+ * position, rather than through any subsequent pathname operation. Both are
+ * returned so a caller can construct its own ownership witness EXCLUSIVELY
+ * from this handle-bound provenance, never from a later, independent
+ * observation of `path`.
  */
 
-import type { Buffer } from 'node:buffer'
+import type { FileHandle } from 'node:fs/promises'
+import type { FileIdentity } from './fs-facts'
+import { Buffer } from 'node:buffer'
 import { open, readFile } from 'node:fs/promises'
 
 export type CreateExclusiveResult
-	= | { outcome: 'created' }
+	= | { outcome: 'created', identity: FileIdentity, bytes: Uint8Array }
 		| { outcome: 'already-exists' }
 		| { outcome: 'failed', error: NodeJS.ErrnoException }
 
 /**
- * Create `path` with create-exclusive (`wx`) semantics and write exactly
- * `bytes`. A pre-existing path, whether from a genuine race or a stale
- * leftover, is reported as `already-exists` and is never truncated or
- * overwritten.
+ * Read exactly `size` bytes back through the already-open `handle`, at
+ * explicit positions from the start of the file, rather than through
+ * `handle.readFile()` -- which reads from the handle's CURRENT position
+ * (already advanced past the just-written data by the preceding
+ * `handle.writeFile()` call) rather than from the beginning. Explicit
+ * positions also leave the handle's own file-position cursor untouched,
+ * matching `handle.read()`'s documented behavior for a non-`null` `position`.
+ * Deliberately duplicated from `platform/hard-link-publish.ts`'s identical
+ * helper rather than imported, so each create-exclusive primitive family
+ * stays self-contained.
+ */
+async function readBackThroughHandle(handle: FileHandle, size: number): Promise<Uint8Array> {
+	if (size === 0)
+		return new Uint8Array(0)
+	const buffer = Buffer.alloc(size)
+	let offset = 0
+	while (offset < size) {
+		const { bytesRead } = await handle.read(buffer, offset, size - offset, offset)
+		if (bytesRead === 0)
+			break
+		offset += bytesRead
+	}
+	return buffer.subarray(0, offset)
+}
+
+/**
+ * Create `path` with create-exclusive semantics and write exactly `bytes`. A
+ * pre-existing path, whether from a genuine race or a stale leftover, is
+ * reported as `already-exists` and is never truncated or overwritten.
+ *
+ * On success, `identity` and `bytes` are both captured from the exact
+ * `open(path, 'wx+')` handle this call created -- `identity` via
+ * `handle.stat()`, `bytes` via a read back through that same handle at
+ * explicit positions -- BEFORE the handle is closed. Neither is ever
+ * re-derived from a pathname observation of `path` made afterward (see this
+ * module's own doc, Finding P0).
  */
 export async function createExclusive(path: string, bytes: Uint8Array): Promise<CreateExclusiveResult> {
 	let handle
 	try {
-		handle = await open(path, 'wx')
+		// `wx+` (not plain `wx`): the create-exclusive semantics are identical,
+		// but the handle also supports reading, so the verification read-back
+		// below can go through this SAME handle rather than a second,
+		// independent open of `path`.
+		handle = await open(path, 'wx+')
 	}
 	catch (error) {
 		const errno = error as NodeJS.ErrnoException
@@ -35,7 +93,10 @@ export async function createExclusive(path: string, bytes: Uint8Array): Promise<
 
 	try {
 		await handle.writeFile(bytes)
-		return { outcome: 'created' }
+		const stats = await handle.stat()
+		const identity: FileIdentity = { dev: stats.dev, ino: stats.ino }
+		const readBack = await readBackThroughHandle(handle, stats.size)
+		return { outcome: 'created', identity, bytes: readBack }
 	}
 	catch (error) {
 		return { outcome: 'failed', error: error as NodeJS.ErrnoException }

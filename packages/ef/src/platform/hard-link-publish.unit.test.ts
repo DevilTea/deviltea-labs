@@ -30,10 +30,61 @@ describe('writeTempFileComplete', () => {
 			.encode('---\nschema: ef/requirement@1\n---\n')
 
 		const result = await writeTempFileComplete(target, bytes)
-		expect(result)
-			.toEqual({ outcome: 'written' })
+		expect(result.outcome)
+			.toBe('written')
 		expect(new Uint8Array(fs.readFileSync(target)))
 			.toEqual(bytes)
+
+		// Finding (P0, fifteenth round): `identity` and `bytes` are captured
+		// from the exact `open(target, 'wx+')` handle this call created --
+		// via `handle.stat()` and a read back through that same handle --
+		// BEFORE it closes, never re-derived from a later, independent
+		// pathname observation of `target`.
+		if (result.outcome !== 'written')
+			throw new Error('unreachable: asserted above')
+		const stats = fs.statSync(target)
+		expect(result.identity)
+			.toEqual({ dev: stats.dev, ino: stats.ino })
+		expect(new Uint8Array(result.bytes))
+			.toEqual(bytes)
+	})
+
+	it('returns a distinct identity for two temporary files written in the same call sequence, both matching their own on-disk stat', async () => {
+		const targetA = path.join(tempRoot, '.tmp-REQ-031.md')
+		const targetB = path.join(tempRoot, '.tmp-REQ-032.md')
+		const bytesA = new TextEncoder()
+			.encode('A')
+		const bytesB = new TextEncoder()
+			.encode('B')
+
+		const resultA = await writeTempFileComplete(targetA, bytesA)
+		const resultB = await writeTempFileComplete(targetB, bytesB)
+		if (resultA.outcome !== 'written' || resultB.outcome !== 'written')
+			throw new Error('unreachable: both writes are expected to succeed')
+
+		expect(resultA.identity)
+			.toEqual({ dev: fs.statSync(targetA).dev, ino: fs.statSync(targetA).ino })
+		expect(resultB.identity)
+			.toEqual({ dev: fs.statSync(targetB).dev, ino: fs.statSync(targetB).ino })
+		expect(resultA.identity)
+			.not.toEqual(resultB.identity)
+		expect(new Uint8Array(resultA.bytes))
+			.toEqual(bytesA)
+		expect(new Uint8Array(resultB.bytes))
+			.toEqual(bytesB)
+	})
+
+	it('captures identity and a correct read-back even for a zero-byte temporary file', async () => {
+		const target = path.join(tempRoot, '.tmp-empty.md')
+		const result = await writeTempFileComplete(target, new Uint8Array())
+		if (result.outcome !== 'written')
+			throw new Error('unreachable: expected a successful write')
+
+		expect(result.bytes.length)
+			.toBe(0)
+		const stats = fs.statSync(target)
+		expect(result.identity)
+			.toEqual({ dev: stats.dev, ino: stats.ino })
 	})
 
 	it('reports already-exists rather than truncating a pre-existing temp path', async () => {

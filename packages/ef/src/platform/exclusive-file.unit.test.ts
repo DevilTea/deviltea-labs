@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -22,10 +23,61 @@ describe('createExclusive', () => {
 			.encode('{"schema":"ef/init-state@1","nonce":"aa"}')
 
 		const result = await createExclusive(target, bytes)
-		expect(result)
-			.toEqual({ outcome: 'created' })
+		expect(result.outcome)
+			.toBe('created')
 		expect(new Uint8Array(fs.readFileSync(target)))
 			.toEqual(bytes)
+
+		// Finding (P0, matching `hard-link-publish.ts`'s `writeTempFileComplete`
+		// finding): `identity` and `bytes` are captured from the exact
+		// `open(target, 'wx+')` handle this call created -- via `handle.stat()`
+		// and a read back through that same handle -- BEFORE it closes, never
+		// re-derived from a later, independent pathname observation of `target`.
+		if (result.outcome !== 'created')
+			throw new Error('unreachable: asserted above')
+		const stats = fs.statSync(target)
+		expect(result.identity)
+			.toEqual({ dev: stats.dev, ino: stats.ino })
+		expect(new Uint8Array(result.bytes))
+			.toEqual(bytes)
+	})
+
+	it('returns a distinct identity for two exclusive files created in the same call sequence, both matching their own on-disk stat', async () => {
+		const targetA = path.join(tempRoot, 'a.json')
+		const targetB = path.join(tempRoot, 'b.json')
+		const bytesA = new TextEncoder()
+			.encode('A')
+		const bytesB = new TextEncoder()
+			.encode('B')
+
+		const resultA = await createExclusive(targetA, bytesA)
+		const resultB = await createExclusive(targetB, bytesB)
+		if (resultA.outcome !== 'created' || resultB.outcome !== 'created')
+			throw new Error('unreachable: both creates are expected to succeed')
+
+		expect(resultA.identity)
+			.toEqual({ dev: fs.statSync(targetA).dev, ino: fs.statSync(targetA).ino })
+		expect(resultB.identity)
+			.toEqual({ dev: fs.statSync(targetB).dev, ino: fs.statSync(targetB).ino })
+		expect(resultA.identity)
+			.not.toEqual(resultB.identity)
+		expect(new Uint8Array(resultA.bytes))
+			.toEqual(bytesA)
+		expect(new Uint8Array(resultB.bytes))
+			.toEqual(bytesB)
+	})
+
+	it('captures identity and a correct read-back even for a zero-byte file', async () => {
+		const target = path.join(tempRoot, 'empty.json')
+		const result = await createExclusive(target, new Uint8Array())
+		if (result.outcome !== 'created')
+			throw new Error('unreachable: expected a successful create')
+
+		expect(result.bytes.length)
+			.toBe(0)
+		const stats = fs.statSync(target)
+		expect(result.identity)
+			.toEqual({ dev: stats.dev, ino: stats.ino })
 	})
 
 	it('reports already-exists and leaves the original bytes untouched on collision', async () => {
@@ -36,8 +88,8 @@ describe('createExclusive', () => {
 			.encode('second-owner-bytes-different-length')
 
 		const firstResult = await createExclusive(target, first)
-		expect(firstResult)
-			.toEqual({ outcome: 'created' })
+		expect(firstResult.outcome)
+			.toBe('created')
 
 		const secondResult = await createExclusive(target, second)
 		expect(secondResult)
@@ -75,11 +127,22 @@ describe('writeInitMarker / readInitMarker', () => {
 		const nonce = generateNonce()
 
 		const writeResult = await writeInitMarker(target, nonce)
-		expect(writeResult)
-			.toEqual({ outcome: 'created' })
+		expect(writeResult.outcome)
+			.toBe('created')
 
 		const raw = JSON.parse(fs.readFileSync(target, 'utf8')) as unknown
 		expect(raw)
+			.toEqual({ schema: 'ef/init-state@1', nonce })
+
+		// `writeInitMarker` layers directly on `createExclusive`, so it carries
+		// the same handle-bound `identity`/`bytes` through (Finding P0).
+		if (writeResult.outcome !== 'created')
+			throw new Error('unreachable: asserted above')
+		const stats = fs.statSync(target)
+		expect(writeResult.identity)
+			.toEqual({ dev: stats.dev, ino: stats.ino })
+		expect(JSON.parse(Buffer.from(writeResult.bytes)
+			.toString('utf8')))
 			.toEqual({ schema: 'ef/init-state@1', nonce })
 
 		const readResult = await readInitMarker(target)

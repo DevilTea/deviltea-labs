@@ -421,9 +421,34 @@ export interface ApplyInitPlanDeps {
 	/** Non-recursive directory listing (entry names only), for the content-based half of `verifyClaimIntact` in `applyInitPlan`. */
 	readDirectory: (path: string) => Promise<string[]>
 	generateNonce: () => string
-	/** `lstat`-derived identity of `path` iff it is right now a real, non-symlink directory; `undefined` otherwise. Used to bind every step after the claim to the exact directory instance claimed (see `verifyClaimIntact` in `applyInitPlan`). */
+	/**
+	 * `lstat`-derived identity of `path` iff it is right now a real, non-symlink
+	 * directory; `undefined` otherwise. Used both to RE-VERIFY every step
+	 * after the claim against the exact directory instance claimed
+	 * (`verifyClaimIntact`, `abort`) and, for a directory this invocation
+	 * itself just created via `mkdir`, to ESTABLISH that directory's own
+	 * ownership witness (`establishFreshDirectoryIdentity`) -- `mkdir` returns
+	 * no handle, so unlike a file created via `createExclusive` there is no
+	 * handle-bound alternative available; `establishFreshDirectoryIdentity`
+	 * additionally requires the directory to be observed EMPTY immediately
+	 * afterward (the strongest reachable substitute, identical to
+	 * `platform/claim-directory.ts`'s own post-`mkdir` proof), since a
+	 * directory this invocation alone just created is necessarily empty at
+	 * that instant.
+	 */
 	directoryIdentity: (path: string) => Promise<FileIdentity | undefined>
-	/** `lstat`-derived identity of `path` iff it is right now a real, non-symlink regular file; `undefined` otherwise. The regular-file counterpart of `directoryIdentity`, used to capture and re-verify the per-entry ownership witness of every planned FILE this invocation creates (see `verifyClaimIntact` and `abort` in `applyInitPlan`). */
+	/**
+	 * `lstat`-derived identity of `path` iff it is right now a real, non-symlink
+	 * regular file; `undefined` otherwise. Used ONLY for RE-VERIFYING an
+	 * identity already established elsewhere against a fresh pathname
+	 * observation (`verifyClaimIntact`'s and `abort`'s per-entry
+	 * `entryOwnershipProven` recheck) -- never for ESTABLISHING a new
+	 * ownership identity in the first place. Every planned FILE's, and the
+	 * marker's, own identity is established exclusively from
+	 * `createExclusive`'s / `writeInitMarker`'s handle-bound return value (see
+	 * `platform/exclusive-file.ts`'s own Finding P0), not from a call to this
+	 * function.
+	 */
 	regularFileIdentity: (path: string) => Promise<FileIdentity | undefined>
 }
 
@@ -463,6 +488,39 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 			return false
 	}
 	return true
+}
+
+/**
+ * Establish the ownership witness for a directory THIS INVOCATION itself just
+ * created via a non-recursive `mkdir` (`tmpPath`, and each of
+ * `plan.directories`) -- the directory counterpart of a FILE's handle-bound
+ * `createExclusive` identity. `mkdir` returns no handle, so unlike a file
+ * there is no way to bind this observation to the exact creating syscall the
+ * way `readBackThroughHandle`/`handle.stat()` bind a file's; the strongest
+ * reachable substitute (identical to `platform/claim-directory.ts`'s own
+ * post-`mkdir` proof) is an immediate `lstat`-based observation that ALSO
+ * requires the directory to be EMPTY, not merely "is a non-symlink
+ * directory": a directory this invocation alone just created is necessarily
+ * empty at that instant, so requiring emptiness rules out a same-instant
+ * swap for a real, pre-populated foreign directory of the identical name --
+ * a pattern `directoryIdentity` alone, without the emptiness check, cannot
+ * detect. `undefined` when `dirPath` cannot be proven, right now, to be both
+ * a non-symlink directory AND empty.
+ */
+async function establishFreshDirectoryIdentity(deps: ApplyInitPlanDeps, dirPath: string): Promise<FileIdentity | undefined> {
+	const identity = await deps.directoryIdentity(dirPath)
+	if (identity === undefined)
+		return undefined
+	let entries: string[]
+	try {
+		entries = await deps.readDirectory(dirPath)
+	}
+	catch {
+		return undefined
+	}
+	if (entries.length > 0)
+		return undefined
+	return identity
 }
 
 /**
@@ -934,13 +992,15 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		// The per-entry ownership witness is captured immediately after THIS
 		// invocation's own creation call succeeds -- not read back later from
 		// an independently racable observation -- exactly like `claimDirectory`
-		// establishes `engineeringPath`'s own identity. If it cannot even be
-		// captured here, materialization is unprovable: fail closed without
-		// tracking (and therefore without ever attempting to delete) an entry
-		// whose ownership was never established.
-		const identity = await deps.directoryIdentity(tmpPath)
+		// establishes `engineeringPath`'s own identity. `mkdir` returns no
+		// handle, so `establishFreshDirectoryIdentity`'s `lstat`-plus-emptiness
+		// check is the strongest reachable substitute (see its own doc). If it
+		// cannot even be captured here, materialization is unprovable: fail
+		// closed without tracking (and therefore without ever attempting to
+		// delete) an entry whose ownership was never established.
+		const identity = await establishFreshDirectoryIdentity(deps, tmpPath)
 		if (identity === undefined)
-			return abort(`'${tmpPath}' could not be verified as a directory immediately after being created.`)
+			return abort(`'${tmpPath}' could not be verified as an empty, non-symlink directory immediately after being created.`)
 		createdStack.push({ path: tmpPath, kind: 'directory', identity })
 		createdTopLevelNames.add('.tmp')
 	}
@@ -948,28 +1008,27 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 	if (!(await verifyClaimIntact()))
 		return abort(claimIntactFailureMessage)
 
+	// Finding (P0, matching `platform/hard-link-publish.ts`'s
+	// `writeTempFileComplete` finding): a prior implementation established
+	// this entry's `identity` and `bytes` from TWO fresh PATHNAME observations
+	// made only AFTER `writeInitMarker`'s own `open(markerPath, 'wx')` handle
+	// had already closed -- `deps.regularFileIdentity(markerPath)`, then
+	// `deps.readFileBytes(markerPath)`. Neither call carries any provenance
+	// binding it back to the exact file this invocation itself created:
+	// whatever real regular file happened to occupy `markerPath` by the time
+	// they ran would have been silently adopted as "ours". `writeInitMarker`
+	// (via `createExclusive`) now captures `identity` via `handle.stat()` and
+	// reads its own just-written `bytes` back through that SAME handle,
+	// before ever closing it (see `platform/exclusive-file.ts`'s own doc); the
+	// witness below is constructed EXCLUSIVELY from that returned,
+	// handle-bound provenance -- never re-derived from any pathname
+	// observation of `markerPath` made after the handle is gone.
 	const markerResult = await deps.writeInitMarker(markerPath, nonce)
 	if (markerResult.outcome !== 'created')
 		return abort(`Failed to create the initialization marker at '${markerPath}'.`)
 	markerCreated = true
 	{
-		const identity = await deps.regularFileIdentity(markerPath)
-		if (identity === undefined)
-			return abort(`'${markerPath}' could not be verified as a regular file immediately after being created.`)
-		// The marker's exact serialized shape is `writeInitMarker`'s own
-		// implementation detail, not something this module reconstructs from
-		// `nonce` alone: read the just-written bytes back immediately, the
-		// same "capture right after this invocation's own creation succeeded"
-		// pattern already used for `identity` above, and keep it both as this
-		// entry's content-ownership witness and as `abort`'s upfront
-		// byte-level marker check.
-		let bytes: Uint8Array
-		try {
-			bytes = await deps.readFileBytes(markerPath)
-		}
-		catch (error) {
-			return abort(`'${markerPath}' could not be read back immediately after being created: ${(error as Error).message}`)
-		}
+		const { identity, bytes } = markerResult
 		markerBytes = bytes
 		createdStack.push({ path: markerPath, kind: 'file', identity, bytes })
 	}
@@ -984,9 +1043,12 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		catch (error) {
 			return abort(`Failed to create directory '${dir}': ${(error as Error).message}`)
 		}
-		const identity = await deps.directoryIdentity(dirPath)
+		// See the `tmpPath` creation above: `mkdir` returns no handle, so
+		// `establishFreshDirectoryIdentity`'s `lstat`-plus-emptiness check is
+		// the strongest reachable ownership proof for a directory entry.
+		const identity = await establishFreshDirectoryIdentity(deps, dirPath)
 		if (identity === undefined)
-			return abort(`'${dirPath}' could not be verified as a directory immediately after being created.`)
+			return abort(`'${dirPath}' could not be verified as an empty, non-symlink directory immediately after being created.`)
 		createdStack.push({ path: dirPath, kind: 'directory', identity })
 		createdTopLevelNames.add(topLevelChildName(dir))
 	}
@@ -995,18 +1057,26 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 		if (!(await verifyClaimIntact()))
 			return abort(claimIntactFailureMessage)
 		const filePath = path.join(plan.targetRoot, file.path)
+		// Finding (P0, matching `platform/hard-link-publish.ts`'s
+		// `writeTempFileComplete` finding): a prior implementation established
+		// this entry's `identity` from a fresh PATHNAME observation
+		// (`deps.regularFileIdentity(filePath)`) made only AFTER
+		// `createExclusive`'s own handle had already closed -- silently
+		// adopting whatever real regular file happened to occupy `filePath` by
+		// the time that call ran, including a foreign file substituted in at
+		// the exact same path in the interim. `createExclusive` now captures
+		// `identity` via `handle.stat()`, before ever closing the handle (see
+		// `platform/exclusive-file.ts`'s own doc); it is used here directly,
+		// never re-derived from a pathname observation of `filePath` made
+		// after the handle is gone. `bytes` needs no equivalent handle-bound
+		// read-back: every `ef init` file is small, so the exact bytes this
+		// invocation itself wrote are simply `file.bytes` from the plan,
+		// already held in memory before the write, reused as this entry's
+		// content-ownership witness (see `CreatedEntry`'s own documentation).
 		const result = await deps.createExclusive(filePath, file.bytes)
 		if (result.outcome !== 'created')
 			return abort(`Failed to write '${file.path}'.`)
-		const identity = await deps.regularFileIdentity(filePath)
-		if (identity === undefined)
-			return abort(`'${filePath}' could not be verified as a regular file immediately after being created.`)
-		// The planned bytes are already held in memory (no re-read needed):
-		// every `ef init` file is small, so the exact bytes this invocation
-		// itself wrote are simply `file.bytes` from the plan, reused as this
-		// entry's content-ownership witness (see `CreatedEntry`'s own
-		// documentation).
-		createdStack.push({ path: filePath, kind: 'file', identity, bytes: file.bytes })
+		createdStack.push({ path: filePath, kind: 'file', identity: result.identity, bytes: file.bytes })
 		createdTopLevelNames.add(topLevelChildName(file.path))
 	}
 

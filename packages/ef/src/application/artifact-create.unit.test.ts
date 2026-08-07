@@ -8,6 +8,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SCHEMA_BY_TYPE } from '../domain/model'
 import { directoryIdentity as realDirectoryIdentity } from '../platform/fs-facts'
+import { writeTempFileComplete as realWriteTempFileComplete } from '../platform/hard-link-publish'
 import {
 	applyCreatePlan,
 	computeCreatePlan,
@@ -633,11 +634,21 @@ describe('applyCreatePlan', () => {
 			.toBe(`Failed to write the temporary file for '${plan.path}'.`)
 	})
 
-	it('reports incomplete when the read-back temporary file is a different length than the planned bytes', async () => {
+	// Finding (P0, fifteenth round): the read-back byte content the temporary
+	// write is validated against is now returned directly by
+	// `writeTempFileComplete` itself (read through the SAME open handle that
+	// wrote it), not re-derived from a later, independent `deps.readFileBytes(tempPath)`
+	// pathname call -- so these two regressions now simulate a corrupted
+	// read-back by wrapping the REAL primitive and doctoring its RETURNED
+	// `bytes` field, never the real bytes actually persisted on disk.
+	it('reports incomplete when the handle-bound read-back is a different length than the planned bytes', async () => {
 		const plan = computePlanOrThrow()
 		const deps = {
 			...defaultApplyCreatePlanDeps,
-			readFileBytes: async () => plan.bytes.slice(0, plan.bytes.length - 1),
+			writeTempFileComplete: async (tempPath: string, bytes: Uint8Array) => {
+				const real = await realWriteTempFileComplete(tempPath, bytes)
+				return real.outcome === 'written' ? { ...real, bytes: real.bytes.slice(0, real.bytes.length - 1) } : real
+			},
 		}
 
 		const result = await applyCreatePlan(plan, tempDir, deps)
@@ -648,25 +659,33 @@ describe('applyCreatePlan', () => {
 		expect(result.applied === false && result.message)
 			.toBe(`Temporary file for '${plan.path}' was not written with the planned bytes.`)
 
-		// Finding 1 (P0, thirteenth round): no ownership witness of any kind
-		// exists yet at this failure path (it is established only AFTER this
-		// exact byte-content check passes) -- so this cleanup fails closed
-		// rather than deleting `tempPath` by pathname alone. The genuinely
-		// correct temporary file this invocation wrote is left behind rather
-		// than risk deleting a foreign replacement it can never prove it owns.
+		// The REAL file on disk still holds the genuinely correct bytes and
+		// identity -- only this test's forged return value disagrees. The
+		// ownership-proof cleanup attempt re-verifies the witness against the
+		// REAL, unforged, on-disk bytes by pathname (`fileOwnershipProven`,
+		// unchanged) and correctly refuses to delete a file that does not
+		// actually match the (deliberately wrong) witness it was asked to
+		// verify against; the genuinely correct temporary file this
+		// invocation wrote is left behind rather than removed on a witness
+		// that cannot even be proven self-consistent.
 		const leftoverTempFiles = (await fs.readdir(path.dirname(path.join(tempDir, plan.path))))
 			.filter(name => name.includes('.tmp-'))
 		expect(leftoverTempFiles.length)
 			.toBe(1)
 	})
 
-	it('reports incomplete when the read-back temporary file is the same length but different content than the planned bytes', async () => {
+	it('reports incomplete when the handle-bound read-back is the same length but different content than the planned bytes', async () => {
 		const plan = computePlanOrThrow()
-		const corrupted = plan.bytes.slice()
-		corrupted[corrupted.length - 1] = (corrupted[corrupted.length - 1]! + 1) % 256
 		const deps = {
 			...defaultApplyCreatePlanDeps,
-			readFileBytes: async () => corrupted,
+			writeTempFileComplete: async (tempPath: string, bytes: Uint8Array) => {
+				const real = await realWriteTempFileComplete(tempPath, bytes)
+				if (real.outcome !== 'written')
+					return real
+				const corrupted = real.bytes.slice()
+				corrupted[corrupted.length - 1] = (corrupted[corrupted.length - 1]! + 1) % 256
+				return { ...real, bytes: corrupted }
+			},
 		}
 
 		const result = await applyCreatePlan(plan, tempDir, deps)
@@ -1576,6 +1595,121 @@ Placeholder.
 		})
 	})
 
+	// FINDING (P0, fifteenth round): a prior implementation reported only
+	// `{ outcome: 'written' }` from `writeTempFileComplete` -- no identity of
+	// the inode its own `open(tempPath, 'wx')` handle actually created.
+	// `applyCreatePlan` then established `tempWitness` from TWO fresh
+	// PATHNAME observations made only AFTER that handle had already closed:
+	// `deps.readFileBytes(tempPath)`, then `deps.fileIdentity(tempPath)`.
+	// Neither call carries any provenance binding it back to the exact file
+	// this invocation itself created -- whatever real regular file happens to
+	// occupy `tempPath` by the time they run is what gets adopted as "ours".
+	// Deterministic reproduction (no forced-identity aliasing: the type
+	// directory is genuinely, physically replaced): the REAL `writeTempFileComplete`
+	// succeeds, creating this invocation's own temporary file; strictly
+	// afterward -- before this invocation ever re-observes `tempPath` by
+	// pathname for ANY reason -- the entire type directory is replaced with a
+	// different real directory that already contains a foreign regular file
+	// at the EXACT temporary basename, with bytes BYTE-FOR-BYTE IDENTICAL to
+	// `plan.bytes` (proving content equality alone can never distinguish the
+	// foreign file from this invocation's own). The un-fixed code's
+	// subsequent `readFileBytes`/`fileIdentity` pathname reads resolve fresh
+	// through the replacement, silently binding `tempWitness` to the FOREIGN
+	// file's own identity; the following managed-directory-chain re-check
+	// correctly detects the replacement, and the un-fixed `deleteOwnedTempFile`
+	// call then finds the foreign file matches that wrongly-bound witness --
+	// by BOTH identity and byte content -- and unlinks it.
+	describe('temporary-file ownership witness is bound to the handle that created it, not a later pathname observation (Finding, fifteenth round)', () => {
+		it('leaves a byte-identical foreign temp file untouched, and never publishes, when the type directory is swapped for one containing a foreign file at the exact temp basename immediately after the real write succeeds', async () => {
+			const plan = computePlanOrThrow()
+			const reqDirPath = path.join(tempDir, '.engineering/req')
+			const targetPath = path.join(tempDir, plan.path)
+			const fixedNonce = 'fixed-nonce-finding-15'
+			const tempBasename = `.${path.basename(plan.path)}.tmp-${fixedNonce}`
+
+			let foreignIdentity: FileIdentity | undefined
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				generateNonce: () => fixedNonce,
+				// Delegate to the REAL primitive first -- this invocation's own
+				// temporary file is genuinely created, written, fsynced, and
+				// closed exactly as production code does. Only AFTER it
+				// reports success (i.e. strictly after its handle is already
+				// closed) does this hook replace the type directory -- before
+				// `applyCreatePlan` itself ever performs another pathname
+				// observation of `tempPath` for any reason.
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome === 'written') {
+						const replacementDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-typedir-replacement-15-'))
+						const foreignPath = path.join(replacementDir, tempBasename)
+						// Byte-for-byte identical to `plan.bytes`: content alone
+						// must never be sufficient to prove ownership.
+						await fs.writeFile(foreignPath, bytes)
+						const foreignStat = await fs.stat(foreignPath)
+						foreignIdentity = { dev: foreignStat.dev, ino: foreignStat.ino }
+						await fs.rm(reqDirPath, { recursive: true, force: true })
+						await fs.rename(replacementDir, reqDirPath)
+					}
+					return real
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			// Never a plain success: the managed chain was genuinely replaced
+			// strictly after the write.
+			expect(result.applied === true && result.outcome === 'applied')
+				.toBe(false)
+
+			// The canonical target must never be published.
+			await expect(fs.stat(targetPath)).rejects.toThrow()
+
+			// The foreign file at the exact temporary basename must survive
+			// COMPLETELY UNTOUCHED -- same identity, same bytes -- because
+			// this invocation can never prove (by inode identity bound to its
+			// own creating handle) that it owns it, even though the bytes
+			// are byte-for-byte identical to `plan.bytes`.
+			const survivingPath = path.join(reqDirPath, tempBasename)
+			const survivingStat = await fs.stat(survivingPath)
+			expect({ dev: survivingStat.dev, ino: survivingStat.ino })
+				.toEqual(foreignIdentity)
+			const survivingBytes = await fs.readFile(survivingPath)
+			expect(new Uint8Array(survivingBytes))
+				.toEqual(plan.bytes)
+		})
+
+		it('flows the identity returned by writeTempFileComplete\'s own handle through to the published target (happy path: same inode as a genuine hard link)', async () => {
+			const plan = computePlanOrThrow()
+			let capturedIdentity: FileIdentity | undefined
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome === 'written')
+						capturedIdentity = real.identity
+					return real
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+			expect(result.applied)
+				.toBe(true)
+			if (!result.applied)
+				return
+			expect(result.outcome)
+				.toBe('applied')
+
+			expect(capturedIdentity)
+				.toBeDefined()
+			const publishedStat = await fs.stat(path.join(tempDir, plan.path))
+			expect({ dev: publishedStat.dev, ino: publishedStat.ino })
+				.toEqual(capturedIdentity)
+		})
+	})
+
 	// FINDING (P1, fourteenth round): once `publishViaHardLink` reports
 	// `'published'`, publication has ALREADY physically occurred, so
 	// 13-cli-contract.md's "the implementation MUST NOT misreport the
@@ -1625,22 +1759,19 @@ Placeholder.
 			const fixedNonce = 'fixed-nonce-round14-cleanup'
 			const tempPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.tmp-${fixedNonce}`)
 
-			let tempFileIdentityCalls = 0
 			const deps = {
 				...defaultApplyCreatePlanDeps,
 				generateNonce: () => fixedNonce,
 				fileIdentity: async (target: string) => {
-					if (target === tempPath) {
-						tempFileIdentityCalls += 1
-						// Call #1 is the post-write identity capture: it must
-						// succeed so the rest of the publish protocol proceeds
-						// normally. Call #2+ is the FINAL, otherwise-best-effort
-						// cleanup ownership probe inside `deleteOwnedTempFile`,
-						// immediately after publication has already been fully
-						// verified -- the one this regression targets.
-						if (tempFileIdentityCalls > 1)
-							throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
-					}
+					// Finding (P0, fifteenth round): the temporary file's own
+					// identity is established from `writeTempFileComplete`'s
+					// handle-bound return value now, never from a `deps.fileIdentity(tempPath)`
+					// call -- so the ONLY remaining call to `deps.fileIdentity(tempPath)`
+					// in a fully-verified publish is the FINAL, otherwise-best-effort
+					// cleanup ownership probe inside `deleteOwnedTempFile`, the one
+					// this regression targets.
+					if (target === tempPath)
+						throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
 					return defaultApplyCreatePlanDeps.fileIdentity(target)
 				},
 			}
@@ -1669,16 +1800,16 @@ Placeholder.
 			const fixedNonce = 'fixed-nonce-round14-retraction'
 			const tempPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.tmp-${fixedNonce}`)
 
-			let tempFileIdentityCalls = 0
 			const deps = {
 				...defaultApplyCreatePlanDeps,
 				generateNonce: () => fixedNonce,
 				fileIdentity: async (target: string) => {
-					if (target === tempPath) {
-						tempFileIdentityCalls += 1
-						if (tempFileIdentityCalls > 1)
-							throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
-					}
+					// Finding (P0, fifteenth round): the ONLY remaining call to
+					// `deps.fileIdentity(tempPath)` on this path is the
+					// best-effort temp-file cleanup probe that runs immediately
+					// after the successful target retraction below.
+					if (target === tempPath)
+						throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
 					return defaultApplyCreatePlanDeps.fileIdentity(target)
 				},
 				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
