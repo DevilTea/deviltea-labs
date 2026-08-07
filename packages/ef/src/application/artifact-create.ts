@@ -41,8 +41,14 @@
  * identity to the verified temporary file, re-verify the managed directory
  * chain and that the target is still absent, publish via a
  * create-if-absent hard link (treating target-exists as a race rather than a
- * replacement), re-verify the chain AND the published path's own identity
- * immediately afterward (attempting an ownership-proven retraction on
+ * replacement), re-verify the chain, the published path's own identity, AND
+ * (Finding 2, twelfth round) the COMPLETE content-generation witness one
+ * final time immediately afterward -- chain identity and published-path
+ * identity alone prove only that the target is genuinely this invocation's
+ * own file through a chain carrying familiar `dev`/`ino` pairs, never that it
+ * was published into the exact project generation this plan was authorized
+ * against; only the content witness closes that same ABA gap one more time,
+ * post-publication (attempting an ownership-proven retraction on any proven
  * mismatch rather than ever misreporting either state -- see
  * `ApplyCreatePlanResult`'s `applied: true, outcome: 'incomplete'` variant),
  * and unlink the temporary name -- a failure of that final, otherwise
@@ -52,7 +58,13 @@
  * NOT misreport the published state as unapplied" -- a verified publication
  * followed only by a failed cleanup step is exactly the "publication
  * succeeds but a later cleanup or internal operation fails" case that
- * provision describes). Every `lstat`-based re-verification here is
+ * provision describes). Every re-verification reload's OWN failure reason is
+ * preserved rather than flattened (Finding 3, twelfth round): a proven
+ * mismatch or a proven identity swap is a typed race rejection, but a mere
+ * execution/read failure -- which proves nothing about the domain one way or
+ * the other -- is reported as incomplete instead, never escalated into a
+ * claimed race (see `loadSnapshotFailureOutcome`'s own doc). Every
+ * `lstat`-based re-verification here is
  * the strongest available mitigation, not a claim of race-freedom: Node
  * exposes no `openat`-style, file-descriptor-relative primitive on any
  * platform this package targets, so a swap that lands strictly inside the
@@ -68,7 +80,7 @@ import type { Diagnostic } from '../domain/diagnostics'
 import type { ArtifactType, Envelope } from '../domain/model'
 import type { FileIdentity } from '../platform/fs-facts'
 import type { SymlinkFact } from '../repository/symlinks'
-import type { LoadSnapshotResult, ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
+import type { LoadSnapshotFailureReason, LoadSnapshotResult, ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
 import { mkdir as fsMkdir, unlink as fsUnlink, lstat } from 'node:fs/promises'
 import path from 'pathe'
 import { validateBody } from '../domain/body-schemas'
@@ -575,26 +587,34 @@ export type ApplyCreatePlanResult
 	= | { applied: true, outcome: 'applied', path: string }
 		/**
 		 * The hard-link publication call itself reported success, but an
-		 * immediate post-publication re-verification (managed directory chain
-		 * identity AND the published path's own `fstat` identity bound back to
-		 * the temporary file that was published) no longer matched, and the
-		 * mismatch could not be safely undone: the entry now at `path` could not
-		 * be proven -- by inode identity -- to be the exact file this invocation
-		 * wrote, so unlinking it would risk deleting state this invocation never
-		 * created (the same ownership-proof rule Finding 1 applies to
-		 * `.engineering` itself). `applied: true` because the publish call
-		 * itself did succeed; `outcome: 'incomplete'` because its result could
-		 * not be verified afterward and must not be misreported as a plain,
-		 * fully-verified success. See `13-cli-contract.md`'s "recovery is an
-		 * explicit operator action".
+		 * immediate post-publication re-verification -- managed directory chain
+		 * identity, the published path's own `fstat` identity bound back to the
+		 * temporary file that was published, AND (Finding 2, twelfth round) the
+		 * complete post-publication {@link ContentGenerationWitness} -- no
+		 * longer matched, and the mismatch could not be safely undone: either
+		 * the entry now at `path` could not be proven -- by inode identity --
+		 * to be the exact file this invocation wrote (so unlinking it would
+		 * risk deleting state this invocation never created; the same
+		 * ownership-proof rule Finding 1 applies to `.engineering` itself), or
+		 * the generation-witness reload itself could not even complete (an
+		 * execution/read failure proves nothing, so it is reported this way
+		 * rather than as a claimed race -- Finding 3, twelfth round).
+		 * `applied: true` because the publish call itself did succeed;
+		 * `outcome: 'incomplete'` because its result could not be verified
+		 * afterward and must not be misreported as a plain, fully-verified
+		 * success. See `13-cli-contract.md`'s "recovery is an explicit operator
+		 * action".
 		 */
 		| { applied: true, outcome: 'incomplete', path: string, message: string }
 		/**
 		 * Publication succeeded AND every post-publication verification (managed
 		 * chain identity, published-path identity bound back to the temporary
-		 * file) confirmed the published file is exactly what this invocation
-		 * wrote -- but the best-effort removal of the now-superfluous temporary
-		 * file itself failed. The publication is genuinely complete and MUST NOT
+		 * file, and the complete post-publication content-generation witness --
+		 * Finding 2, twelfth round) confirmed the published file is exactly what
+		 * this invocation wrote, into exactly the project generation this plan
+		 * was authorized against -- but the best-effort removal of the
+		 * now-superfluous temporary file itself failed. The publication is
+		 * genuinely complete and MUST NOT
 		 * be misreported as unapplied (13-cli-contract.md "the implementation
 		 * MUST NOT misreport the published state as unapplied"); distinct from
 		 * the `outcome: 'incomplete'` variant above, which reports an UNVERIFIED
@@ -738,9 +758,46 @@ async function safeUnlink(deps: ApplyCreatePlanDeps, tempPath: string): Promise<
 	}
 }
 
+/**
+ * Classify a `deps.loadSnapshot` FAILURE reason as either a PROVEN domain
+ * fact (Finding 3, twelfth round) or a mere execution/read failure that
+ * proves nothing about the domain.
+ *
+ * `'engineering-swapped'` (the reload's own identity re-check found a
+ * different directory than the one this invocation is bound to) and
+ * `'engineering-missing'` (the reload observed `.engineering` is no longer a
+ * directory at all -- only ever reachable here from a genuine `ENOENT`;
+ * anything else `lstat` can raise is re-thrown and surfaces as `'read-error'`
+ * instead, see `application/snapshot.ts`'s `tryLstat`) are both affirmative,
+ * positively-observed state changes: something about the project genuinely
+ * is no longer what this invocation observed moments earlier via the
+ * immediately preceding managed-directory-chain re-verification. Reporting
+ * these as a race is not a guess.
+ *
+ * `'read-error'` (an unexpected I/O exception during the reload itself),
+ * `'git-unavailable'`, and `'commit-not-found'` are the opposite: execution
+ * could not even complete far enough to observe anything about the domain
+ * one way or the other. Treating an inability to check as though it were
+ * proof of a race would be exactly the "execution/read failure reported as a
+ * claimed domain race" defect this reclassification fixes -- the caller must
+ * report these as `'incomplete'` instead (13-cli-contract.md's exit `2`
+ * class), never `'raced'` (exit `1`).
+ */
+function loadSnapshotFailureOutcome(reason: LoadSnapshotFailureReason): 'raced' | 'incomplete' {
+	switch (reason) {
+		case 'engineering-swapped':
+		case 'engineering-missing':
+			return 'raced'
+		case 'read-error':
+		case 'git-unavailable':
+		case 'commit-not-found':
+			return 'incomplete'
+	}
+}
+
 export type VerifyContentGenerationWitnessResult
 	= | { ok: true }
-		| { ok: false, message: string }
+		| { ok: false, outcome: 'raced' | 'incomplete', message: string }
 
 /**
  * Re-establish {@link ContentGenerationWitness} against a FRESH reload of the
@@ -767,16 +824,21 @@ export type VerifyContentGenerationWitnessResult
  * all), and once more folded into `verifyAllocationStillValid` itself using
  * the SAME reload that function already performs (no second reload needed
  * there) as the pre-publication checkpoint.
+ *
+ * The reload's own FAILURE reason is preserved rather than flattened
+ * (Finding 3, twelfth round): see {@link loadSnapshotFailureOutcome}'s own
+ * doc for exactly which reasons are a proven race versus a merely
+ * inconclusive execution/read failure.
  */
 async function verifyContentGenerationWitness(deps: ApplyCreatePlanDeps, projectRoot: string, plan: ArtifactCreatePlan): Promise<VerifyContentGenerationWitnessResult> {
 	const reloaded = await deps.loadSnapshot(projectRoot, plan.engineeringIdentity)
 	if (!reloaded.ok) {
-		return { ok: false, message: `The project '${plan.path}' was planned against could not be re-verified: ${reloaded.message}` }
+		return { ok: false, outcome: loadSnapshotFailureOutcome(reloaded.reason), message: `The project '${plan.path}' was planned against could not be re-verified: ${reloaded.message}` }
 	}
 
 	const current = captureContentGenerationWitness(reloaded.snapshot)
 	if (!contentGenerationWitnessMatches(current, plan.contentWitness)) {
-		return { ok: false, message: `The configuration, 'PROJECT.md', or complete visible Artifact ID set for '${plan.path}' no longer matches what this plan was computed against; '.engineering' may have been replaced with a different directory instance since the plan was computed.` }
+		return { ok: false, outcome: 'raced', message: `The configuration, 'PROJECT.md', or complete visible Artifact ID set for '${plan.path}' no longer matches what this plan was computed against; '.engineering' may have been replaced with a different directory instance since the plan was computed.` }
 	}
 
 	return { ok: true }
@@ -784,7 +846,7 @@ async function verifyContentGenerationWitness(deps: ApplyCreatePlanDeps, project
 
 export type VerifyAllocationStillValidResult
 	= | { ok: true }
-		| { ok: false, message: string }
+		| { ok: false, outcome: 'raced' | 'incomplete', message: string }
 
 /**
  * Re-establish, immediately before publication, that `plan`'s requested
@@ -829,11 +891,20 @@ export type VerifyAllocationStillValidResult
  * the replacement compute the identical `REQ-001`), so only the content
  * witness -- configuration bytes, `PROJECT.md` bytes, and the COMPLETE
  * visible ID set across every prefix -- tells the two generations apart.
+ *
+ * The re-enumeration's own FAILURE reason is preserved, never flattened into
+ * a blanket rejection (Finding 3, twelfth round): a `read-error` here proves
+ * nothing about whether allocation actually changed, so it is reported as
+ * `'incomplete'`, not `'raced'` -- see {@link loadSnapshotFailureOutcome}'s
+ * own doc. Every OTHER failure branch below (a proven content-witness
+ * mismatch, an identity-uncertain artifact newly made visible, or a changed
+ * `nextId`) is a positively PROVEN domain fact from a successfully completed
+ * reload, so those remain `'raced'` unconditionally.
  */
 async function verifyAllocationStillValid(deps: ApplyCreatePlanDeps, projectRoot: string, plan: ArtifactCreatePlan): Promise<VerifyAllocationStillValidResult> {
 	const reloaded = await deps.loadSnapshot(projectRoot, plan.engineeringIdentity)
 	if (!reloaded.ok) {
-		return { ok: false, message: `The allocation for '${plan.path}' could not be re-verified immediately before publication: ${reloaded.message}` }
+		return { ok: false, outcome: loadSnapshotFailureOutcome(reloaded.reason), message: `The allocation for '${plan.path}' could not be re-verified immediately before publication: ${reloaded.message}` }
 	}
 
 	const snapshot = reloaded.snapshot
@@ -841,17 +912,84 @@ async function verifyAllocationStillValid(deps: ApplyCreatePlanDeps, projectRoot
 
 	const currentWitness = captureContentGenerationWitness(snapshot)
 	if (!contentGenerationWitnessMatches(currentWitness, plan.contentWitness)) {
-		return { ok: false, message: `The configuration, 'PROJECT.md', or complete visible Artifact ID set for '${plan.path}' changed immediately before publication; '.engineering' may have been replaced with a different directory instance since the plan was computed.` }
+		return { ok: false, outcome: 'raced', message: `The configuration, 'PROJECT.md', or complete visible Artifact ID set for '${plan.path}' changed immediately before publication; '.engineering' may have been replaced with a different directory instance since the plan was computed.` }
 	}
 
 	const uncertainArtifact = findIdentityUncertainArtifact(snapshot)
 	if (uncertainArtifact) {
-		return { ok: false, message: `Cannot publish '${plan.path}': '${uncertainArtifact.path}' does not have a decodable, identity-certain envelope, so the greatest visible '${prefix}' component is no longer known.` }
+		return { ok: false, outcome: 'raced', message: `Cannot publish '${plan.path}': '${uncertainArtifact.path}' does not have a decodable, identity-certain envelope, so the greatest visible '${prefix}' component is no longer known.` }
 	}
 
 	const currentNextId = domainNextId(prefix, collectVisibleIds(snapshot))
 	if (currentNextId !== plan.id) {
-		return { ok: false, message: `The next '${prefix}' allocation changed from '${plan.id}' to '${currentNextId}' immediately before publication; another writer made a higher '${prefix}' Artifact visible.` }
+		return { ok: false, outcome: 'raced', message: `The next '${prefix}' allocation changed from '${plan.id}' to '${currentNextId}' immediately before publication; another writer made a higher '${prefix}' Artifact visible.` }
+	}
+
+	return { ok: true }
+}
+
+export type VerifyPostPublicationGenerationResult
+	= | { ok: true }
+		/**
+		 * `proven: true` -- a completed reload's content witness demonstrably no
+		 * longer matches (or the reload's own identity re-check demonstrably
+		 * failed, `'engineering-swapped'`/`'engineering-missing'`): a genuine
+		 * project-generation change is affirmatively established, exactly the
+		 * class `applyCreatePlan`'s existing chain/identity mismatch handling
+		 * already retracts under ownership proof. `proven: false` -- the reload
+		 * itself could not even complete (`'read-error'` and the like): nothing
+		 * about the domain was established either way, so `applyCreatePlan` must
+		 * not treat this as grounds for retracting an otherwise fully verified
+		 * publish of its OWN file (Finding 3's principle: an execution/read
+		 * failure is never escalated into a claimed race).
+		 */
+		| { ok: false, proven: boolean, message: string }
+
+/**
+ * Re-establish the COMPLETE {@link ContentGenerationWitness} one FINAL time,
+ * immediately after `publishViaHardLink` itself reported success (Finding 2,
+ * twelfth round).
+ *
+ * The existing post-publication checks just above this call in
+ * `applyCreatePlan` -- `verifyManagedDirectoryChain`'s identity comparison
+ * and `targetPath`'s own `fstat` identity bound back to `tempIdentity` --
+ * prove only that the entry now at `targetPath` is genuinely the exact file
+ * this invocation wrote, through a managed chain carrying the SAME
+ * `dev`/`ino` pairs this invocation already observed. Neither is proof of
+ * project GENERATION: exactly the same inode-recycling hazard
+ * {@link ContentGenerationWitness}'s own doc describes for the PRE-publication
+ * checkpoints applies here too, now with an even narrower, more dangerous
+ * window -- a content-distinct replacement installed strictly after
+ * `verifyAllocationStillValid`'s own reload but before, or from strictly
+ * inside, `publishViaHardLink` itself can hard-link this invocation's own
+ * just-published file into the replacement tree (preserving its exact
+ * inode, so `contentIntact` above still reports `true`) while every managed
+ * directory identity this invocation is bound to is forced to alias what it
+ * already captured. `publishedIdentity === tempIdentity` proves only that
+ * the new target is our file -- never that it was published into the
+ * project generation this plan was actually authorized against.
+ *
+ * The expected post-state is `plan.contentWitness`'s configuration and
+ * `PROJECT.md` bytes UNCHANGED, but its visible ID set now containing
+ * `plan.id` IN ADDITION to every ID it already recorded -- the one witness
+ * field publication itself is supposed to change, by design.
+ */
+async function verifyPostPublicationGenerationWitness(deps: ApplyCreatePlanDeps, projectRoot: string, plan: ArtifactCreatePlan): Promise<VerifyPostPublicationGenerationResult> {
+	const reloaded = await deps.loadSnapshot(projectRoot, plan.engineeringIdentity)
+	if (!reloaded.ok) {
+		return { ok: false, proven: loadSnapshotFailureOutcome(reloaded.reason) === 'raced', message: `The project generation for '${plan.path}' could not be re-verified immediately after publication: ${reloaded.message}` }
+	}
+
+	const current = captureContentGenerationWitness(reloaded.snapshot)
+	const expectedVisibleIds = new Set(plan.contentWitness.visibleIds)
+	expectedVisibleIds.add(plan.id)
+
+	const matches = optionalBytesEqual(current.configBytes, plan.contentWitness.configBytes)
+		&& optionalBytesEqual(current.projectMdBytes, plan.contentWitness.projectMdBytes)
+		&& idSetsEqual(current.visibleIds, expectedVisibleIds)
+
+	if (!matches) {
+		return { ok: false, proven: true, message: `The configuration, 'PROJECT.md', or complete visible Artifact ID set for '${plan.path}' does not match the project generation this plan was authorized against, immediately after publication; '.engineering' or its canonical directory chain may have been replaced with a different directory instance during publication.` }
 	}
 
 	return { ok: true }
@@ -907,7 +1045,7 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	// `verifyContentGenerationWitness`'s own doc for the exact mechanism.
 	const preWriteGenerationCheck = await verifyContentGenerationWitness(deps, projectRoot, plan)
 	if (!preWriteGenerationCheck.ok)
-		return { applied: false, outcome: 'raced', message: preWriteGenerationCheck.message }
+		return { applied: false, outcome: preWriteGenerationCheck.outcome, message: preWriteGenerationCheck.message }
 
 	try {
 		await deps.ensureDirectory(path.dirname(targetPath))
@@ -977,14 +1115,17 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	// make a higher same-prefix Artifact visible (at a different path)
 	// strictly between plan computation and this call without ever touching
 	// `targetPath`; see `verifyAllocationStillValid`'s own doc for the exact
-	// REQ-002/REQ-999 reproduction. Any change here invalidates the plan --
-	// reported as the same typed race-rejection class as an already-published
+	// REQ-002/REQ-999 reproduction. A PROVEN change here invalidates the plan
+	// -- reported as the same typed race-rejection class as an already-published
 	// target (13-cli-contract.md's exit `1` "a race that invalidates a
-	// mutation plan").
+	// mutation plan") -- but a mere execution/read failure while trying to
+	// re-verify proves nothing of the sort (Finding 3, twelfth round): see
+	// `verifyAllocationStillValid`'s own doc, whose `outcome` field is threaded
+	// straight through here rather than collapsed to a blanket `'raced'`.
 	const allocationCheck = await verifyAllocationStillValid(deps, projectRoot, plan)
 	if (!allocationCheck.ok) {
 		await safeUnlink(deps, tempPath)
-		return { applied: false, outcome: 'raced', message: allocationCheck.message }
+		return { applied: false, outcome: allocationCheck.outcome, message: allocationCheck.message }
 	}
 
 	// Re-verify again immediately before hard-link publication: a symlink or
@@ -1015,11 +1156,37 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		const contentIntact = publishedIdentity !== undefined && sameFileIdentity(publishedIdentity, tempIdentity)
 
 		if (postChain.ok && contentIntact) {
-			const cleanedUp = await safeUnlink(deps, tempPath)
-			if (!cleanedUp) {
-				return { applied: true, outcome: 'cleanup-failed', path: plan.path, message: `'${plan.path}' was published and verified successfully, but its now-superfluous temporary file at '${tempPath}' could not be removed afterward.` }
+			// Finding 2 (P1, twelfth round): chain identity and the published
+			// file's OWN identity are both necessary but NOT sufficient --
+			// neither is proof of project GENERATION (see
+			// `verifyPostPublicationGenerationWitness`'s own doc). Only once
+			// this FINAL witness also confirms the complete post-publication
+			// state is exactly what this plan was authorized to produce does
+			// this invocation report a plain, fully-verified success.
+			const postGeneration = await verifyPostPublicationGenerationWitness(deps, projectRoot, plan)
+			if (postGeneration.ok) {
+				const cleanedUp = await safeUnlink(deps, tempPath)
+				if (!cleanedUp) {
+					return { applied: true, outcome: 'cleanup-failed', path: plan.path, message: `'${plan.path}' was published and verified successfully, but its now-superfluous temporary file at '${tempPath}' could not be removed afterward.` }
+				}
+				return { applied: true, outcome: 'applied', path: plan.path }
 			}
-			return { applied: true, outcome: 'applied', path: plan.path }
+
+			if (!postGeneration.proven) {
+				// The chain and the published file's own identity are BOTH
+				// already confirmed intact above; only this final content-
+				// generation reload itself could not complete (Finding 3's
+				// principle: an execution/read failure proves nothing). There is
+				// no PROVEN problem here to retract against, so this invocation
+				// must not treat its own genuinely successful publish as
+				// grounds for deleting it on mere suspicion -- report the
+				// unverified publication honestly instead.
+				await safeUnlink(deps, tempPath)
+				return { applied: true, outcome: 'incomplete', path: plan.path, message: postGeneration.message }
+			}
+			// A PROVEN generation mismatch: fall through to the shared
+			// ownership-proven retraction logic below, exactly as a chain or
+			// published-identity mismatch already does.
 		}
 
 		// A mismatch was found. Attempt recovery ONLY when ownership of the
@@ -1035,7 +1202,7 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 			try {
 				await deps.unlink(targetPath)
 				await safeUnlink(deps, tempPath)
-				return { applied: false, outcome: 'raced', message: `The managed directory chain or published identity for '${plan.path}' no longer matched immediately after publication; the unverified publish was retracted.` }
+				return { applied: false, outcome: 'raced', message: `The managed directory chain, published identity, or project generation for '${plan.path}' no longer matched immediately after publication; the unverified publish was retracted.` }
 			}
 			catch {
 				// Even the proven-owned retraction itself failed: fall through

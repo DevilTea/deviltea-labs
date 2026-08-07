@@ -427,7 +427,12 @@ export async function validateTransition(input: ValidateTransitionInput): Promis
 
 	// ---- Transition integrity (phase 9) ---------------------------------------
 
-	diagnostics.push(...compareTransition(baseline, proposed))
+	diagnostics.push(...evaluateTransitionBoundary({
+		before: baseline,
+		after: proposed,
+		beforeOid: resolvedBaselineOid,
+		afterOid: resolvedProposedOid,
+	}))
 
 	return {
 		...summarizeValidation({
@@ -442,10 +447,71 @@ export async function validateTransition(input: ValidateTransitionInput): Promis
 }
 
 // ---------------------------------------------------------------------------
-// compareTransition: everything requiring both validated snapshots
+// evaluateTransitionBoundary: pure graph-wide before/after transition core
 // ---------------------------------------------------------------------------
 
-function compareTransition(baseline: MaterializedCommit, proposed: MaterializedCommit): Diagnostic[] {
+/**
+ * One side (before or after) of a transition boundary: a validated snapshot
+ * plus the per-path blob OID index `evaluateTransitionBoundary` needs for
+ * Resource/control-file/CHG-aggregate fingerprinting. Structurally identical
+ * to the private `MaterializedCommit` this module already assembles for
+ * `validateTransition`'s own baseline/proposed commits -- exported so a
+ * caller that has ALREADY materialized and validated two snapshots by its own
+ * means (e.g. `query-history.ts` walking historical commits) can build this
+ * shape directly, without going through this module's own ref/parentage
+ * orchestration.
+ */
+export interface TransitionBoundarySide {
+	snapshot: ProjectSnapshot
+	validation: SnapshotValidationResult
+	/** Project-relative path -> blob OID, for every relevant tracked path (config, gitignore, Artifact files, and every local Resource file). */
+	oidByPath: ReadonlyMap<string, string>
+}
+
+export interface EvaluateTransitionBoundaryInput {
+	before: TransitionBoundarySide
+	after: TransitionBoundarySide
+	/**
+	 * Full commit OID each side was materialized from, when the caller has
+	 * one on hand -- informational provenance only. Neither is consulted by
+	 * this function's own comparison logic (every invariant below compares
+	 * the two supplied snapshots' own decoded content, never re-resolves or
+	 * re-reads Git itself).
+	 */
+	beforeOid?: string
+	afterOid?: string
+}
+
+/**
+ * The graph-wide before/after transition invariants (09-validation.md
+ * "Transition scope") that no single validated snapshot -- before or after,
+ * alone -- can prove: lifecycle transition legality and prohibited first
+ * appearance (EF-LIFE-003/EF-LIFE-009), issued Artifact ID/type immutability
+ * (EF-ID-009/EF-ID-010, plus the EF-ID-012 provisional-collision subset),
+ * frozen whole-Artifact and Resource preservation (EF-LIFE-004/EF-RES-013),
+ * supersession atomicity (EF-SUP-004/EF-SUP-007) and implicit retargeting
+ * (EF-SUP-013), and CHG net-effect classification, exactly-once coverage, and
+ * truthfulness for EVERY target (EF-CHG-002 through EF-CHG-017). Pure: it
+ * consumes two already-validated snapshots (with their own per-path blob OID
+ * indexes) and returns diagnostics -- no I/O, no ref resolution, no
+ * materialization, and no dependency on how the caller obtained either side.
+ *
+ * `validateTransition` below is a thin orchestrator around this core: it
+ * resolves and verifies refs/parentage, materializes the two commits, and
+ * then delegates every before/after invariant to this function.
+ * `query-history.ts` reuses this SAME core over its own already-materialized,
+ * already-validated adjacent historical boundaries (twelfth-round review
+ * Finding 1): a history walk must validate every post-bootstrap boundary it
+ * consumes against the REAL, graph-wide transition semantics -- exactly what
+ * a real commit-time transaction would have enforced -- not a hand-maintained
+ * subset scoped only to whatever one queried target's own aggregate happens
+ * to touch.
+ */
+export function evaluateTransitionBoundary(input: EvaluateTransitionBoundaryInput): Diagnostic[] {
+	return compareTransition(input.before, input.after)
+}
+
+function compareTransition(baseline: TransitionBoundarySide, proposed: TransitionBoundarySide): Diagnostic[] {
 	const diagnostics: Diagnostic[] = []
 
 	const baselineById = baseline.validation.byId
