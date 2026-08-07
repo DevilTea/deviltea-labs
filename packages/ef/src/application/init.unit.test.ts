@@ -1317,4 +1317,148 @@ describe('applyInitPlan', () => {
 				.toEqual({ schema: 'ef/init-state@1', nonce: expect.any(String), foreign: true })
 		})
 	})
+
+	// FINDING (P0, matching `platform/hard-link-publish.ts`'s
+	// `writeTempFileComplete` finding, and `application/artifact-create.ts`'s
+	// own equivalent fix): a prior implementation established a planned
+	// FILE's, and the marker's, ownership `identity` from a fresh PATHNAME
+	// observation (`deps.regularFileIdentity(path)`) made only AFTER
+	// `createExclusive` (respectively `writeInitMarker`)'s own `open(path,
+	// 'wx')` handle had already closed. Whatever real regular file happened to
+	// occupy that exact path by the time the pathname re-observation ran got
+	// silently adopted as "ours" -- including a foreign file substituted in,
+	// byte-identical to the planned content, strictly after the real write
+	// succeeded but before this invocation's own first later pathname
+	// observation of that path. `createExclusive` and `writeInitMarker` now
+	// capture `identity` (and, for the marker, its verification `bytes`) via
+	// the SAME still-open handle that performed the write, before it is ever
+	// closed (`platform/exclusive-file.ts`'s own doc); these regressions prove
+	// the resulting ownership witness is bound to that handle-captured
+	// provenance, not to a later, independently racable pathname read: cleanup
+	// must refuse to delete a byte-identical foreign file it can never prove
+	// (by inode identity bound to the handle that created ITS OWN file) it
+	// actually owns.
+	describe('planned-file and marker ownership witnesses are bound to the handle that created them, not a later pathname observation (Finding, matching hard-link-publish.ts)', () => {
+		it('never deletes a byte-identical foreign file substituted at a planned file\'s exact path strictly after createExclusive\'s own handle closes and before any later pathname re-observation', async () => {
+			const plan = await computeValidPlan()
+			const lastFile = plan.files[plan.files.length - 1]!
+			const lastFilePath = path.join(tempDir, lastFile.path)
+			let foreignIdentity: { dev: number, ino: number } | undefined
+			let substitutedForeignFile = false
+			let substitutedMissingDirectory = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				createExclusive: async (targetPath: string, bytes: Uint8Array) => {
+					// Delegate to the REAL primitive first -- this invocation's
+					// own file is genuinely created, written, and closed exactly
+					// as production code does. Only AFTER it reports success
+					// (i.e. strictly after its handle is already closed) does
+					// this hook substitute a foreign file at the identical path,
+					// before `applyInitPlan` itself ever performs another
+					// pathname observation of `targetPath` for any reason.
+					const real = await defaultApplyInitPlanDeps.createExclusive(targetPath, bytes)
+					if (targetPath === lastFilePath && real.outcome === 'created' && !substitutedForeignFile) {
+						substitutedForeignFile = true
+						await fs.rm(targetPath, { force: true })
+						// Byte-for-byte identical to the planned content: content
+						// alone must never be sufficient to prove ownership.
+						await fs.writeFile(targetPath, bytes)
+						const stat = await fs.stat(targetPath)
+						foreignIdentity = { dev: stat.dev, ino: stat.ino }
+					}
+					return real
+				},
+				// Force an abort strictly AFTER every planned file (including
+				// the tampered one above) has already been created and
+				// tracked, so cleanup's deepest-first loop reaches the tampered
+				// entry -- the very last one pushed onto `createdStack` -- as
+				// its first deletion attempt.
+				isDirectory: async (targetPath: string) => {
+					if (targetPath.endsWith(path.join('.engineering', 'chg')) && !substitutedMissingDirectory) {
+						substitutedMissingDirectory = true
+						return false
+					}
+					return defaultApplyInitPlanDeps.isDirectory(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The foreign file must survive completely untouched -- same
+			// identity, same bytes -- because ownership of `lastFilePath` was
+			// established EXCLUSIVELY from `createExclusive`'s own
+			// handle-bound return value (the ORIGINAL file's identity,
+			// captured via `handle.stat()` before the substitution above ever
+			// ran), which no longer matches the foreign file actually
+			// occupying the path afterward, so cleanup refuses to delete it.
+			const survivingStat = await fs.stat(lastFilePath)
+			expect({ dev: survivingStat.dev, ino: survivingStat.ino })
+				.toEqual(foreignIdentity)
+			const survivingBytes = await fs.readFile(lastFilePath)
+			expect(new Uint8Array(survivingBytes))
+				.toEqual(lastFile.bytes)
+		})
+
+		it('never deletes a byte-identical foreign init-state.json marker substituted (via a swapped .tmp directory) strictly after writeInitMarker\'s own handle closes and before any later pathname re-observation', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const tmpPath = path.join(engineeringPath, '.tmp')
+			const markerPath = path.join(tmpPath, 'init-state.json')
+			let foreignIdentity: { dev: number, ino: number } | undefined
+			let swapped = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (targetPath: string, nonce: string) => {
+					// Delegate to the REAL primitive first -- the marker is
+					// genuinely created, written, and closed exactly as
+					// production code does. Only AFTER it reports success does
+					// this hook replace the ENTIRE `.tmp` directory with a
+					// different real directory containing a foreign marker
+					// file at the identical basename, strictly before
+					// `applyInitPlan` itself ever performs another pathname
+					// observation of `targetPath` for any reason.
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(targetPath, nonce)
+					if (real.outcome === 'created' && !swapped) {
+						swapped = true
+						const replacement = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-init-tmp-replacement-'))
+						const foreignMarkerPath = path.join(replacement, 'init-state.json')
+						// Byte-for-byte identical to what this invocation's own
+						// `writeInitMarker` just wrote: content alone must
+						// never be sufficient to prove ownership.
+						await fs.writeFile(foreignMarkerPath, real.bytes)
+						const stat = await fs.stat(foreignMarkerPath)
+						foreignIdentity = { dev: stat.dev, ino: stat.ino }
+						await fs.rm(tmpPath, { recursive: true, force: true })
+						await fs.rename(replacement, tmpPath)
+					}
+					return real
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The foreign marker must survive completely untouched -- same
+			// identity, same bytes -- because ownership of `markerPath` was
+			// established EXCLUSIVELY from `writeInitMarker`'s own
+			// handle-bound return value (captured before the `.tmp` directory
+			// was ever swapped), which no longer matches the foreign marker
+			// actually occupying the path afterward, so cleanup refuses to
+			// delete it.
+			const survivingStat = await fs.stat(markerPath)
+			expect({ dev: survivingStat.dev, ino: survivingStat.ino })
+				.toEqual(foreignIdentity)
+		})
+	})
 })
