@@ -416,28 +416,44 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * protocol" for an already-validated `plan`. Never re-validates the plan's
  * content and never runs project discovery while the marker exists.
  *
- * FINDING (P0): the exclusive claim below proves ownership only at that one
- * instant. Every step after it -- `.tmp`/marker creation, each planned
- * directory and file write, the materialization re-read, and the final
- * marker removal -- is pathname-based. Moving the claimed `.engineering`
- * directory outside the project and symlinking the original path back to it
- * would otherwise make every subsequent write land outside, with byte/nonce
- * verification still passing (the symlink target genuinely contains
- * whatever this invocation itself just wrote there) and `applied: true`
- * still being reported. `verifyClaimIntact` below binds every step to the
- * `lstat` identity of `plan.targetRoot` and the claimed `engineeringPath`
- * captured immediately after the claim succeeds, and is checked immediately
- * before every subsequent write or read; any mismatch aborts without
- * attempting that step. Node exposes no `openat`-style,
- * file-descriptor-relative primitive to bind every step to an already-opened
- * directory handle, so this cannot be made fully race-free: the narrow,
- * documented residual window is an attacker who swaps `engineeringPath` out
- * and fully restores the SAME original directory to the SAME path strictly
- * between one `verifyClaimIntact` check and the single operation it guards
- * -- in that window the guarded operation still acts on the genuine claimed
- * directory, so nothing else is ever exposed; the only possible outcome is a
- * spurious abort of an otherwise-legitimate run, never a write to the wrong
- * location.
+ * Exact guarantee (Node exposes no `openat`-style, file-descriptor-relative
+ * primitive on any platform this package targets, so every step below is
+ * necessarily pathname-based; this is a portability/security-boundary
+ * narrowing, not a claim of race-freedom -- see 00's "path handling is not a
+ * filesystem-security boundary" and the EF threat model, in which the working
+ * tree is the operator's own data, not an adversarial input):
+ *
+ * - `verifyClaimIntact` binds every step after the claim to the `lstat`
+ *   identity (`dev`/`ino`) of `plan.targetRoot` and the claimed
+ *   `engineeringPath`, captured immediately after the claim succeeds, and is
+ *   re-checked immediately before every subsequent write or read. This
+ *   catches a non-racing or slow interference -- moving the claimed
+ *   directory outside the project and symlinking the original path back to
+ *   it (or substituting any other real directory) strictly BETWEEN two
+ *   checkpoints aborts before the guarded step ever runs.
+ * - It does NOT catch a swap that lands strictly INSIDE the narrow window
+ *   between one `verifyClaimIntact` check and the single syscall it guards:
+ *   in that instant the guarded operation is still pathname-based and can be
+ *   directed at whatever the path currently resolves to. This package cannot
+ *   close that window without an `openat`-equivalent Node does not expose.
+ * - Because of the above, destructive cleanup (`abort` below) is
+ *   ownership-proven immediately before every deletion via a fresh
+ *   `directoryIdentity` re-check against the identity captured at claim
+ *   time (and, once the marker exists, its nonce): `removeTree` only ever
+ *   runs when `engineeringPath` still denotes the EXACT directory instance
+ *   this invocation claimed. If a step's `verifyClaimIntact` failed because
+ *   `engineeringPath` now denotes a different real directory this invocation
+ *   never created, cleanup leaves that directory (and everything already
+ *   written into it by the raced syscall itself) completely untouched and
+ *   reports `incomplete` -- it never recursively deletes state it cannot
+ *   prove it owns. Recovery from that state is an explicit operator action
+ *   (13-cli-contract.md), matching the "on failure, remove only paths whose
+ *   ownership by that invocation is proven" step of the protocol.
+ * - The narrowest residual case -- a swap that fully restores the SAME
+ *   original directory to the SAME path strictly inside one guarded window --
+ *   still acts on the genuine claimed directory either way; the only
+ *   possible outcome there is a spurious abort of an otherwise-legitimate
+ *   run, never a write to, or deletion of, anything else.
  */
 export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = defaultApplyInitPlanDeps): Promise<ApplyInitPlanResult> {
 	const engineeringPath = path.join(plan.targetRoot, '.engineering')
@@ -491,6 +507,26 @@ export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = de
 			if (read.outcome !== 'found' || read.marker.nonce !== nonce)
 				return { applied: false, outcome: 'incomplete', message }
 		}
+
+		// Ownership of `engineeringPath` must be re-proven immediately before
+		// this destructive step, independently of whichever earlier
+		// `verifyClaimIntact` call led here: by the time `abort` runs,
+		// `engineeringPath` may already denote a completely different real
+		// directory this invocation never claimed (a directory swapped in from
+		// inside the very write step that triggered this abort, not merely
+		// between two checkpoints). `removeTree` must never delete state it
+		// cannot prove it owns (13-cli-contract.md step 8: "remove only paths
+		// whose ownership by that invocation is proven"). A fresh `lstat`: only
+		// a non-symlink directory whose identity is still the EXACT one
+		// captured immediately after the claim succeeded is provably still this
+		// invocation's claim; anything else -- a symlink, a different real
+		// directory, or anything that stopped being a directory at all -- is
+		// left completely untouched and reported `incomplete` instead, per this
+		// function's own residual-risk documentation on `applyInitPlan`.
+		const currentIdentity = await deps.directoryIdentity(engineeringPath)
+		if (currentIdentity === undefined || !sameFileIdentity(currentIdentity, claimedIdentity!))
+			return { applied: false, outcome: 'incomplete', message }
+
 		await deps.removeTree(engineeringPath)
 		return { applied: false, outcome: 'incomplete', message }
 	}

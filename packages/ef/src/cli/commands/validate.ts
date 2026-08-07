@@ -32,6 +32,7 @@ import type { ValidationPolicy } from '../../application/snapshot-validation'
 import type { OperationStartRefOid } from '../../application/transition-validation'
 import type { GitExecutor } from '../../git/executor'
 import type { GitRepository } from '../../git/repository'
+import type { FileIdentity } from '../../platform/fs-facts'
 import type { Config } from '../../repository/config'
 import type { CommandOutcome } from '../command-outcome'
 import { validateBootstrap } from '../../application/bootstrap-validation'
@@ -39,8 +40,9 @@ import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
 import { summarizeValidation, validateSnapshot } from '../../application/snapshot-validation'
 import { validateTransition } from '../../application/transition-validation'
 import { severityOf } from '../../domain/diagnostic-codes'
-import { REGULAR_FILE_GIT_MODES } from '../../git/repository'
+import { findWorktreeRoot, REGULAR_FILE_GIT_MODES } from '../../git/repository'
 import { decodeConfig } from '../../repository/config'
+import { checkWorkingDirectoryAssociation } from '../../repository/discovery'
 import { validateWorkspace } from '../../repository/workspace'
 import { buildValidationResultJson } from '../envelopes'
 import { renderValidationHuman } from '../human-render'
@@ -190,6 +192,13 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 
 	let root: string
 	let git: GitRepository
+	// `.engineering`'s identity as project resolution observed it (Finding 4,
+	// "single observation"); populated only via the `resolveProject` branch
+	// below (scope `'snapshot'` always takes it -- see that branch's own
+	// comment), and threaded into `loadSnapshotFromWorkingTree` so its own
+	// directory walk is bound to the exact `.engineering` resolution already
+	// approved.
+	let engineeringIdentity: FileIdentity | undefined
 
 	if (options.scope !== 'snapshot' && options.project !== undefined) {
 		// Commit-bound transition/bootstrap validation may target a working
@@ -216,6 +225,7 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 		}
 		root = resolved.context.root
 		git = resolved.context.git
+		engineeringIdentity = resolved.context.engineeringIdentity
 		// `resolved.context.config` is discovery's OWN, separate read of
 		// `.engineering/ef.yaml` and is deliberately never consulted for
 		// scope: 'snapshot' semantics below (Finding 3): an in-place rewrite
@@ -231,7 +241,7 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	// ---- Scope-specific validation ------------------------------------------
 
 	if (options.scope === 'snapshot') {
-		const loaded = await loadSnapshotFromWorkingTree(root)
+		const loaded = await loadSnapshotFromWorkingTree(root, undefined, { expectedEngineeringIdentity: engineeringIdentity })
 		if (!loaded.ok) {
 			const code = loaded.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-001'
 			return earlyFailure(options, code, loaded.message)
@@ -246,6 +256,24 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 		// this snapshot was itself validated against -- never from project
 		// resolution's separate, earlier discovery read.
 		const config = loaded.snapshot.config.config
+
+		// Re-run the working-directory association decision (Finding 5, "single
+		// observation") against `config`, the freshest configuration `loaded`
+		// itself was built from -- not `resolveProject`'s own, earlier read
+		// (`resolved.context.config`, deliberately unused above). An in-place
+		// rewrite of `ef.yaml` landing between that earlier read and this
+		// snapshot load could otherwise leave a now-undeclared nested worktree
+		// authorized only by a stale association decision
+		// (11-filesystem-and-config.md "Project Discovery": "validate
+		// working-directory association with the project").
+		const association = await checkWorkingDirectoryAssociation(
+			{ cwd: deps.cwd, candidateRoot: root, config },
+			{ findWorktreeRoot: absolutePath => findWorktreeRoot(deps.executor, absolutePath) },
+		)
+		if (association.kind === 'unassociated')
+			return earlyFailure(options, 'EF-VAL-012', `The current directory is no longer associated with the project at '${root}': its configuration was rewritten and no longer declares this working directory's worktree as the project's own or as a linked repository.`)
+		if (association.kind === 'git-unavailable')
+			return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while re-checking working-directory association: ${association.message}`)
 
 		if (options.workspace) {
 			const linked = config?.linkedRepositories ?? []

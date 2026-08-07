@@ -767,6 +767,46 @@ schemas:
 			.toBe(true)
 	})
 
+	// ---- Finding 5: re-run working-directory association against the -------
+	// ---- snapshot's fresher config, not project discovery's own earlier read
+
+	it('snapshot scope reports EF-VAL-012 when an in-place ef.yaml rewrite revokes the linked-repository association discovery itself relied on', async () => {
+		// Config A declares `linked` as a linked repository, so a `cwd` inside
+		// it is associated with the project. Discovery's OWN association check
+		// uses this config; if nothing re-verified it later, the command would
+		// proceed to completion from a `cwd` the CURRENT, authoritative
+		// configuration no longer associates with the project at all.
+		const configA = CONFIG_YAML.replace('linked_repositories: []', 'linked_repositories:\n  - id: linked\n    path: linked\n    role: implementation\n    required: true\n')
+		await writeFile(root, '.engineering/ef.yaml', configA)
+		await writeFile(root, '.engineering/.gitignore', GITIGNORE)
+		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
+
+		const linkedDir = path.join(root, 'linked')
+		await fs.mkdir(linkedDir)
+		execFileSync('git', ['init', '-q', '-b', 'main', linkedDir])
+
+		// The rewrite (to config B, no linked repositories) lands during
+		// discovery's own `findWorktreeRoot` probe -- strictly after discovery
+		// already captured config A for its own (now stale) association
+		// decision, and strictly before `loadSnapshotFromWorkingTree`'s later,
+		// separate read, which will observe config B.
+		const executor = withSideEffectBeforeCall(
+			createGitExecutor(),
+			args => args[0] === 'rev-parse' && args[1] === '--show-toplevel',
+			async () => { await fs.writeFile(path.join(root, '.engineering', 'ef.yaml'), CONFIG_YAML) },
+		)
+
+		const outcome = await runValidateCommand({ scope: 'snapshot', strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: linkedDir, executor })
+		// Without re-running the association check against the snapshot's own,
+		// fresher config, this would incorrectly succeed from a `cwd` config B
+		// no longer declares as associated with the project.
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-012')
+	})
+
 	// ---- Transition scope: `peekConfigAt` (baseline config peek) edge cases ----
 
 	it('transition scope reports EF-VAL-006 when Git becomes unavailable while reading the baseline tree', async () => {

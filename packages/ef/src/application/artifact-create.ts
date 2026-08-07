@@ -5,27 +5,47 @@
  * H2 skeletons per type).
  *
  * `computeCreatePlan` is pure: it maps a CLI type token to an `ArtifactType`
- * (PROJECT is never a valid token here), allocates the next provisional ID
- * over the already-loaded `ProjectSnapshot`'s visible graph via
- * `domain/identity.ts`'s `nextId`, builds the complete draft file bytes (all
- * nine core envelope fields, empty `tags`/`relations`/`resources`, and the
- * type's required H2 headings with empty content), and self-validates the
- * result through the non-graph-dependent domain validators (identity syntax,
- * filename, status, body schema) before ever proposing it for publication.
+ * (PROJECT is never a valid token here), refuses (`allocation-incomplete`)
+ * when any canonical-directory file for that prefix lacks a decodable,
+ * identity-certain envelope -- an undecoded file, an `EF-ID-001`/`EF-ID-003`
+ * class identity finding, or an identity-relevant duplicate-key loss all make
+ * the true greatest visible component unknowable, and 02-identity.md
+ * Allocation requires allocation to stay incomplete rather than guess past
+ * it -- allocates the next provisional ID over the already-loaded
+ * `ProjectSnapshot`'s visible graph via `domain/identity.ts`'s `nextId`,
+ * builds the complete draft file bytes (all nine core envelope fields, empty
+ * `tags`/`relations`/`resources`, and the type's required H2 headings with
+ * empty content), and self-validates the result through the non-graph-dependent
+ * domain validators (identity syntax, filename, status, body schema) before
+ * ever proposing it for publication.
  *
  * `applyCreatePlan` performs the exact hard-link publication protocol: write
  * the complete file at a temporary same-directory path, validate the written
- * bytes, re-verify the target is still absent, publish via a create-if-absent
- * hard link (treating target-exists as a race rather than a replacement), and
- * unlink the temporary name.
+ * bytes, bind an identity to the verified temporary file, re-verify the
+ * managed directory chain and that the target is still absent, publish via a
+ * create-if-absent hard link (treating target-exists as a race rather than a
+ * replacement), re-verify the chain AND the published path's own identity
+ * immediately afterward (attempting an ownership-proven retraction on
+ * mismatch rather than ever misreporting either state -- see
+ * `ApplyCreatePlanResult`'s `applied: true, outcome: 'incomplete'` variant),
+ * and unlink the temporary name. Every `lstat`-based re-verification here is
+ * the strongest available mitigation, not a claim of race-freedom: Node
+ * exposes no `openat`-style, file-descriptor-relative primitive on any
+ * platform this package targets, so a swap that lands strictly inside the
+ * narrow window between one check and the single syscall it guards cannot be
+ * closed in-process (00's "path handling is not a filesystem-security
+ * boundary"; the EF threat model treats the working tree as the operator's
+ * own data, not adversarial input). See `verifyManagedDirectoryChain`'s own
+ * documentation for the precise boundary of what these checks do and do not
+ * catch.
  */
 
 import type { Diagnostic } from '../domain/diagnostics'
 import type { ArtifactType, Envelope } from '../domain/model'
 import type { FileIdentity } from '../platform/fs-facts'
 import type { SymlinkFact } from '../repository/symlinks'
-import type { ProjectSnapshot } from './snapshot'
-import { mkdir as fsMkdir, unlink as fsUnlink } from 'node:fs/promises'
+import type { ProjectSnapshot, SnapshotArtifactFile } from './snapshot'
+import { mkdir as fsMkdir, unlink as fsUnlink, lstat } from 'node:fs/promises'
 import path from 'pathe'
 import { validateBody } from '../domain/body-schemas'
 import { decodeEnvelope } from '../domain/envelope'
@@ -100,6 +120,7 @@ export type ComputeCreatePlanFailureReason
 		| 'target-exists'
 		| 'invalid-plan'
 		| 'managed-directory-symlinked'
+		| 'allocation-incomplete'
 
 export type ComputeCreatePlanResult
 	= | { ok: true, plan: ArtifactCreatePlan }
@@ -155,6 +176,42 @@ function collectVisibleIds(snapshot: ProjectSnapshot): string[] {
 			ids.push(id)
 	}
 	return ids
+}
+
+/**
+ * `true` iff `artifact`'s declared Artifact ID is exactly and unambiguously
+ * known: the frontmatter parsed, the envelope decoded to completion, the
+ * `id` field itself was not lost to a duplicate top-level key
+ * (`EF-ENV-005`), and the declared ID's lexical shape and canonical numeric
+ * form are both valid (`EF-ID-001`, `EF-ID-003`). A `false` result means
+ * this file's true numeric component cannot be established -- it might be
+ * hiding the actual greatest visible component for its prefix -- so
+ * allocation cannot rule out a higher reservation by silently skipping it
+ * (02-identity.md Allocation: "If it cannot process the greatest visible
+ * component exactly, allocation is incomplete and does not issue an ID").
+ */
+function hasIdentityCertainEnvelope(artifact: SnapshotArtifactFile): boolean {
+	const decoded = artifact.envelope?.envelope
+	if (decoded === undefined || decoded === null)
+		return false
+	if (artifact.document?.diagnostics.some(d => d.code === 'EF-ENV-005' && d.field === 'id'))
+		return false
+	const idDiagnostics = validateIdSyntax({ type: decoded.type, id: decoded.id }, artifact.path)
+	return !idDiagnostics.some(d => d.code === 'EF-ID-001' || d.code === 'EF-ID-003')
+}
+
+/**
+ * The first Artifact file directly inside `canonicalDir` whose envelope is
+ * not identity-certain (see {@link hasIdentityCertainEnvelope}), or
+ * `undefined` when every such file's contribution to the greatest visible
+ * numeric component for this prefix is exactly known. Scoped to
+ * `canonicalDir` (rather than the whole graph) because an identity-uncertain
+ * file under a DIFFERENT type's canonical directory cannot hide a higher
+ * reservation for THIS prefix.
+ */
+function findIdentityUncertainArtifact(snapshot: ProjectSnapshot, canonicalDir: string): SnapshotArtifactFile | undefined {
+	const directoryPrefix = `${canonicalDir}/`
+	return snapshot.artifacts.find(artifact => artifact.path.startsWith(directoryPrefix) && !hasIdentityCertainEnvelope(artifact))
 }
 
 /** Structural self-validation of freshly built draft bytes: parsing, envelope decoding, identity syntax, filename, status, and body schema. Does not require the full project graph. */
@@ -213,8 +270,23 @@ export function computeCreatePlan(input: ComputeCreatePlanInput): ComputeCreateP
 
 	const artifactType = TYPE_TOKEN_MAP[type]
 	const prefix = ID_PREFIX_BY_TYPE[artifactType]
+	const canonicalDir = CANONICAL_DIR_BY_TYPE[artifactType]
+
+	// The allocator contract requires inspecting every visible Artifact for
+	// this prefix before selecting a candidate (02-identity.md Allocation).
+	// An identity-uncertain file's greatest visible component is not
+	// actually known, so it must never be silently treated as absent.
+	const uncertainArtifact = findIdentityUncertainArtifact(snapshot, canonicalDir)
+	if (uncertainArtifact) {
+		return {
+			ok: false,
+			reason: 'allocation-incomplete',
+			message: `Cannot allocate the next '${prefix}' ID: '${uncertainArtifact.path}' does not have a decodable, identity-certain envelope, so the greatest visible '${prefix}' component is not known.`,
+		}
+	}
+
 	const id = domainNextId(prefix, collectVisibleIds(snapshot))
-	const filePath = `${CANONICAL_DIR_BY_TYPE[artifactType]}/${id}.md`
+	const filePath = `${canonicalDir}/${id}.md`
 
 	const chainDiagnostics = managedDirectoryChainDiagnostics(snapshot, artifactType)
 	if (chainDiagnostics.length > 0) {
@@ -286,6 +358,28 @@ export interface ApplyCreatePlanDeps {
 	ensureDirectory: (path: string) => Promise<void>
 	/** `lstat`-derived identity of `path` iff it is right now a real, non-symlink directory; `undefined` otherwise. Used to bind successive managed-directory-chain re-verifications together (see `verifyManagedDirectoryChain`). */
 	directoryIdentity: (path: string) => Promise<FileIdentity | undefined>
+	/**
+	 * `lstat`-derived identity of `path` iff it is right now a real, non-symlink
+	 * regular file; `undefined` otherwise (missing, a symlink, a directory, or
+	 * any other entry kind). Used to bind the complete, verified temporary
+	 * file to whatever the canonical target denotes immediately after
+	 * publication (see the post-write and post-publication verification in
+	 * `applyCreatePlan`), the same way `directoryIdentity` binds successive
+	 * managed-directory-chain checkpoints.
+	 */
+	fileIdentity: (path: string) => Promise<FileIdentity | undefined>
+}
+
+async function defaultFileIdentity(target: string): Promise<FileIdentity | undefined> {
+	try {
+		const stats = await lstat(target)
+		return stats.isFile() ? { dev: stats.dev, ino: stats.ino } : undefined
+	}
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+			return undefined
+		throw error
+	}
 }
 
 /** Real filesystem access, composed from `platform/*` primitives. */
@@ -304,10 +398,27 @@ export const defaultApplyCreatePlanDeps: ApplyCreatePlanDeps = {
 		await fsMkdir(target, { recursive: true })
 	},
 	directoryIdentity,
+	fileIdentity: defaultFileIdentity,
 }
 
 export type ApplyCreatePlanResult
 	= | { applied: true, path: string }
+		/**
+		 * The hard-link publication call itself reported success, but an
+		 * immediate post-publication re-verification (managed directory chain
+		 * identity AND the published path's own `fstat` identity bound back to
+		 * the temporary file that was published) no longer matched, and the
+		 * mismatch could not be safely undone: the entry now at `path` could not
+		 * be proven -- by inode identity -- to be the exact file this invocation
+		 * wrote, so unlinking it would risk deleting state this invocation never
+		 * created (the same ownership-proof rule Finding 1 applies to
+		 * `.engineering` itself). `applied: true` because the publish call
+		 * itself did succeed; `outcome: 'incomplete'` because its result could
+		 * not be verified afterward and must not be misreported as a plain,
+		 * fully-verified success. See `13-cli-contract.md`'s "recovery is an
+		 * explicit operator action".
+		 */
+		| { applied: true, outcome: 'incomplete', path: string, message: string }
 		| { applied: false, outcome: 'raced', message: string }
 		| { applied: false, outcome: 'unsupported', message: string }
 		| { applied: false, outcome: 'incomplete', message: string }
@@ -362,30 +473,39 @@ async function verifyChainComponent(deps: ApplyCreatePlanDeps, componentPath: st
  * (`.engineering`, the type's canonical directory) that
  * `managedDirectoryChainDiagnostics` checks from the snapshot at plan time --
  * re-checked against the real filesystem immediately before the temporary
- * write and again immediately before hard-link publication
- * (13-cli-contract.md "verify again that allocation and the canonical target
- * remain valid"). A snapshot taken at plan time cannot detect a chain
- * component replaced afterward; only a fresh `lstat` at each checkpoint can.
+ * write, again immediately before hard-link publication, and once more
+ * immediately after publication succeeds (13-cli-contract.md "verify again
+ * that allocation and the canonical target remain valid"). A snapshot taken
+ * at plan time cannot detect a chain component replaced afterward; only a
+ * fresh `lstat` at each checkpoint can.
  *
- * FINDING (same class as init.ts/fs-facts.ts): a symlink check alone, run
- * fresh and independently at each checkpoint, does not catch a component
- * that is swapped for a *different real directory* (no symlink ever
- * involved) and left that way, or swapped out to a symlink and back to a
- * different real directory strictly between two checkpoints -- at the
- * moment either later checkpoint runs, `isSymlink` truthfully reports
- * "false" throughout, so the chain looked "clean" at every individual check
- * even though it never denoted the SAME directory the whole time. Threading
- * `previous` through successive calls closes this: each checkpoint after the
- * first also compares identity against what the immediately preceding
- * checkpoint captured, so a component swapped for any other directory
- * instance -- symlinked or not -- between two checkpoints is caught.
+ * Exact guarantee (same portability/security-boundary narrowing as
+ * `application/init.ts`'s `applyInitPlan`; Node exposes no `openat`-style,
+ * file-descriptor-relative primitive on any platform this package targets,
+ * so this is not a claim of race-freedom -- see 00's "path handling is not a
+ * filesystem-security boundary" and the EF threat model, in which the
+ * working tree is the operator's own data):
  *
- * As with every `lstat`-based check in the absence of an `openat`-style
- * primitive (which Node does not expose), the narrow residual race is a
- * component swapped out and fully restored to the exact SAME directory
- * instance strictly between one checkpoint and the operation it guards; in
- * that window the guarded operation still acts on the genuine, previously
- * verified directory.
+ * - A component swapped for a *different real directory* (no symlink ever
+ *   involved), or swapped out to a symlink and back to a different real
+ *   directory, strictly BETWEEN two checkpoints is caught: threading
+ *   `previous` through successive calls means each checkpoint after the
+ *   first also compares identity against what the immediately preceding
+ *   checkpoint captured, not merely a fresh, independent `isSymlink` check
+ *   (which alone would report "false" at every individual checkpoint even
+ *   though the chain never denoted the SAME directory the whole time).
+ * - A swap that lands strictly INSIDE the narrow window between one
+ *   checkpoint and the single operation it guards is NOT caught by this
+ *   function alone -- that operation is still pathname-based. `applyCreatePlan`
+ *   additionally binds the write itself to a captured file identity and,
+ *   after publication, re-verifies both the chain and the published path's
+ *   own identity, attempting an ownership-proven retraction on mismatch
+ *   rather than ever reporting an unverified state as a plain success.
+ * - The narrowest residual case -- a component swapped out and fully
+ *   restored to the exact SAME directory instance strictly between one
+ *   checkpoint and the operation it guards -- still acts on the genuine,
+ *   previously verified directory either way; the only possible outcome
+ *   there is a spurious rejection of an otherwise-legitimate run.
  */
 async function verifyManagedDirectoryChain(deps: ApplyCreatePlanDeps, projectRoot: string, targetPath: string, previous: ManagedDirectoryChainIdentity | undefined): Promise<VerifyManagedDirectoryChainResult> {
 	const engineeringPath = path.join(projectRoot, '.engineering')
@@ -471,6 +591,26 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		return { applied: false, outcome: 'incomplete', message: `Temporary file for '${plan.path}' was not written with the planned bytes.` }
 	}
 
+	// Post-write verification (Finding 2b): bind an `lstat` identity to the
+	// now-complete, byte-verified temporary file, for later comparison
+	// against whatever the canonical target denotes immediately after
+	// publication (the post-publication verification below), and re-verify
+	// the managed chain again -- before the "allocation still absent"
+	// re-check that follows -- so a symlink or different-directory swap
+	// substituted into the chain during the write itself is still caught
+	// here rather than only discovered afterward.
+	const tempIdentity = await deps.fileIdentity(tempPath)
+	if (tempIdentity === undefined) {
+		await safeUnlink(deps, tempPath)
+		return { applied: false, outcome: 'incomplete', message: `Failed to verify the temporary file's identity for '${plan.path}'.` }
+	}
+
+	chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, chainCheck.identity)
+	if (!chainCheck.ok) {
+		await safeUnlink(deps, tempPath)
+		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
+	}
+
 	if (await targetExists(deps, targetPath)) {
 		await safeUnlink(deps, tempPath)
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
@@ -489,8 +629,49 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	const publishResult = await deps.publishViaHardLink(tempPath, targetPath)
 
 	if (publishResult.outcome === 'published') {
+		// Post-publication verification (Finding 2a): `publishViaHardLink`
+		// reporting success proves only that the `link()` syscall it issued
+		// itself succeeded at that instant -- it does not prove the managed
+		// chain leading to `targetPath`, or `targetPath` itself, still denotes
+		// what this invocation just verified by the time control returns here.
+		// Re-verify both: the managed chain identity, and `targetPath`'s own
+		// `fstat` identity bound back to `tempIdentity` (a genuine hard link
+		// shares the temporary file's exact inode; anything else means
+		// `targetPath` was unlinked and replaced, or the chain leading to it
+		// was swapped, in the instant after `link()` returned).
+		const postChain = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, chainCheck.identity)
+		const publishedIdentity = await deps.fileIdentity(targetPath)
+		const contentIntact = publishedIdentity !== undefined && sameFileIdentity(publishedIdentity, tempIdentity)
+
+		if (postChain.ok && contentIntact) {
+			await safeUnlink(deps, tempPath)
+			return { applied: true, path: plan.path }
+		}
+
+		// A mismatch was found. Attempt recovery ONLY when ownership of the
+		// entry now at `targetPath` is freshly provable by inode identity --
+		// re-checked here, independently of `publishedIdentity` above, since
+		// state can keep changing right up to the moment of removal.
+		// Unlinking anything whose identity we cannot bind back to
+		// `tempIdentity` would risk deleting state this invocation never
+		// created (Finding 1 applies the identical ownership-proof rule to
+		// `.engineering` itself).
+		const recoveryIdentity = await deps.fileIdentity(targetPath)
+		if (recoveryIdentity !== undefined && sameFileIdentity(recoveryIdentity, tempIdentity)) {
+			try {
+				await deps.unlink(targetPath)
+				await safeUnlink(deps, tempPath)
+				return { applied: false, outcome: 'raced', message: `The managed directory chain or published identity for '${plan.path}' no longer matched immediately after publication; the unverified publish was retracted.` }
+			}
+			catch {
+				// Even the proven-owned retraction itself failed: fall through
+				// and report `applied: true, outcome: 'incomplete'` below rather
+				// than misreport either a clean success or a clean rejection.
+			}
+		}
+
 		await safeUnlink(deps, tempPath)
-		return { applied: true, path: plan.path }
+		return { applied: true, outcome: 'incomplete', path: plan.path, message: `The published file for '${plan.path}' could not be verified intact immediately after publication and could not be safely retracted; recovery is an explicit operator action.` }
 	}
 	if (publishResult.outcome === 'target-exists') {
 		await safeUnlink(deps, tempPath)

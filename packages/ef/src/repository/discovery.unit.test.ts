@@ -7,7 +7,9 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
 import { findWorktreeRoot } from '../git/repository'
-import { discoverProject } from './discovery'
+import { directoryIdentity } from '../platform/fs-facts'
+import { decodeConfig } from './config'
+import { checkWorkingDirectoryAssociation, discoverProject } from './discovery'
 
 const SINGLE_REPO_YAML = `schema: ef/config@1
 repository:
@@ -349,6 +351,89 @@ describe('discoverProject (isolated, fake git)', () => {
 			const result = await discoverProject({ cwd: nestedCwd }, deps)
 			expect(result)
 				.toEqual({ kind: 'git-unavailable', message: 'boom' })
+		})
+
+		// Finding 4: `.engineering`'s identity is threaded into the resolved
+		// result, for a later caller (`application/snapshot.ts`'s
+		// `loadSnapshotFromWorkingTree`) to bind its own, separate walk to the
+		// EXACT directory this discovery observed.
+		it('threads .engineering\'s lstat-derived identity into the resolved result', async () => {
+			await setUpValidProject(SINGLE_REPO_YAML)
+			const deps: DiscoverProjectDeps = { findWorktreeRoot: async () => foundAt(tempDir) }
+			const result = await discoverProject({ cwd: tempDir }, deps)
+			expect(result.kind)
+				.toBe('resolved')
+			if (result.kind !== 'resolved')
+				return
+			const expected = await directoryIdentity(path.join(tempDir, '.engineering'))
+			expect(expected)
+				.toBeDefined()
+			expect(result.engineeringIdentity)
+				.toEqual(expected)
+		})
+	})
+
+	// ---- Finding 5: the association decision, extracted for reuse ------------
+
+	describe('checkWorkingDirectoryAssociation', () => {
+		it('reports associated when cwd is within the project\'s own worktree', async () => {
+			const result = await checkWorkingDirectoryAssociation(
+				{ cwd: tempDir, candidateRoot: tempDir, config: null },
+				{ findWorktreeRoot: async () => foundAt(tempDir) },
+			)
+			expect(result)
+				.toEqual({ kind: 'associated' })
+		})
+
+		it('reports unassociated when cwd is inside an undeclared different worktree', async () => {
+			const result = await checkWorkingDirectoryAssociation(
+				{ cwd: '/nested', candidateRoot: tempDir, config: null },
+				{ findWorktreeRoot: async (p: string) => (p === tempDir ? foundAt(tempDir) : foundAt('/some/other/worktree')) },
+			)
+			expect(result)
+				.toEqual({ kind: 'unassociated' })
+		})
+
+		it('propagates git-unavailable from its own findWorktreeRoot probe', async () => {
+			const result = await checkWorkingDirectoryAssociation(
+				{ cwd: '/nested', candidateRoot: tempDir, config: null },
+				{ findWorktreeRoot: async () => ({ kind: 'git-unavailable', message: 'boom' }) },
+			)
+			expect(result)
+				.toEqual({ kind: 'git-unavailable', message: 'boom' })
+		})
+
+		// This is the exact primitive a caller needs to close Finding 5's
+		// in-place-rewrite race: re-running this SAME decision against a LATER,
+		// fresher config (e.g. a project snapshot's own `config.config`) than
+		// the one `discoverProject` itself used reverses a stale `associated`
+		// verdict once the declaring linked-repository entry is gone.
+		it('re-run against a different, later config reverses an earlier associated verdict for the identical cwd/candidateRoot', async () => {
+			const configA = decodeConfig(
+				composeYaml('  - id: frontend\n    path: repos/project-fe\n    role: implementation\n    required: true'),
+				'.engineering/ef.yaml',
+			).config
+			const configB = decodeConfig(SINGLE_REPO_YAML, '.engineering/ef.yaml').config
+			expect(configA).not.toBeNull()
+			expect(configB).not.toBeNull()
+
+			const linkedAbsolute = path.join(tempDir, 'repos', 'project-fe')
+			const deps: DiscoverProjectDeps = {
+				findWorktreeRoot: async (p: string) => (p === tempDir ? foundAt(tempDir) : foundAt(linkedAbsolute)),
+			}
+
+			const withConfigA = await checkWorkingDirectoryAssociation({ cwd: linkedAbsolute, candidateRoot: tempDir, config: configA }, deps)
+			expect(withConfigA)
+				.toEqual({ kind: 'associated' })
+
+			// Config B (no `linked_repositories` at all) is what an in-place
+			// rewrite between `discoverProject`'s own read and a later, fresher
+			// read would leave on disk; re-running the association check against
+			// it, rather than trusting config A's stale verdict, is what a
+			// caller must do.
+			const withConfigB = await checkWorkingDirectoryAssociation({ cwd: linkedAbsolute, candidateRoot: tempDir, config: configB }, deps)
+			expect(withConfigB)
+				.toEqual({ kind: 'unassociated' })
 		})
 	})
 })

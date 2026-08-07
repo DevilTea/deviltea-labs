@@ -219,9 +219,12 @@ export async function validateBootstrap(input: ValidateBootstrapInput): Promise<
 
 	const diagnostics: Diagnostic[] = [...validation.diagnostics]
 
-	if (snapshot.gitignoreBytes === undefined) {
-		diagnostics.push(makeDiagnostic('EF-VAL-010', `Bootstrap proposed tree is missing the required control file '.engineering/.gitignore'.`))
-	}
+	// A missing or non-canonical '.engineering/.gitignore' is now reported by
+	// `validateSnapshot` itself (`EF-FS-009`, unconditionally, not only during
+	// bootstrap -- 11-filesystem-and-config.md), which already appears in
+	// `validation.diagnostics` above. A bootstrap-specific `EF-VAL-010` for the
+	// identical missing-file condition would double-report one defect under
+	// two codes; it has been removed in favor of `EF-FS-009` alone.
 
 	for (const record of validation.byId.values()) {
 		if (record.type === 'change') {

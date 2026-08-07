@@ -126,6 +126,8 @@ export async function runArtifactCreateCommand(options: ArtifactCreateCommandOpt
 			case 'invalid-plan':
 			case 'managed-directory-symlinked':
 				return mutationOutcome(options, 1, { complete: true, applied: false, dryRun: options.dryRun, changes: [], artifact: null, diagnostics: planResult.diagnostics ?? [] })
+			case 'allocation-incomplete':
+				return earlyFailure(options, 2, 'EF-VAL-001', planResult.message)
 		}
 	}
 
@@ -153,8 +155,19 @@ export async function runArtifactCreateCommand(options: ArtifactCreateCommandOpt
 
 	try {
 		const applyResult = await applyCreatePlan(plan, root)
-		if (applyResult.applied)
+		if (applyResult.applied) {
+			if ('outcome' in applyResult && applyResult.outcome === 'incomplete') {
+				return mutationOutcome(options, 2, {
+					complete: false,
+					applied: true,
+					dryRun: false,
+					changes: plan.changes,
+					artifact,
+					diagnostics: [{ code: 'EF-VAL-001', severity: 'error', message: applyResult.message, related: [] }],
+				})
+			}
 			return mutationOutcome(options, 0, { complete: true, applied: true, dryRun: false, changes: plan.changes, artifact, diagnostics: [] })
+		}
 
 		if (applyResult.outcome === 'raced') {
 			return mutationOutcome(options, 1, {

@@ -201,6 +201,60 @@ describe('validateSnapshot', () => {
 		})
 	})
 
+	// Seventh-round Finding 8: `.engineering/.gitignore` is a tracked
+	// PROJECT-owned control file (11-filesystem-and-config.md) that MUST exist
+	// with exactly the four canonical entries; absence or divergence was
+	// previously silently accepted.
+	describe('gitignore control file (EF-FS-009, seventh-round Finding 8)', () => {
+		it('reports EF-FS-009 (and stays complete: true) when .engineering/.gitignore is entirely absent', async () => {
+			await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(tempDir, '.engineering/PROJECT.md', PROJECT_MD)
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-FS-009')
+			expect(result.complete)
+				.toBe(true)
+		})
+
+		it('reports EF-FS-009 when .engineering/.gitignore content does not exactly match the four canonical entries', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n')
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-FS-009')
+		})
+
+		it('reports EF-FS-009 when the four entries are present but out of the canonical order', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/.gitignore', '.lock\n.tmp/\n.generated/\n.cache/\n')
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-FS-009')
+		})
+
+		it('does not report EF-FS-009 for the exact canonical content', async () => {
+			await writeMinimalProject(tempDir)
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-FS-009')
+		})
+
+		it('does not report EF-FS-009 when EF-FS-005 already fired for the same file (encoding-level violation keeps precedence)', async () => {
+			await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(tempDir, '.engineering/PROJECT.md', PROJECT_MD)
+			// A UTF-8 BOM makes the file's raw bytes diverge from the canonical
+			// bytes (so EF-FS-009's byte-equality check would also fail), but the
+			// encoding-level EF-FS-005 finding must be the only one reported for
+			// this file.
+			await writeFileBytes(tempDir, '.engineering/.gitignore', new Uint8Array([0xEF, 0xBB, 0xBF, ...new TextEncoder()
+				.encode(GITIGNORE)]))
+			const result = await load()
+			const gitignoreDiagnostics = result.diagnostics.filter(d => d.path === '.engineering/.gitignore')
+			expect(codesOf(gitignoreDiagnostics))
+				.toEqual(['EF-FS-005'])
+		})
+	})
+
 	describe('layout phase', () => {
 		it('reports EF-FS-003 for an entry that violates the canonical layout', async () => {
 			await writeMinimalProject(tempDir)
@@ -467,6 +521,72 @@ describe('validateSnapshot', () => {
 				.toBe(true)
 			expect(result.graphTrustworthy)
 				.toBe(true)
+		})
+	})
+
+	// Seventh-round Finding 6: a projected Artifact's `path` is spec-fixed as
+	// its canonical, project-relative path (10-query-and-trace.md), but
+	// `buildArtifactSummary` projects the actual discovered path verbatim. An
+	// Artifact whose filename mismatches its ID (EF-ID-005), sits outside its
+	// canonical directory (EF-ID-014), or whose discovered path is not itself
+	// Unicode-NFC-normalized (EF-FS-006, for the Artifact's own path only) has
+	// an explicitly non-canonical projected `path`, tracked here separately
+	// from `graphTrustworthy` (which these findings deliberately do NOT flip).
+	describe('path-trust loss tracking (Finding 6, seventh-round)', () => {
+		it('is empty for a minimal valid project with no findings', async () => {
+			await writeMinimalProject(tempDir)
+			const result = await load()
+			expect(result.pathTrustLossArtifactIds.size)
+				.toBe(0)
+		})
+
+		it('tracks only the affected Artifact for an EF-ID-005 filename mismatch, without flipping graphTrustworthy', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', requirementMd({ id: 'REQ-002' }))
+			await writeFile(tempDir, '.engineering/req/REQ-999.md', requirementMd({ id: 'REQ-001' }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ID-005')
+			expect([...result.pathTrustLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.graphTrustworthy)
+				.toBe(true)
+		})
+
+		it('tracks only the affected Artifact for an EF-ID-014 wrong-canonical-directory finding, without flipping graphTrustworthy', async () => {
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/req/REQ-002.md', requirementMd({ id: 'REQ-002' }))
+			// Basename matches its declared ID exactly; only the directory is
+			// wrong (adr instead of req).
+			await writeFile(tempDir, '.engineering/adr/REQ-001.md', requirementMd({ id: 'REQ-001' }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ID-014')
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-ID-005')
+			expect([...result.pathTrustLossArtifactIds])
+				.toEqual(['REQ-001'])
+			expect(result.graphTrustworthy)
+				.toBe(true)
+		})
+
+		it('also folds in an artifact-path EF-FS-006 (non-NFC-normalized discovered path)', async () => {
+			await writeMinimalProject(tempDir)
+			// A non-ASCII, NFD-decomposed filename cannot simultaneously equal
+			// the (always-ASCII) expected `<id>.md` basename, so EF-ID-005 fires
+			// alongside EF-FS-006 here -- there is no filesystem-realizable
+			// Artifact path that is both non-NFC-normalized AND otherwise fully
+			// canonical. This still confirms the EF-FS-006 signal is folded into
+			// `pathTrustLossArtifactIds` for the Artifact it affects.
+			const nfd = 'café'.normalize('NFD')
+			await writeFile(tempDir, `.engineering/req/REQ-001-${nfd}.md`, requirementMd({ id: 'REQ-001' }))
+			const result = await load()
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-FS-006')
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-ID-005')
+			expect([...result.pathTrustLossArtifactIds])
+				.toEqual(['REQ-001'])
 		})
 	})
 

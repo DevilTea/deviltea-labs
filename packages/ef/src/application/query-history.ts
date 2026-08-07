@@ -44,11 +44,61 @@ import { rawArrayField } from './snapshot-raw-fields'
 const EF_YAML_PATH = '.engineering/ef.yaml'
 const PROJECT_MD_PATH = '.engineering/PROJECT.md'
 const PROJECT_CONTROL_PATHS = [EF_YAML_PATH, '.engineering/.gitignore'] as const
+const ENGINEERING_DIR_BYTES = new TextEncoder()
+	.encode('.engineering')
 const utf8Decoder = new TextDecoder('utf-8', { fatal: false })
 
 /** A tree entry that is an ordinary file readable as a blob -- not a directory, gitlink, or symlink-mode (`120000`) blob. */
 function isRegularBlobEntry(entry: GitTreeEntry | undefined): entry is GitTreeEntry {
 	return entry !== undefined && entry.type === 'blob' && entry.mode !== '120000'
+}
+
+/**
+ * Byte-level (not string) test for whether raw tree-entry path bytes lie at or
+ * beneath `.engineering` -- mirrors `application/snapshot.ts`'s own
+ * `pathBytesUnderEngineering` (Finding 4 there), applied here to the same
+ * problem for historical commits (Finding 10): an entry with
+ * `pathValid === false` has a `path` that is a synthesized, collision-free
+ * placeholder (never a real decoded string, and never equal to or prefixed by
+ * a genuine `.engineering/...` path), so only the entry's RAW BYTES can prove
+ * whether it actually lies beneath `.engineering`.
+ */
+function pathBytesUnderEngineering(pathBytes: Uint8Array): boolean {
+	if (pathBytes.length < ENGINEERING_DIR_BYTES.length)
+		return false
+	for (let i = 0; i < ENGINEERING_DIR_BYTES.length; i++) {
+		if (pathBytes[i] !== ENGINEERING_DIR_BYTES[i])
+			return false
+	}
+	return pathBytes.length === ENGINEERING_DIR_BYTES.length || pathBytes[ENGINEERING_DIR_BYTES.length] === 0x2F /* '/' */
+}
+
+/**
+ * Finding 10 (second omission variant): the CHG scan below discovers every
+ * CHG purely by matching decoded `path` strings against the
+ * `.engineering/chg/` prefix. An entry whose raw path bytes are invalid UTF-8
+ * (`pathValid: false`) is decoded to a NUL-prefixed placeholder string that
+ * can never match that prefix scan, regardless of where its actual raw bytes
+ * point -- including beneath `.engineering/chg/` itself. Such an entry would
+ * therefore be silently invisible to the whole walk (never counted as a
+ * managed CHG, never causing a failure) even though it constitutes exactly
+ * the same untrustworthy managed-path condition `application/snapshot.ts`
+ * reports as `EF-FS-006` for the current snapshot. Checked once per consumed
+ * commit (every commit from the bootstrap boundary onward): any such entry
+ * anywhere beneath `.engineering` makes this commit's content untrustworthy
+ * for this walk, independent of whether it happens to fall inside a path this
+ * walk otherwise scans by prefix.
+ */
+function hasInvalidUtf8PathUnderEngineering(treeMap: ReadonlyMap<string, GitTreeEntry>): boolean {
+	for (const entry of treeMap.values()) {
+		if (entry.pathValid === false) {
+			const pathBytes = entry.pathBytes ?? new TextEncoder()
+				.encode(entry.path)
+			if (pathBytesUnderEngineering(pathBytes))
+				return true
+		}
+	}
+	return false
 }
 
 function hasErrorDiagnostic(diagnostics: readonly Diagnostic[]): boolean {
@@ -109,20 +159,34 @@ export interface HistoryOutcome {
  *   violates its canonical placement (`EF-ID-005`/`EF-ID-014`; see the
  *   authoritative-path check below), the claimed bootstrap boundary commit
  *   exists but is not a valid, complete bootstrap (a non-regular-blob or
- *   undecodable `ef.yaml`, or a missing/invalid minimal-witness
- *   `PROJECT.md` -- see `evaluateBootstrapBoundary`), a historical blob this
- *   walk needed exists but cannot be completely read and decoded (unreadable
- *   blob, malformed frontmatter, or an envelope that fails to decode), or an
- *   error-severity finding on one of the other historical facts this walk
- *   consumes -- a CHG's relation entries (including a duplicate effect,
- *   `EF-REL-006`), a CHG's filename-vs-declared-id consistency, a declared
- *   Resource descriptor (shape, vocabulary, or owner-directory, `EF-RES-014`
- *   included) when used for aggregate path attribution, a non-regular tree
- *   entry at a declared local Resource location, or a projection-fidelity
- *   loss (relation-extension, Resource-field, or byte-decoding) on a CHG
- *   summary this walk is about to emit as an effect. This maps to
- *   `EF-QRY-013` ("Query cannot produce a complete trustworthy result",
- *   diagnostic-registry.md).
+ *   undecodable `ef.yaml`, an `ef.yaml` that decodes but declares a DIFFERENT
+ *   `integration_ref` than the one this walk was asked to walk, when the
+ *   caller supplied one (Finding 11, see `evaluateEfYamlConfig`), or a
+ *   missing/invalid minimal-witness `PROJECT.md` -- see
+ *   `evaluateBootstrapBoundary`), a LATER authoritative EF-bearing commit
+ *   whose own `ef.yaml` blob changes and either fails to decode, is removed,
+ *   or retargets `integration_ref` away from what the walk's OWN bootstrap
+ *   commit declared (Finding 11, `integration_ref` is fixed by bootstrap and
+ *   MUST NOT change within Core v1 -- this self-consistency check applies
+ *   regardless of whether the caller supplied an expected ref at all), a
+ *   managed entry this walk needed (the target's own
+ *   canonical path, or a `.engineering/chg/*.md` candidate) that DOES exist
+ *   at that path but is not a regular Git blob -- a symlink-mode (`120000`)
+ *   blob, gitlink, or directory (Finding 10) -- an invalid-UTF-8 path
+ *   anywhere beneath `.engineering` in a commit this walk consumes (Finding
+ *   10, invisible to every prefix/exact-match scan otherwise), a historical
+ *   blob this walk needed exists but cannot be completely read and decoded
+ *   (unreadable blob, malformed frontmatter, or an envelope that fails to
+ *   decode), or an error-severity finding on one of the other historical
+ *   facts this walk consumes -- a CHG's relation entries (including a
+ *   duplicate effect, `EF-REL-006`), a CHG's filename-vs-declared-id
+ *   consistency, a declared Resource descriptor (shape, vocabulary, or
+ *   owner-directory, `EF-RES-014` included) when used for aggregate path
+ *   attribution, a non-regular tree entry at a declared local Resource
+ *   location, or a projection-fidelity loss (relation-extension,
+ *   Resource-field, or byte-decoding) on a CHG summary this walk is about to
+ *   emit as an effect. This maps to `EF-QRY-013` ("Query cannot produce a
+ *   complete trustworthy result", diagnostic-registry.md).
  */
 export type ComputeHistoryResult
 	= | ({ kind: 'complete' } & HistoryOutcome)
@@ -135,6 +199,34 @@ export async function computeHistory(
 	targetId: string,
 	targetType: ArtifactType,
 	byId: ReadonlyMap<string, SnapshotArtifactRecord>,
+	/**
+	 * The exact ref NAME (e.g. `refs/heads/main`) `integrationRefOid` was
+	 * resolved from -- the ref this history walk was asked to walk.
+	 * 11-filesystem-and-config.md: "`integration_ref` is fixed by bootstrap
+	 * and MUST NOT change within Core v1." (Finding 11). When supplied, the
+	 * bootstrap boundary commit's own decoded `ef.yaml` MUST declare exactly
+	 * this ref, else `untrusted-data` -- this is what stops a config that was
+	 * schema-validly edited to select a DIFFERENT ref (whose own history
+	 * happens to carry an otherwise-plausible bootstrap) from being silently
+	 * accepted merely because that other ref's history is internally
+	 * consistent.
+	 *
+	 * Independently of whether this argument is supplied, EVERY later
+	 * authoritative EF-bearing commit in the SAME walk whose `ef.yaml` blob
+	 * changes is always required to still declare the SAME `integration_ref`
+	 * the walk's own bootstrap commit declared (see `previousIntegrationRef`
+	 * below) -- an in-history retarget partway through one ref's own history
+	 * is detected on that self-consistency alone, with no need for this
+	 * parameter at all.
+	 *
+	 * Optional: `./query.ts`'s `handleHistory` supplies it via
+	 * `HistoryQueryContext.integrationRef` (populated by
+	 * `cli/commands/query.ts`'s own `resolveRef` call, the same ref name used
+	 * to obtain `integrationRefOid`). Remains optional so a caller without a
+	 * ref name on hand degrades gracefully to the self-consistency check
+	 * alone, rather than failing every history query closed.
+	 */
+	expectedIntegrationRef?: string,
 ): Promise<ComputeHistoryResult> {
 	const historyResult = await git.listFirstParentHistory(integrationRefOid)
 	if (historyResult.kind !== 'complete')
@@ -176,17 +268,20 @@ export async function computeHistory(
 		return map
 	}
 
-	// Distinguishes genuine tree absence (no entry, or a non-blob entry: the
-	// path legitimately does not exist as a file at this historical commit --
-	// e.g. the Artifact had not been created yet) from an entry that DOES
-	// exist as a blob at this commit but could not be completely read and
-	// decoded (unreadable blob, malformed frontmatter, or an envelope that
-	// fails to decode). The former is a normal, expected input to the walk;
-	// the latter means a historical blob this walk needed exists but its
-	// content cannot be trusted, which must fail the whole query rather than
-	// being silently treated the same as absence (the target could appear to
-	// disappear, or a malformed/unreadable CHG could simply be skipped from
-	// effects, while the command still reports `complete: true`).
+	// Distinguishes genuine tree absence (no entry at all: the path
+	// legitimately does not exist at this historical commit -- e.g. the
+	// Artifact had not been created yet) from an entry that DOES exist at
+	// this commit but is not a trustworthy regular file (Finding 10: a
+	// symlink-mode `120000` blob, a gitlink, or a directory sitting at this
+	// exact managed path), and from a regular-blob entry that could not be
+	// completely read and decoded (unreadable blob, malformed frontmatter, or
+	// an envelope that fails to decode). The first is a normal, expected
+	// input to the walk; the other two mean a historical path this walk
+	// needed exists but its content cannot be trusted, which must fail the
+	// whole query rather than being silently treated the same as absence
+	// (the target could appear to disappear, or a malformed/unreadable/
+	// symlinked CHG could simply be skipped from effects, while the command
+	// still reports `complete: true`).
 	//
 	// A successfully-decoded `envelope` (non-null) does NOT by itself mean the
 	// data is trustworthy: `parseFrontmatterDocument`/`decodeEnvelope` still
@@ -206,8 +301,21 @@ export async function computeHistory(
 
 	async function envelopeAt(treeMap: Map<string, GitTreeEntry>, path: string): Promise<EnvelopeLookup> {
 		const entry = treeMap.get(path)
-		if (!entry || entry.type !== 'blob')
+		if (!entry)
 			return { kind: 'absent' }
+		// Finding 10: `entry.type === 'blob'` alone is insufficient -- a Git
+		// mode `120000` symlink is ALSO reported as `type: 'blob'`, so a
+		// symlink sitting at this managed path (the target's own canonical
+		// path, or a `.engineering/chg/*.md` candidate) would otherwise have
+		// its LINK-TARGET TEXT read and parsed as though it were the file's
+		// own content. A gitlink (`type: 'commit'`) or directory (`type:
+		// 'tree'`) at this same managed path is likewise not the regular file
+		// this walk may trust -- but unlike the genuine "not created yet"
+		// case (`!entry` above), something DOES exist at this exact path, so
+		// this is reported as untrustworthy content, never conflated with
+		// ordinary absence.
+		if (!isRegularBlobEntry(entry))
+			return { kind: 'error' }
 		const blobResult = await git.readBlob(entry.oid)
 		if (blobResult.kind !== 'resolved')
 			return { kind: 'error' }
@@ -295,32 +403,82 @@ export async function computeHistory(
 	// so the first commit actually processed -- the bootstrap commit itself --
 	// is diffed exactly as if it were `oidsOldestFirst[0]`.
 	let reachedBootstrap = false
+	let previousEfYamlOid: string | undefined
+	// The `integration_ref` the walk's OWN bootstrap commit declared -- the
+	// baseline every later authoritative EF-bearing commit's own `ef.yaml` is
+	// compared against (Finding 11's ALWAYS-ON self-consistency requirement,
+	// independent of whether `expectedIntegrationRef` was supplied at all).
+	let bootstrapIntegrationRef: string | undefined
 
-	type BootstrapBoundaryOutcome = 'not-present' | 'valid' | 'invalid' | 'read-error'
+	type EfYamlConfigOutcome
+		= | { kind: 'not-present' }
+			| { kind: 'read-error' }
+			| { kind: 'invalid' }
+			| { kind: 'valid', integrationRef: string }
 
-	async function evaluateBootstrapBoundary(treeMap: Map<string, GitTreeEntry>): Promise<BootstrapBoundaryOutcome> {
+	/**
+	 * Decode `.engineering/ef.yaml` at `treeMap` and require a regular Git
+	 * file mode (Finding 10: not a symlink, gitlink, or directory -- a plain
+	 * `treeMap.get` lookup by its exact literal path can never accidentally
+	 * match a `pathValid: false` placeholder entry, so no separate
+	 * `pathValid` check is needed here) and a successfully decoded
+	 * `ef/config@1` document, returning its declared `repository.integration_ref`
+	 * on success (Finding 11) without yet judging whether that value is the
+	 * "right" one -- that judgment differs at the two call sites below (the
+	 * boundary compares it against `expectedIntegrationRef`; the per-commit
+	 * drift check compares it against `bootstrapIntegrationRef`), so is left
+	 * to each caller.
+	 */
+	async function evaluateEfYamlConfig(treeMap: Map<string, GitTreeEntry>): Promise<EfYamlConfigOutcome> {
 		const efYamlEntry = treeMap.get(EF_YAML_PATH)
 		if (!efYamlEntry)
-			return 'not-present'
+			return { kind: 'not-present' }
 
-		// From here on this commit IS the claimed boundary -- every path below
-		// returns 'invalid' or 'read-error', never falls through to let the
-		// caller consider a later commit instead.
 		if (!isRegularBlobEntry(efYamlEntry))
-			return 'invalid'
+			return { kind: 'invalid' }
 
 		const configBlobResult = await git.readBlob(efYamlEntry.oid)
 		if (configBlobResult.kind === 'git-unavailable' || configBlobResult.kind === 'error')
-			return 'read-error'
+			return { kind: 'read-error' }
 		if (configBlobResult.kind !== 'resolved')
 			// The tree listing already proved this entry is a blob; `missing`/
 			// `not-a-blob` here is repository/read corruption on an object
 			// already known to exist, never proof of absence or invalidity.
-			return 'read-error'
+			return { kind: 'read-error' }
 
 		const configText = utf8Decoder.decode(configBlobResult.bytes)
-		if (decodeConfig(configText, EF_YAML_PATH).config === null)
+		const decodedConfig = decodeConfig(configText, EF_YAML_PATH)
+		if (decodedConfig.config === null)
+			return { kind: 'invalid' }
+
+		return { kind: 'valid', integrationRef: decodedConfig.config.repository.integrationRef }
+	}
+
+	type BootstrapBoundaryOutcome = 'not-present' | 'valid' | 'invalid' | 'read-error'
+
+	async function evaluateBootstrapBoundary(treeMap: Map<string, GitTreeEntry>): Promise<BootstrapBoundaryOutcome> {
+		// From here on, once `ef.yaml` is present at all, this commit IS the
+		// claimed boundary -- every path below returns 'invalid' or
+		// 'read-error', never falls through to let the caller consider a
+		// later commit instead.
+		const efYamlOutcome = await evaluateEfYamlConfig(treeMap)
+		if (efYamlOutcome.kind === 'not-present')
+			return 'not-present'
+		if (efYamlOutcome.kind === 'read-error')
+			return 'read-error'
+		if (efYamlOutcome.kind === 'invalid')
 			return 'invalid'
+		// Finding 11: `integration_ref` is fixed by bootstrap and MUST NOT
+		// change within Core v1 (11-filesystem-and-config.md). When the caller
+		// told us which ref it selected, a bootstrap config that is otherwise
+		// perfectly valid but declares a DIFFERENT ref is exactly as
+		// untrustworthy for this purpose as a config that fails to decode at
+		// all -- accepting it would let a config that was schema-validly
+		// edited to select a different ref be silently accepted merely
+		// because THAT ref's own history happens to be internally consistent.
+		if (expectedIntegrationRef !== undefined && efYamlOutcome.integrationRef !== expectedIntegrationRef)
+			return 'invalid'
+		bootstrapIntegrationRef = efYamlOutcome.integrationRef
 
 		const projectEntry = treeMap.get(PROJECT_MD_PATH)
 		if (!isRegularBlobEntry(projectEntry))
@@ -360,7 +518,59 @@ export async function computeHistory(
 			if (boundary === 'invalid')
 				return { kind: 'untrusted-data' }
 			reachedBootstrap = true
+			// The boundary commit's `ef.yaml` was just proven (by
+			// `evaluateBootstrapBoundary` above, via `evaluateEfYamlConfig`) to
+			// be a regular blob decoding to a valid config, and
+			// `bootstrapIntegrationRef` now holds its declared
+			// `integration_ref` (matched against `expectedIntegrationRef`
+			// already, when supplied). Record its OID as the baseline every
+			// later commit's own `ef.yaml` OID is compared against (Finding 11).
+			previousEfYamlOid = treeMap.get(EF_YAML_PATH)?.oid
 		}
+		else {
+			// Finding 11: `integration_ref` is fixed by bootstrap and MUST NOT
+			// change within Core v1 -- checked here regardless of whether
+			// `expectedIntegrationRef` was supplied at all, purely against
+			// `bootstrapIntegrationRef` (this SAME walk's own bootstrap
+			// commit's declared ref): a self-consistency requirement that
+			// needs no external input. Re-validate only when THIS commit's own
+			// `.engineering/ef.yaml` blob actually changed since the last
+			// commit this walk checked it at -- an unchanged blob was already
+			// proven to declare `bootstrapIntegrationRef` (either at the
+			// boundary, or at whichever later commit last changed it), so
+			// re-decoding it again here would be redundant, not more correct.
+			const efYamlEntry = treeMap.get(EF_YAML_PATH)
+			if (efYamlEntry?.oid !== previousEfYamlOid) {
+				const configOutcome = await evaluateEfYamlConfig(treeMap)
+				if (configOutcome.kind === 'read-error')
+					return { kind: 'history-unavailable' }
+				// `'not-present'` here means the control file the walk has
+				// already proven authoritative EF state depends on has been
+				// REMOVED at a later commit -- unlike the pre-boundary probe
+				// (where absence just means "not yet"), this commit is
+				// already known to be part of the authoritative EF-bearing
+				// sequence, so its disappearance (or its replacement by a
+				// config that fails to decode) makes this commit's state
+				// untrustworthy.
+				if (configOutcome.kind === 'not-present' || configOutcome.kind === 'invalid')
+					return { kind: 'untrusted-data' }
+				// The retarget check itself: this later commit's own declared
+				// `integration_ref` MUST still equal whatever the walk's
+				// bootstrap commit declared.
+				if (configOutcome.integrationRef !== bootstrapIntegrationRef)
+					return { kind: 'untrusted-data' }
+				previousEfYamlOid = efYamlEntry?.oid
+			}
+		}
+
+		// Finding 10 (second omission variant): checked once per consumed
+		// commit -- an invalid-UTF-8 path anywhere beneath `.engineering`
+		// (not only inside `.engineering/chg/`) is invisible to every
+		// prefix/exact-match scan below (its decoded `path` can never equal
+		// or start with a genuine managed path), so it must be surfaced here
+		// instead of silently passing through as though it did not exist.
+		if (hasInvalidUtf8PathUnderEngineering(treeMap))
+			return { kind: 'untrusted-data' }
 
 		const currentEnvelopeLookup = await envelopeAt(treeMap, canonicalPath)
 		if (currentEnvelopeLookup.kind === 'error')
@@ -435,10 +645,15 @@ export async function computeHistory(
 
 		// ---- Engineering effects: newly completed CHGs targeting this Artifact ----
 		const currentChgStatus = new Map<string, Status>()
-		for (const [path, entry] of treeMap) {
-			if (entry.type !== 'blob' || !path.startsWith('.engineering/chg/') || !path.endsWith('.md'))
+		for (const path of treeMap.keys()) {
+			if (!path.startsWith('.engineering/chg/') || !path.endsWith('.md'))
 				continue
 
+			// Finding 10: candidacy is now path-shape only -- `envelopeAt`
+			// itself applies the regular Git mode classification (a
+			// symlink-mode `120000` blob, gitlink, or directory sitting at
+			// this exact CHG-shaped path returns `'error'`, never silently
+			// treated as though no CHG existed there).
 			const chgLookup = await envelopeAt(treeMap, path)
 			if (chgLookup.kind === 'error')
 				return { kind: 'untrusted-data' }

@@ -3,7 +3,10 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { loadSnapshotFromWorkingTree } from '../application/snapshot'
 import { createGitExecutor } from '../git/executor'
+import { findWorktreeRoot } from '../git/repository'
+import { checkWorkingDirectoryAssociation } from '../repository/discovery'
 import { resolveProject } from './project-context'
 
 describe('resolveProject', () => {
@@ -145,5 +148,67 @@ describe('resolveProject', () => {
 			.toBe(false)
 		expect(result.ok === false && result.reason)
 			.toBe('git-unavailable')
+	})
+
+	// ---- Finding 5: an in-place ef.yaml rewrite between discovery's own ------
+	// ---- association decision and a later snapshot load ----------------------
+
+	// `discoverProject`'s own implicit-association decision (`resolveProject`
+	// here) is made against its OWN, first read of `ef.yaml` (config A, which
+	// declares `linked` as a linked repository, so `cwd` inside it resolves).
+	// An in-place rewrite to config B (no linked repositories at all) landing
+	// immediately afterward means the CURRENT, authoritative state of the
+	// project no longer associates this `cwd` with it at all. `resolveProject`
+	// itself cannot re-observe this (it already returned); the fix (Finding 5)
+	// is that a caller which goes on to load a snapshot -- the single,
+	// freshest config observation every command semantic must derive from,
+	// per `ProjectContext.config`'s own doc -- re-runs the EXACT association
+	// decision against THAT config via the exported, reusable
+	// `checkWorkingDirectoryAssociation` (extracted from `discoverProject`
+	// verbatim), rather than trusting discovery's now-stale `associated`
+	// verdict.
+	it('re-running the association decision against a snapshot load\'s fresher config reverses a stale verdict after ef.yaml is rewritten in place', async () => {
+		execFileSync('git', ['init', '-q', '-b', 'main', tempDir])
+		await fs.mkdir(path.join(tempDir, '.engineering'))
+		const configA = 'schema: ef/config@1\nrepository:\n  integration_ref: refs/heads/main\nlinked_repositories:\n  - id: linked\n    path: linked\n    role: implementation\n    required: true\nschemas:\n  artifact_write_major: 1\n'
+		const configB = 'schema: ef/config@1\nrepository:\n  integration_ref: refs/heads/main\nlinked_repositories: []\nschemas:\n  artifact_write_major: 1\n'
+		await fs.writeFile(path.join(tempDir, '.engineering', 'ef.yaml'), configA)
+
+		const linkedDir = path.join(tempDir, 'linked')
+		await fs.mkdir(linkedDir)
+		execFileSync('git', ['init', '-q', '-b', 'main', linkedDir])
+
+		const executor = createGitExecutor()
+		const resolved = await resolveProject({ cwd: linkedDir }, executor)
+		expect(resolved.ok)
+			.toBe(true)
+		if (!resolved.ok)
+			return
+		// Discovery's own (now stale) read associated `linkedDir` via config A's
+		// declared linked repository.
+		expect(resolved.context.config?.linkedRepositories)
+			.toHaveLength(1)
+
+		// The in-place rewrite: config B declares no linked repositories at all.
+		await fs.writeFile(path.join(tempDir, '.engineering', 'ef.yaml'), configB)
+
+		const loaded = await loadSnapshotFromWorkingTree(resolved.context.root)
+		expect(loaded.ok)
+			.toBe(true)
+		if (!loaded.ok)
+			return
+		// The snapshot's own, freshest read reflects the rewrite.
+		expect(loaded.snapshot.config.config?.linkedRepositories)
+			.toEqual([])
+
+		const association = await checkWorkingDirectoryAssociation(
+			{ cwd: linkedDir, candidateRoot: resolved.context.root, config: loaded.snapshot.config.config },
+			{ findWorktreeRoot: absolutePath => findWorktreeRoot(executor, absolutePath) },
+		)
+		// Re-running the decision against the snapshot's fresher config reverses
+		// discovery's own, now-stale `associated` verdict: `linkedDir` is no
+		// longer declared by the CURRENT, authoritative configuration.
+		expect(association)
+			.toEqual({ kind: 'unassociated' })
 	})
 })

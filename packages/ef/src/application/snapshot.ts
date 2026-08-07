@@ -34,7 +34,7 @@ import { severityOf } from '../domain/diagnostic-codes'
 import { decodeEnvelope } from '../domain/envelope'
 import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatter'
 import { extractSections, parseBody } from '../parsing/markdown'
-import { isDirectory, isSymlink, readRegularFileNoFollow, walkDirectory } from '../platform/fs-facts'
+import { directoryIdentity, isDirectory, isSymlink, readRegularFileNoFollow, sameFileIdentity, walkDirectory } from '../platform/fs-facts'
 import { decodeConfig } from '../repository/config'
 import { listArtifactFiles } from '../repository/layout'
 
@@ -111,6 +111,23 @@ export type LoadSnapshotFailureReason
 		| 'read-error'
 		| 'git-unavailable'
 		| 'commit-not-found'
+		/**
+		 * `.engineering`'s identity, as re-checked against a caller-supplied
+		 * `expectedEngineeringIdentity` (Finding 4, "single observation"),
+		 * mismatched -- either immediately before the directory walk began, or
+		 * after every read completed. This means `.engineering` was, at one of
+		 * those two points, NOT the exact directory a prior observation (e.g.
+		 * `repository/discovery.ts`'s own) approved: it is no longer a real,
+		 * non-symlink directory at all, or it now denotes a genuinely different
+		 * `dev`/`ino`. Distinct from `engineering-missing` (which means no such
+		 * prior approval exists to compare against, or `.engineering` was never
+		 * a directory in the first place) and from `read-error` (an unexpected
+		 * exception during the load itself): this specifically means the load
+		 * refused to trust a directory presented under a different identity than
+		 * the one already approved, rather than silently walking and reading
+		 * whatever now sits at that path.
+		 */
+		| 'engineering-swapped'
 
 export interface LoadSnapshotFailure {
 	ok: false
@@ -165,10 +182,75 @@ export interface SnapshotFsDeps {
 	isSymlink: (target: string) => Promise<boolean>
 	walkDirectory: (root: string) => Promise<WalkEntry[]>
 	readRegularFileNoFollow: (target: string, expectedIdentity?: FileIdentity, containmentRoot?: string) => Promise<ReadRegularFileNoFollowResult>
+	/**
+	 * `.engineering`'s `lstat`-derived identity if and only if it is, right
+	 * now, a real, non-symlink directory (see `platform/fs-facts.ts`'s own
+	 * doc); used by the Finding 4 pre-walk/post-read identity verification
+	 * below when a caller supplies `expectedEngineeringIdentity`.
+	 */
+	directoryIdentity: (target: string) => Promise<FileIdentity | undefined>
 }
 
 /** Real filesystem access via `platform/fs-facts.ts`. */
-export const defaultSnapshotFsDeps: SnapshotFsDeps = { isDirectory, isSymlink, walkDirectory, readRegularFileNoFollow }
+export const defaultSnapshotFsDeps: SnapshotFsDeps = { isDirectory, isSymlink, walkDirectory, readRegularFileNoFollow, directoryIdentity }
+
+export interface LoadSnapshotFromWorkingTreeOptions {
+	/**
+	 * `.engineering`'s identity as already observed by a prior, independent
+	 * caller -- normally `repository/discovery.ts`'s own `directoryIdentity`
+	 * check, threaded here via `cli/project-context.ts`'s
+	 * `ProjectContext.engineeringIdentity` (Finding 4, "single observation").
+	 *
+	 * When supplied, this exact identity is re-verified twice: immediately
+	 * BEFORE the directory walk begins, and again AFTER every subsequent read
+	 * completes. Either mismatch fails the whole load as `engineering-swapped`
+	 * rather than proceeding.
+	 *
+	 * Rationale (Finding 4): a prior implementation bound every INDIVIDUALLY
+	 * OBSERVED file's later read to that file's own walk-time identity
+	 * (`readObservedFile` below), but had no check at all on `.engineering`
+	 * itself. This let an attacker replace `.engineering`, transiently, with a
+	 * DIFFERENT real directory that hard-links the SAME inodes for every file
+	 * they want to keep readable (so every individual per-file identity check
+	 * still passes) while simply OMITTING a file they want invisible (e.g. an
+	 * Artifact) -- that omitted file has no `WalkEntry` at all, is never read,
+	 * and is never counted incomplete, so the load returned `ok: true` over a
+	 * silently partial graph. The replacement directory is necessarily a
+	 * DIFFERENT real directory (hard links cannot alias the containing
+	 * directory itself, only files within it), so its identity can never
+	 * equal `expectedEngineeringIdentity` for as long as it remains in place.
+	 *
+	 * HONEST RESIDUAL WINDOW -- Node exposes no `openat`-style,
+	 * file-descriptor-relative primitive to bind the recursive directory walk
+	 * itself to an already-verified directory handle (see
+	 * `platform/fs-facts.ts`'s `readRegularFileNoFollow` doc for the identical
+	 * limitation on a single file read); the two checks here are therefore
+	 * necessarily point-in-time `lstat`s that bracket the ENTIRE walk-and-read
+	 * sequence, not a single atomic operation. An attacker who swaps
+	 * `.engineering` for the omitting replacement directory strictly AFTER the
+	 * pre-walk check, and fully restores the ORIGINAL directory to the
+	 * ORIGINAL path strictly BEFORE the post-read check runs, is not detected
+	 * by either check -- both observe the genuine, unchanged `.engineering`.
+	 * This is the same class of gap `readRegularFileNoFollow`'s own
+	 * `containmentRoot` doc already documents for a single ancestor, widened
+	 * here to span the whole walk because narrowing it further would require
+	 * binding the walk itself to a directory capability inside
+	 * `platform/fs-facts.ts`'s `walkDirectory`, which this fix does not
+	 * change. Omitting `expectedEngineeringIdentity` entirely preserves the
+	 * exact prior behavior (no such verification at all), for a caller with no
+	 * prior observation to bind to.
+	 */
+	expectedEngineeringIdentity?: FileIdentity
+}
+
+/**
+ * `.engineering`'s current identity must be a real, non-symlink directory
+ * matching `expected` exactly -- see {@link LoadSnapshotFromWorkingTreeOptions.expectedEngineeringIdentity}.
+ */
+async function engineeringIdentityStillMatches(deps: SnapshotFsDeps, engineeringPath: string, expected: FileIdentity): Promise<boolean> {
+	const identity = await deps.directoryIdentity(engineeringPath)
+	return identity !== undefined && sameFileIdentity(identity, expected)
+}
 
 /**
  * Read one file this load already observed via `walkDirectory` (`walkEntry`),
@@ -218,12 +300,20 @@ async function readObservedFile(deps: SnapshotFsDeps, absoluteTarget: string, en
  * Git worktree root that directly contains `.engineering`; this function
  * re-verifies only that `.engineering` is a directory before reading it.
  */
-export async function loadSnapshotFromWorkingTree(projectRoot: string, deps: SnapshotFsDeps = defaultSnapshotFsDeps): Promise<LoadSnapshotResult> {
+export async function loadSnapshotFromWorkingTree(projectRoot: string, deps: SnapshotFsDeps = defaultSnapshotFsDeps, options: LoadSnapshotFromWorkingTreeOptions = {}): Promise<LoadSnapshotResult> {
 	try {
 		const engineeringPath = path.join(projectRoot, ENGINEERING_DIR)
 
 		if (!(await deps.isDirectory(engineeringPath)))
 			return { ok: false, reason: 'engineering-missing', message: `'${engineeringPath}' is not a directory.` }
+
+		// Finding 4, PRE-verification: immediately before the walk starts,
+		// `.engineering` must still be exactly the directory a prior observation
+		// approved. See `LoadSnapshotFromWorkingTreeOptions.expectedEngineeringIdentity`'s
+		// doc for what this does and does not close.
+		if (options.expectedEngineeringIdentity !== undefined && !(await engineeringIdentityStillMatches(deps, engineeringPath, options.expectedEngineeringIdentity))) {
+			return { ok: false, reason: 'engineering-swapped', message: `'${engineeringPath}' no longer matches the directory identity already approved for this project before its contents were enumerated.` }
+		}
 
 		const walked = await deps.walkDirectory(engineeringPath)
 
@@ -269,6 +359,15 @@ export async function loadSnapshotFromWorkingTree(projectRoot: string, deps: Sna
 		const resourceFiles: SnapshotResourceFile[] = [...entryKinds.entries()]
 			.filter(([entryPath]) => isUnderResourceRoot(entryPath))
 			.map(([entryPath, kind]) => ({ path: entryPath, kind }))
+
+		// Finding 4, POST-verification: after every read has completed,
+		// `.engineering` must STILL be exactly the directory a prior
+		// observation approved -- narrowing (never eliminating; see the
+		// option's own doc) the window in which the walk above could have
+		// enumerated a different, transiently-substituted directory.
+		if (options.expectedEngineeringIdentity !== undefined && !(await engineeringIdentityStillMatches(deps, engineeringPath, options.expectedEngineeringIdentity))) {
+			return { ok: false, reason: 'engineering-swapped', message: `'${engineeringPath}' no longer matches the directory identity already approved for this project after its contents were read.` }
+		}
 
 		return {
 			ok: true,

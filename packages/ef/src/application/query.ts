@@ -99,6 +99,17 @@ export interface HistoryQueryContext {
 	git: GitRepository
 	/** The operation-start captured OID the configured `integration_ref` resolved to (10-query-and-trace.md "Query snapshot"). */
 	integrationRefOid: string
+	/**
+	 * The ref NAME `integrationRefOid` was resolved from (e.g.
+	 * `refs/heads/main`), threaded into `computeHistory`'s
+	 * `expectedIntegrationRef` (11-filesystem-and-config.md, Finding 11) so
+	 * the walked history's boundary commit is required to declare exactly
+	 * this ref, not merely some `.engineering/ef.yaml`-declared ref chosen
+	 * after the fact. Required (not optional) here: this is the one call site
+	 * that has the ref name available, so there is no reason to leave the
+	 * check dormant.
+	 */
+	integrationRef: string
 }
 
 export interface QueryContext {
@@ -200,12 +211,41 @@ function graphTrustworthyFailure(context: QueryContext, kind: QueryKind): QueryR
  * `projectionLossArtifactIds` check at their own call sites, since those
  * kinds project an Artifact's raw (unsanitized) envelope rather than
  * traversing the sanitized graph.
+ *
+ * `typeSet` is the exact set of relation types THIS traversal actually reads
+ * (seventh-round Finding 9, extending sixth-round Finding 9's per-type
+ * narrowing from `edgeTrustLocalFailure` to this global gate too): a typed
+ * loss elsewhere in the graph only gates when its recorded relation type(s)
+ * actually intersect `typeSet` -- a `governed-by`-only semantic loss on some
+ * unrelated Artifact must not block an incoming traversal restricted to
+ * `derived-from`, for example. A truly UNTYPED loss (`edgeLossUntypedArtifactIds`,
+ * or a semantic-loss diagnostic this module defensively could not attribute a
+ * type to) still gates unconditionally, regardless of `typeSet`: an
+ * `incoming`/`both` read is derived from every Artifact's outgoing array, and
+ * an untyped loss cannot be ruled out as affecting any of them.
  */
-function edgeTrustGlobalFailure(context: QueryContext, kind: QueryKind): QueryResult | undefined {
-	const { edgeLossArtifactIds, semanticEdgeLossArtifactIds } = context.validation
-	if (edgeLossArtifactIds.size === 0 && semanticEdgeLossArtifactIds.size === 0)
-		return undefined
-	return failure(kind, 'EF-QRY-013', 'An Artifact\'s declared relations could not be completely sanitized, or were semantically invalid, elsewhere in the graph, so the requested relation graph would not be trustworthy.')
+function edgeTrustGlobalFailure(context: QueryContext, kind: QueryKind, typeSet: ReadonlySet<string>): QueryResult | undefined {
+	const { edgeLossUntypedArtifactIds, edgeLossRelationTypesBySourceId, semanticEdgeLossArtifactIds, semanticEdgeLossRelationTypesBySourceId } = context.validation
+
+	if (edgeLossUntypedArtifactIds.size > 0)
+		return failure(kind, 'EF-QRY-013', 'An Artifact\'s declared relations could not be completely sanitized elsewhere in the graph, so the requested relation graph would not be trustworthy.')
+
+	for (const [id, types] of edgeLossRelationTypesBySourceId) {
+		if ([...types].some(type => typeSet.has(type)))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' has a relations entry of a type this traversal reads that could not be completely sanitized elsewhere in the graph, so the requested relation graph would not be trustworthy.`)
+	}
+
+	for (const id of semanticEdgeLossArtifactIds) {
+		const typedSemanticLoss = semanticEdgeLossRelationTypesBySourceId.get(id)
+		// Every `semanticEdgeLossArtifactIds` cause is typed in practice
+		// (`snapshot-validation.ts`'s field doc); this untyped fallback stays
+		// conservative defensively rather than silently narrowing a fact this
+		// module cannot actually attribute a type to.
+		if (!typedSemanticLoss || [...typedSemanticLoss].some(type => typeSet.has(type)))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' has a semantically invalid relation of a type this traversal reads elsewhere in the graph, so the requested relation graph would not be trustworthy.`)
+	}
+
+	return undefined
 }
 
 /**
@@ -266,6 +306,29 @@ function projectionLossNodeFailure(context: QueryContext, kind: QueryKind, nodeI
 	for (const id of nodeIds) {
 		if (context.validation.projectionLossArtifactIds.has(id))
 			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- part of this result's projected node set -- declares structured content that could not be completely loaded, so its projected summary would not be trustworthy.`)
+	}
+	return undefined
+}
+
+/**
+ * Seventh-round Finding 6: 10-query-and-trace.md fixes a projected
+ * Artifact's `path` as ITS canonical, project-relative path, but
+ * `buildArtifactSummary`/`buildArtifactFull` project the actual discovered
+ * path verbatim (Finding A: raw, unsanitized projection). An Artifact in
+ * `pathTrustLossArtifactIds` (an `EF-ID-005` filename mismatch, an `EF-ID-014`
+ * wrong-canonical-directory finding, or an artifact-path `EF-FS-006`;
+ * `snapshot-validation.ts`'s field doc) therefore has an explicitly
+ * non-canonical projected `path` -- tracked SEPARATELY from
+ * `projectionLossArtifactIds` (the untrustworthy fact here is specifically
+ * the `path` field, not the envelope content those causes corrupt), but
+ * gated the exact same per-node way: only a result that would actually
+ * project this specific Artifact (a `lookup`/`list`/`search` result, or a
+ * graph traversal's node set) is untrustworthy, never an unrelated result.
+ */
+function pathTrustNodeFailure(context: QueryContext, kind: QueryKind, nodeIds: Iterable<string>): QueryResult | undefined {
+	for (const id of nodeIds) {
+		if (context.validation.pathTrustLossArtifactIds.has(id))
+			return failure(kind, 'EF-QRY-013', `Artifact '${id}' -- part of this result's projected node set -- has a non-canonical file path, so its projected 'path' field would not be trustworthy.`)
 	}
 	return undefined
 }
@@ -394,6 +457,13 @@ function handleLookup(context: QueryContext, request: LookupQueryRequest): Query
 	// as authoritative.
 	if (context.validation.projectionLossArtifactIds.has(record.id))
 		return failure('lookup', 'EF-QRY-013', `Artifact '${record.id}' declares structured content that could not be completely loaded, so its projected result would not be trustworthy.`)
+
+	// Finding 6 (seventh-round): this record's own discovered `path` is
+	// explicitly non-canonical (`pathTrustNodeFailure`'s doc); the spec fixes
+	// a projected `path` as canonical, so this lookup cannot report
+	// `complete: true` while projecting it.
+	if (context.validation.pathTrustLossArtifactIds.has(record.id))
+		return failure('lookup', 'EF-QRY-013', `Artifact '${record.id}' has a non-canonical file path, so its projected 'path' field would not be trustworthy.`)
 
 	const artifact = projection === 'full'
 		? buildArtifactFull(record.envelope, record.path, bodyTextFor(context.snapshot, record.path))
@@ -678,6 +748,13 @@ function handleList(context: QueryContext, request: ListQueryRequest): QueryResu
 	if (paged.some(record => context.validation.projectionLossArtifactIds.has(record.id)))
 		return failure('list', 'EF-QRY-013', 'One or more returned Artifacts declare structured content that could not be completely loaded, so this result would not be trustworthy.')
 
+	// Finding 6 (seventh-round): same per-returned-Artifact scoping as above,
+	// for an Artifact whose own `path` field is explicitly non-canonical
+	// (`pathTrustNodeFailure`'s doc) -- path trust does not affect
+	// filter/pagination membership, only the projected result.
+	if (paged.some(record => context.validation.pathTrustLossArtifactIds.has(record.id)))
+		return failure('list', 'EF-QRY-013', 'One or more returned Artifacts have a non-canonical file path, so this result\'s projected \'path\' field(s) would not be trustworthy.')
+
 	return {
 		schema: 'ef/query-result@1',
 		kind: 'list',
@@ -726,9 +803,25 @@ function handleSearch(context: QueryContext, request: SearchQueryRequest): Query
 	// all, so it cannot affect matching here (an affected Artifact that still
 	// ends up in the returned page is caught by the per-page check below
 	// instead).
+	// Seventh-round Finding 7: search reads every Artifact's best-effort
+	// decoded body text (`bodyTextFor`/`executeSearch`'s own body surface,
+	// unconditionally, for every Artifact) in addition to its
+	// title/summary/tags/resource surfaces above -- an invalid UTF-8 byte
+	// anywhere in an Artifact's raw file bytes (`byteDecodingLossArtifactIds`,
+	// frontmatter OR body) replaces at least one character with U+FFFD in
+	// whichever surface it falls in. When that replacement falls inside the
+	// exact token a request searches for, the corrupted Artifact never
+	// matches and so never reaches `data.results` at all -- the per-result
+	// `projectionLossArtifactIds` check below can only ever see an Artifact
+	// that WAS returned, so it can never catch this loss. Unlike `list`
+	// (which never reads the body at all), there is no unsearched surface to
+	// scope this to: every search reads every Artifact's body by definition,
+	// so this is a whole-request membership risk exactly like tag/
+	// envelope-wide loss above.
 	const searchMembershipRisk = new Set<string>([
 		...context.validation.tagLossArtifactIds,
 		...context.validation.envelopeWideLossArtifactIds,
+		...context.validation.byteDecodingLossArtifactIds,
 		...[...context.validation.resourceFieldLossById.keys()].filter(id => hasRelevantResourceFieldLoss(context.validation, id, SEARCH_RESOURCE_SURFACE_FIELDS)),
 	])
 	if (searchMembershipRisk.size > 0)
@@ -741,6 +834,12 @@ function handleSearch(context: QueryContext, request: SearchQueryRequest): Query
 	// not affect search matching but does still affect the projected output).
 	if (data.results.some(entry => context.validation.projectionLossArtifactIds.has(entry.artifact.id)))
 		return failure('search', 'EF-QRY-013', 'One or more returned Artifacts declare structured content that could not be completely loaded, so this result would not be trustworthy.')
+
+	// Finding 6 (seventh-round): same per-returned-Artifact scoping, for an
+	// Artifact whose own `path` field is explicitly non-canonical
+	// (`pathTrustNodeFailure`'s doc).
+	if (data.results.some(entry => context.validation.pathTrustLossArtifactIds.has(entry.artifact.id)))
+		return failure('search', 'EF-QRY-013', 'One or more returned Artifacts have a non-canonical file path, so this result\'s projected \'path\' field(s) would not be trustworthy.')
 
 	return { schema: 'ef/query-result@1', kind: 'search', complete: true, data, diagnostics: [] }
 }
@@ -767,12 +866,16 @@ function handleRelations(context: QueryContext, request: RelationsQueryRequest):
 	if (untrustworthy)
 		return untrustworthy
 
+	const typeSet = new Set<string>(requestedTypes.length > 0 ? requestedTypes : RELATION_TYPES)
+
 	// Finding C: 'incoming'/'both' reads incoming edges, derived project-wide
 	// from every Artifact's outgoing array, so it stays globally gated. Purely
 	// 'outgoing' is scoped below (Finding 8) to exactly the one outgoing array
-	// this traversal reads: the requested Artifact's own.
+	// this traversal reads: the requested Artifact's own. Seventh-round
+	// Finding 9: the global gate is itself narrowed to `typeSet`, the exact
+	// relation types this request reads.
 	if (direction === 'incoming' || direction === 'both') {
-		const untrustworthyRelationData = edgeTrustGlobalFailure(context, 'relations')
+		const untrustworthyRelationData = edgeTrustGlobalFailure(context, 'relations', typeSet)
 		if (untrustworthyRelationData)
 			return untrustworthyRelationData
 	}
@@ -780,7 +883,6 @@ function handleRelations(context: QueryContext, request: RelationsQueryRequest):
 	if (!context.validation.byId.has(request.id))
 		return failure('relations', 'EF-QRY-014', `Artifact '${request.id}' does not exist.`)
 
-	const typeSet = new Set<string>(requestedTypes.length > 0 ? requestedTypes : RELATION_TYPES)
 	const result = directRelations(request.id, direction as Direction, typeSet, context.validation.byId, context.validation.incomingRelations)
 	if (!result)
 		return failure('relations', 'EF-QRY-007', 'The requested relation graph is invalid.')
@@ -800,6 +902,12 @@ function handleRelations(context: QueryContext, request: RelationsQueryRequest):
 	const projectionFailure = projectionLossNodeFailure(context, 'relations', result.nodeIds)
 	if (projectionFailure)
 		return projectionFailure
+
+	// Finding 6 (seventh-round): same per-node scoping, for a node whose own
+	// `path` field is explicitly non-canonical.
+	const pathTrustFailure = pathTrustNodeFailure(context, 'relations', result.nodeIds)
+	if (pathTrustFailure)
+		return pathTrustFailure
 
 	return {
 		schema: 'ef/query-result@1',
@@ -838,9 +946,13 @@ function handleTrace(context: QueryContext, request: TraceQueryRequest): QueryRe
 	if (untrustworthyTrace)
 		return untrustworthyTrace
 
+	const typeSet = new Set(request.types)
+
 	// Finding C: same 'incoming'/'both' vs 'outgoing' split as `handleRelations`.
+	// Seventh-round Finding 9: the global gate is itself narrowed to
+	// `typeSet`, the exact relation types this trace reads.
 	if (request.direction === 'incoming' || request.direction === 'both') {
-		const untrustworthyTraceRelationData = edgeTrustGlobalFailure(context, 'trace')
+		const untrustworthyTraceRelationData = edgeTrustGlobalFailure(context, 'trace', typeSet)
 		if (untrustworthyTraceRelationData)
 			return untrustworthyTraceRelationData
 	}
@@ -850,8 +962,6 @@ function handleTrace(context: QueryContext, request: TraceQueryRequest): QueryRe
 		return failure('trace', 'EF-QRY-014', `Artifact ID(s) not found: ${dedupeSortIds(missing)
 			.join(', ')}.`)
 	}
-
-	const typeSet = new Set(request.types)
 	const result = traceGraph(request.roots, request.direction as Direction, typeSet, request.maxDepth, context.validation.byId, context.validation.incomingRelations)
 	if (!result)
 		return failure('trace', 'EF-QRY-007', 'The requested relation graph is invalid.')
@@ -874,6 +984,12 @@ function handleTrace(context: QueryContext, request: TraceQueryRequest): QueryRe
 	const projectionFailure = projectionLossNodeFailure(context, 'trace', result.depths.keys())
 	if (projectionFailure)
 		return projectionFailure
+
+	// Finding 6 (seventh-round): same per-node scoping, for a node whose own
+	// `path` field is explicitly non-canonical.
+	const pathTrustFailure = pathTrustNodeFailure(context, 'trace', result.depths.keys())
+	if (pathTrustFailure)
+		return pathTrustFailure
 
 	return {
 		schema: 'ef/query-result@1',
@@ -905,10 +1021,17 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 	if (untrustworthyImpact)
 		return untrustworthyImpact
 
+	const includeReferences = request.includeReferences ?? false
+	const typeSet = new Set<string>(CORE_IMPACT_TYPES)
+	if (includeReferences)
+		typeSet.add('references')
+
 	// Finding C: impact traversal direction is always incoming
 	// (10-query-and-trace.md "Traversal direction is incoming"), so it stays
-	// globally gated regardless of request options.
-	const untrustworthyImpactRelationData = edgeTrustGlobalFailure(context, 'impact')
+	// globally gated regardless of request options. Seventh-round Finding 9:
+	// the global gate is itself narrowed to `typeSet`, the exact relation
+	// types this impact traversal reads.
+	const untrustworthyImpactRelationData = edgeTrustGlobalFailure(context, 'impact', typeSet)
 	if (untrustworthyImpactRelationData)
 		return untrustworthyImpactRelationData
 
@@ -918,13 +1041,8 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 			.join(', ')}.`)
 	}
 
-	const includeReferences = request.includeReferences ?? false
 	const includeNonCurrent = request.includeNonCurrent ?? false
 	const resolveCurrentFlag = request.resolveCurrent ?? false
-
-	const typeSet = new Set<string>(CORE_IMPACT_TYPES)
-	if (includeReferences)
-		typeSet.add('references')
 
 	let resolvedRoots: string[]
 	let resolution: { nodes: ArtifactSummaryProjection[], edges: RelationEdgeData[] }
@@ -979,9 +1097,16 @@ function handleImpact(context: QueryContext, request: ImpactQueryRequest): Query
 	// Finding 4: every embedded node -- both the impact traversal's own nodes
 	// and (when requested) the resolve_current sub-resolution's nodes -- is
 	// itself a summary projection.
-	const projectionFailure = projectionLossNodeFailure(context, 'impact', [...resolution.nodes.map(n => n.id), ...traversal.includedIds])
+	const impactNodeIds = [...resolution.nodes.map(n => n.id), ...traversal.includedIds]
+	const projectionFailure = projectionLossNodeFailure(context, 'impact', impactNodeIds)
 	if (projectionFailure)
 		return projectionFailure
+
+	// Seventh-round Finding 6: same per-node scoping, for a node whose own
+	// `path` field is explicitly non-canonical.
+	const pathTrustFailure = pathTrustNodeFailure(context, 'impact', impactNodeIds)
+	if (pathTrustFailure)
+		return pathTrustFailure
 
 	return {
 		schema: 'ef/query-result@1',
@@ -1037,6 +1162,12 @@ function handleResolveCurrent(context: QueryContext, request: ResolveCurrentQuer
 	if (projectionFailure)
 		return projectionFailure
 
+	// Seventh-round Finding 6: same per-node scoping, for a node whose own
+	// `path` field is explicitly non-canonical.
+	const pathTrustFailure = pathTrustNodeFailure(context, 'resolve-current', outcome.result.nodeIds)
+	if (pathTrustFailure)
+		return pathTrustFailure
+
 	return {
 		schema: 'ef/query-result@1',
 		kind: 'resolve-current',
@@ -1070,7 +1201,7 @@ async function handleHistory(context: QueryContext, request: HistoryQueryRequest
 	if (!context.history)
 		return failure('history', 'EF-QRY-010', 'Required history context is unavailable.')
 
-	const outcome = await computeHistory(context.history.git, context.history.integrationRefOid, request.id, record.type, context.validation.byId)
+	const outcome = await computeHistory(context.history.git, context.history.integrationRefOid, request.id, record.type, context.validation.byId, context.history.integrationRef)
 	// `EF-QRY-010` ("Requested history context is unavailable",
 	// diagnostic-registry.md) covers the required Git history itself being
 	// inaccessible; `EF-QRY-013` ("Query cannot produce a complete

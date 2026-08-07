@@ -613,6 +613,9 @@ The filesystem and configuration diagnostic codes are:
 | `EF-FS-006` | error | Managed path violates Unicode NFC or exact-case requirements |
 | `EF-FS-007` | error | Required linked repository is missing |
 | `EF-FS-008` | error | Present linked repository is not an independent Git worktree at its configured root |
+| `EF-FS-009` | error | Missing or non-canonical `.engineering/.gitignore` control file |
+
+`EF-FS-009` requires the tracked control file to exist with exactly the four canonical entries in the order shown by this specification.
 
 `EF-FS-007` and `EF-FS-008` are emitted only by workspace validation.
 `EF-FS-004` applies to configured linked-repository paths only during workspace

@@ -728,12 +728,20 @@ describe('applyInitPlan', () => {
 				expect(await fs.readdir(path.join(outsideDir, '.tmp')))
 					.toEqual([])
 
-				// Cleanup removed only the dangling symlink left at the claimed
-				// path; the relocated original directory was never touched.
-				await expect(fs.lstat(engineeringPath))
-					.rejects.toThrow()
+				// Ownership of the claimed path is no longer provable (a fresh
+				// `lstat` sees a symlink, not the claimed directory), so cleanup
+				// must leave it -- and the relocated original directory -- entirely
+				// untouched rather than deleting a dangling symlink it cannot prove
+				// is safe to remove (Finding 1a: destructive cleanup is
+				// ownership-proven, never merely "whatever is left").
+				const linkStat = await fs.lstat(engineeringPath)
+				expect(linkStat.isSymbolicLink())
+					.toBe(true)
+				expect(await fs.readlink(engineeringPath))
+					.toBe(outsideDir)
 			}
 			finally {
+				await fs.rm(engineeringPath, { force: true })
 				await fs.rm(outsideDir, { recursive: true, force: true })
 			}
 		})
@@ -778,12 +786,69 @@ describe('applyInitPlan', () => {
 						.rejects.toThrow()
 				}
 
-				await expect(fs.lstat(engineeringPath))
-					.rejects.toThrow()
+				// Ownership of the claimed path is no longer provable, so cleanup
+				// leaves the dangling symlink (and the relocated original directory)
+				// completely untouched (Finding 1a).
+				const linkStat = await fs.lstat(engineeringPath)
+				expect(linkStat.isSymbolicLink())
+					.toBe(true)
+				expect(await fs.readlink(engineeringPath))
+					.toBe(outsideDir)
 			}
 			finally {
+				await fs.rm(engineeringPath, { force: true })
 				await fs.rm(outsideDir, { recursive: true, force: true })
 			}
+		})
+
+		// FINDING 1 (P0): the check-then-act pattern above is not enough on its
+		// own -- if the swap installs a genuinely different REAL directory (no
+		// symlink at all) triggered from INSIDE an injected write-step
+		// dependency, `verifyClaimIntact` still correctly fails, but the OLD
+		// `abort()` unconditionally called `removeTree(engineeringPath)`,
+		// recursively deleting a real directory this invocation never claimed.
+		// Destructive cleanup must re-prove ownership (identity, not merely "a
+		// check failed somewhere earlier") immediately before deleting anything.
+		it('leaves a real replacement directory (with its content) completely untouched when the claim is swapped mid-protocol for a different real directory this invocation never created', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const tmpPath = path.join(engineeringPath, '.tmp')
+
+			const victimDir = path.join(os.tmpdir(), `ef-init-victim-${Date.now()}-${Math.random()
+				.toString(36)
+				.slice(2)}`)
+			await fs.mkdir(victimDir)
+			await fs.writeFile(path.join(victimDir, 'important.txt'), 'do-not-delete')
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				mkdir: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.mkdir(targetPath)
+					if (targetPath === tmpPath) {
+						// Triggered from inside this injected write-step dependency
+						// itself (mid-protocol), not merely timed between two
+						// `verifyClaimIntact` checkpoints: destroy the claimed
+						// directory this invocation actually owns and put an
+						// unrelated, pre-populated real directory in its place.
+						await fs.rm(engineeringPath, { recursive: true, force: true })
+						await fs.rename(victimDir, engineeringPath)
+					}
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The replacement directory (and its pre-existing content) must be
+			// left exactly as the raced syscall itself left it: no deletion.
+			expect(await fs.readdir(engineeringPath))
+				.toEqual(['important.txt'])
+			expect(await fs.readFile(path.join(engineeringPath, 'important.txt'), 'utf8'))
+				.toBe('do-not-delete')
 		})
 	})
 })
