@@ -201,6 +201,14 @@ Result: passed
 `
 }
 
+// Eighth-round Finding 5 (see `PROJECT_MD`'s own comment above): every
+// required heading is unconditionally present regardless of status
+// (`requiresHeadingPresence` is unconditionally `true` for non-`change`
+// types), with real content so `requiresCompleteness` is satisfied whichever
+// status a caller substitutes in. `superseded` additionally requires a
+// meaningful, final `## Lifecycle` section (`EF-BODY-009`); a non-terminal
+// status must NOT carry one at all (`EF-BODY-010`), so the `active` variant
+// below has it stripped rather than merely swapping the `status:` field.
 const REQ_001_WITH_RESOURCE = `---
 schema: ef/requirement@1
 type: requirement
@@ -222,10 +230,36 @@ resources:
 ## Requirement
 
 Body text for REQ-001.
+
+## Rationale
+
+Rationale text for REQ-001.
+
+## Acceptance Criteria
+
+- REQ-001 behaves as described.
+
+## Lifecycle
+
+Superseded after REQ-002 was introduced as its replacement.
 `
 
-/** Same content as `REQ_001_WITH_RESOURCE`, but still `active` -- used while REQ-001's Resource is added before supersession. */
-const REQ_001_WITH_RESOURCE_ACTIVE = REQ_001_WITH_RESOURCE.replace('status: superseded', 'status: active')
+/** Same content as `REQ_001_WITH_RESOURCE`, but still `active` (no `Lifecycle` section, `EF-BODY-010`) -- used while REQ-001's Resource is added before supersession. */
+const REQ_001_WITH_RESOURCE_ACTIVE = REQ_001_WITH_RESOURCE
+	.replace('status: superseded', 'status: active')
+	.replace(/\n## Lifecycle\n\nSuperseded after REQ-002 was introduced as its replacement\.\n$/, '')
+
+/**
+ * Same content as `REQ_001_WITH_RESOURCE`, but with a valid `superseded-by`
+ * relation to REQ-002. Eleventh-round review Finding 2: every consumed
+ * authoritative commit is now fully snapshot-validated, which includes
+ * 05-supersession.md's own single-state invariants -- a `superseded` Artifact
+ * with no direct replacement is `EF-SUP-001`, error severity. Used only by
+ * the shared 7-commit fixture below (whose REQ-002 genuinely exists as a
+ * valid replacement target); other, isolated fixtures elsewhere in this file
+ * that reuse `REQ_001_WITH_RESOURCE` directly are unaffected by this constant.
+ */
+const REQ_001_SUPERSEDED_WITH_REPLACEMENT = REQ_001_WITH_RESOURCE.replace('relations: []', 'relations:\n  - type: superseded-by\n    target: REQ-002')
 
 describe('computeHistory', () => {
 	let tempDir: string
@@ -268,8 +302,12 @@ describe('computeHistory', () => {
 		oids.commit5 = commitAll(tempDir, 'add REQ-001 resource via CHG-003')
 
 		// Commit 6: CHG-002 (completed) modifies REQ-001 (active -> superseded).
+		// REQ-001 declares a `superseded-by` relation to REQ-002 -- required by
+		// 05-supersession.md ("a superseded Artifact has no direct replacement"
+		// is `EF-SUP-001`, now enforced by this walk's own full per-commit
+		// snapshot validation, eleventh-round review Finding 2).
 		await writeFile(tempDir, '.engineering/chg/CHG-002.md', chgMd('CHG-002', 'completed', '  - type: modifies\n    target: REQ-001'))
-		await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001_WITH_RESOURCE)
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', REQ_001_SUPERSEDED_WITH_REPLACEMENT)
 		oids.commit6 = commitAll(tempDir, 'supersede REQ-001 via CHG-002')
 
 		// Commit 7: control-file-only change (PROJECT aggregate), covered by a
@@ -531,7 +569,7 @@ describe('computeHistory', () => {
 			.toEqual({ kind: 'history-unavailable' })
 	})
 
-	it('fails the query with untrusted-data (does not silently treat the target as absent) when the target Artifact\'s own historical blob cannot be resolved/read', async () => {
+	it('fails the query with history-unavailable (does not silently treat the target as absent) when the target Artifact\'s own historical blob cannot be resolved/read', async () => {
 		const real = gitRepo()
 		const wrapped = wrapGitRepository(real, {
 			readTree: async (oid: string) => {
@@ -551,9 +589,15 @@ describe('computeHistory', () => {
 		// EXISTS as a tree entry at this historical commit -- this is an
 		// unreadable blob, not a genuine absence -- so the whole query must fail
 		// rather than silently falling back as if the target had never existed.
+		// Eleventh-round review Finding 2: commit3's COMPLETE tree is now
+		// materialized via the same `loadSnapshotFromCommit` pipeline the
+		// bootstrap boundary already used, so this unreadable blob fails that
+		// materialization outright (an execution/read failure, not a content
+		// validity finding) -- `history-unavailable`, consistent with every
+		// other blob/tree read failure this module already classifies that way.
 		const outcome = await computeHistory(wrapped, oids.commit3!, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 		expect(outcome)
-			.toEqual({ kind: 'untrusted-data' })
+			.toEqual({ kind: 'history-unavailable' })
 	})
 
 	it('does not report an engineering effect for a non-effect relation (references) alongside an effect relation on the same completed CHG', async () => {
@@ -613,48 +657,34 @@ describe('computeHistory', () => {
 })
 
 describe('computeHistory: PROJECT control-path availability', () => {
-	it('omits a control file from the PROJECT aggregate at a commit where it does not exist', async () => {
+	it('fails with untrusted-data when a required control file (.gitignore) is removed at a later, non-boundary commit, even with a matching completing CHG', async () => {
 		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-controls-')))
 		try {
 			git(dir, ['init', '-q', '-b', 'main'])
 			// Finding 5: the bootstrap commit MUST be a genuine, COMPLETE
 			// bootstrap -- every required control file already present in
-			// canonical form (`.gitignore` included) -- so, unlike before this
-			// round, `.gitignore` cannot legitimately be absent AT bootstrap
-			// itself. This still exercises `ownedPathsOf` correctly omitting a
-			// control path that is genuinely absent from a given historical
-			// commit's tree, just at a LATER, non-boundary commit instead (here,
-			// `.gitignore` is removed after a fully valid bootstrap).
+			// canonical form (`.gitignore` included).
 			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
 			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
 			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
-			const bootstrapOid = commitAll(dir, 'bootstrap, full control files')
+			commitAll(dir, 'bootstrap, full control files')
 			await fs.rm(path.join(dir, '.engineering/.gitignore'))
-			// Tenth-round review Finding 5(b): a PROJECT aggregate change
-			// (removing a control file changes PROJECT's own aggregate state,
-			// 07-change-transactions.md) with no completing CHG at all is now
-			// an exactly-once coverage violation, not a silent no-op -- a
-			// completing CHG declaring `modifies -> PROJECT` is required
-			// alongside the removal for this to remain `complete`.
+			// Eleventh-round review Finding 2: `.gitignore` is a required
+			// control file (11-filesystem-and-config.md) in EVERY authoritative
+			// commit, not only at bootstrap -- its absence here is `EF-FS-009`,
+			// error severity, in this LATER commit's own complete snapshot
+			// validation. A completing CHG declaring `modifies -> PROJECT`
+			// covers the aggregate CHANGE (tenth-round review Finding 5(b)'s
+			// exactly-once coverage requirement), but can never launder the
+			// removal of a required control file into a trustworthy
+			// authoritative state.
 			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: PROJECT'))
 			const controlRemovedOid = commitAll(dir, 'remove .gitignore via CHG-001')
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, controlRemovedOid, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
-			expect(outcome.kind)
-				.toBe('complete')
-			if (outcome.kind !== 'complete')
-				return
-			expect(outcome.commits.map(c => c.oid))
-				.toEqual([bootstrapOid, controlRemovedOid])
-			expect(outcome.commits[0]!.changed_paths)
-				.toEqual([
-					'.engineering/.gitignore',
-					'.engineering/PROJECT.md',
-					'.engineering/ef.yaml',
-				])
-			expect(outcome.commits[1]!.changed_paths)
-				.toEqual(['.engineering/.gitignore'])
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
 		}
 		finally {
 			await fs.rm(dir, { recursive: true, force: true })
@@ -2430,6 +2460,159 @@ Rationale text.
 
 			const repo = createGitRepository(dir, createGitExecutor())
 			const outcome = await computeHistory(repo, mutatedOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: eleventh-round review Finding 2 (post-bootstrap authoritative state must be fully snapshot-validated)', () => {
+	it('fails with untrusted-data when a later commit rewrites the target\'s body to remove a required heading, even though a matching completing CHG covers the mutation', async () => {
+		// Finding 2: `evaluateBootstrapBoundary` already runs COMPLETE snapshot
+		// validation at the bootstrap commit, but every LATER authoritative
+		// commit this walk consumes was only ever checked through a
+		// hand-maintained subset of probes (frontmatter/status/resources) that
+		// never re-validated the target's own BODY. REQ-001's body loses its
+		// required 'Rationale' heading here -- a plain `EF-BODY` structural
+		// violation -- while its OID still changes (so `actualEffect` becomes
+		// `modifies`) and an otherwise-valid completing CHG claims exactly that
+		// mutation. Before this fix, nothing in the per-commit walk ever
+		// re-validated the target's body, so this commit's illegal content was
+		// silently accepted as trustworthy.
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-invalid-target-body-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			commitAll(dir, 'bootstrap, REQ-001 active from the start')
+
+			const bodyMissingRationale = `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-001
+title: Title of REQ-001
+status: active
+summary: Summary of REQ-001.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Revised body text for REQ-001, missing its required Rationale heading.
+
+## Acceptance Criteria
+
+- REQ-001 behaves as described.
+`
+			await writeFile(dir, '.engineering/req/REQ-001.md', bodyMissingRationale)
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: REQ-001'))
+			const mutatedOid = commitAll(dir, 'REQ-001 body loses its required Rationale heading, covered by a completing CHG')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, mutatedOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a later commit corrupts the PROJECT control file (.gitignore), even though a matching completing CHG covers the mutation', async () => {
+		// Finding 2's PROJECT-shaped variant: PROJECT's own aggregate
+		// (07-change-transactions.md) includes its control files. A later
+		// commit rewrites `.engineering/.gitignore` to content that no longer
+		// exactly matches the four canonical entries this specification
+		// requires (`EF-FS-009`) -- the walk's own OID-diffing sees PROJECT's
+		// aggregate change and a completing CHG claims it, but nothing ever
+		// re-validated the CONTENT of that changed control file.
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-invalid-control-file-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap, canonical control files')
+
+			// Corrupted: entries out of the canonical order/set.
+			await writeFile(dir, '.engineering/.gitignore', '.tmp/\n.cache/\n.generated/\n.lock\n')
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: PROJECT'))
+			const corruptedOid = commitAll(dir, 'corrupt .gitignore, covered by a completing CHG')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, corruptedOid, 'PROJECT', 'project', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: eleventh-round review Finding 3 (lifecycle-transition legality and first-appearance rules before net-effect classification)', () => {
+	it('fails with untrusted-data when the target illegally transitions active -> draft, even though a matching completing CHG covers the mutation', async () => {
+		// 03-lifecycle.md `ALLOWED_TRANSITIONS.requirement` permits `active ->
+		// superseded` and `active -> retired`, never `active -> draft`. Before
+		// this fix, the walk only ever classified the target's before/after
+		// aggregate transition into `introduces`/`modifies`/`retires`/
+		// `unchanged` and checked CHG coverage/truthfulness against THAT
+		// classification -- it never independently verified the underlying
+		// status EDGE itself was legal, so an illegal downgrade covered by an
+		// otherwise-valid completing `modifies` CHG was silently accepted.
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-active-to-draft-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			commitAll(dir, 'bootstrap, REQ-001 active from the start')
+
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'draft')
+				.replace('Body text', 'Illegally downgraded body text'))
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: REQ-001'))
+			const illegalOid = commitAll(dir, 'REQ-001 illegally regresses active -> draft, covered by a completing CHG')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, illegalOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when a knowledge Artifact first appears directly terminal (retired), even with a matching completing "introduces" CHG', async () => {
+		// 03-lifecycle.md "First authoritative appearance": a knowledge
+		// Artifact may first appear only `draft` or `active`, never
+		// `superseded`/`retired` -- regardless of whether a completing CHG
+		// exists. Before this fix, `requiresChgForTarget(undefined, 'retired')`
+		// demanded CHG coverage (since `after !== 'draft'`), and a matching
+		// `introduces` CHG satisfied that coverage, so this illegal first
+		// appearance was silently accepted as trustworthy history.
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-first-appearance-terminal-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap, no REQ-001 yet')
+
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'retired'))
+			const firstAppearanceOid = commitAll(dir, 'REQ-001 first appears already retired, covered by a completing "introduces" CHG')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, firstAppearanceOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
 		}
