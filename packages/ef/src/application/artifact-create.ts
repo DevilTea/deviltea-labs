@@ -761,10 +761,20 @@ interface OwnedFileWitness {
  * inode recycling, even same-identity) replacement.
  */
 async function fileOwnershipProven(deps: ApplyCreatePlanDeps, targetPath: string, witness: OwnedFileWitness): Promise<boolean> {
-	const identity = await deps.fileIdentity(targetPath)
-	if (identity === undefined || !sameFileIdentity(identity, witness.identity))
-		return false
+	// Finding (P1, fourteenth round): `deps.fileIdentity` -- like `lstat` in
+	// general -- rethrows a non-`ENOENT` failure (`defaultFileIdentity`'s own
+	// doc); a bare, unguarded `await` here let an unexpected `EIO`/`EACCES`
+	// escape this function entirely rather than being treated as "ownership
+	// could not be established." This function's own contract (see its doc
+	// above) is to be the single non-throwing ownership-proof primitive every
+	// destructive deletion in `applyCreatePlan` relies on; an execution/read
+	// failure proves nothing about ownership one way or the other, so it is
+	// folded into the same `false` ("not proven") result as an ordinary
+	// identity or content mismatch, never allowed to propagate.
 	try {
+		const identity = await deps.fileIdentity(targetPath)
+		if (identity === undefined || !sameFileIdentity(identity, witness.identity))
+			return false
 		const bytes = await deps.readFileBytes(targetPath)
 		return bytesEqual(bytes, witness.bytes)
 	}
@@ -1258,8 +1268,31 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		// shares the temporary file's exact inode; anything else means
 		// `targetPath` was unlinked and replaced, or the chain leading to it
 		// was swapped, in the instant after `link()` returned).
-		const postChain = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, chainCheck.identity)
-		const publishedIdentity = await deps.fileIdentity(targetPath)
+		//
+		// Finding (P1, fourteenth round): publication has ALREADY physically
+		// occurred by this point (`publishViaHardLink` reported `'published'`),
+		// so 13-cli-contract.md's "the implementation MUST NOT misreport the
+		// published state as unapplied" already applies to everything from
+		// here on. `verifyManagedDirectoryChain` and `deps.fileIdentity` both
+		// rethrow a non-`ENOENT` `lstat` failure (they are observation
+		// primitives, not domain checks); a bare, unguarded pair of `await`s
+		// here let an unexpected `EIO`/`EACCES` escape this entire function,
+		// which `runArtifactCreateCommand`'s outer catch then reported as
+		// `applied: false` -- misreporting a publication that genuinely
+		// happened as though it never did. Neither call has attempted any
+		// retraction yet, so an observation failure here is reported as the
+		// existing `applied: true, outcome: 'incomplete'` class, exactly like
+		// a proven-but-unretractable mismatch below.
+		let postChain: VerifyManagedDirectoryChainResult
+		let publishedIdentity: FileIdentity | undefined
+		try {
+			postChain = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, chainCheck.identity)
+			publishedIdentity = await deps.fileIdentity(targetPath)
+		}
+		catch (error) {
+			await deleteOwnedTempFile(deps, tempPath, tempWitness)
+			return { applied: true, outcome: 'incomplete', path: plan.path, message: `The published file for '${plan.path}' could not be re-verified immediately after publication: an unexpected error occurred (${(error as Error).message}); recovery is an explicit operator action.` }
+		}
 		const contentIntact = publishedIdentity !== undefined && sameFileIdentity(publishedIdentity, tempIdentity)
 
 		if (postChain.ok && contentIntact) {
@@ -1308,15 +1341,32 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 		// (Finding 1 applies the identical ownership-proof rule to
 		// `.engineering` itself).
 		if (await fileOwnershipProven(deps, targetPath, tempWitness)) {
+			let targetRetracted = false
 			try {
 				await deps.unlink(targetPath)
-				await deleteOwnedTempFile(deps, tempPath, tempWitness)
-				return { applied: false, outcome: 'raced', message: `The managed directory chain, published identity, or project generation for '${plan.path}' no longer matched immediately after publication; the unverified publish was retracted.` }
+				targetRetracted = true
 			}
 			catch {
 				// Even the proven-owned retraction itself failed: fall through
 				// and report `applied: true, outcome: 'incomplete'` below rather
 				// than misreport either a clean success or a clean rejection.
+			}
+			if (targetRetracted) {
+				// Finding (P1, fourteenth round): once the canonical retraction
+				// itself has genuinely succeeded, this invocation's own
+				// published state is definitively gone -- `applied: false` is
+				// now the physically accurate report no matter what happens
+				// next. The temporary file's removal below is a SEPARATE,
+				// purely best-effort cleanup step (`deleteOwnedTempFile` is
+				// fully non-throwing); its own outcome must never re-promote
+				// this result back to `applied: true` -- an earlier version
+				// folded both operations into one `try`, so a cleanup failure
+				// immediately after a successful retraction was wrongly
+				// swallowed by the `catch` above and fell through to the
+				// `applied: true, outcome: 'incomplete'` report below, even
+				// though the target had already been genuinely retracted.
+				await deleteOwnedTempFile(deps, tempPath, tempWitness)
+				return { applied: false, outcome: 'raced', message: `The managed directory chain, published identity, or project generation for '${plan.path}' no longer matched immediately after publication; the unverified publish was retracted.` }
 			}
 		}
 

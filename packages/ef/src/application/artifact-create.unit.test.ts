@@ -1576,6 +1576,154 @@ Placeholder.
 		})
 	})
 
+	// FINDING (P1, fourteenth round): once `publishViaHardLink` reports
+	// `'published'`, publication has ALREADY physically occurred, so
+	// 13-cli-contract.md's "the implementation MUST NOT misreport the
+	// published state as unapplied" governs every subsequent observation and
+	// cleanup step. `verifyManagedDirectoryChain` and `deps.fileIdentity` both
+	// rethrow a non-`ENOENT` `lstat` failure (they are plain observation
+	// primitives, not domain checks); several post-publication call sites
+	// awaited them without any surrounding `try`/`catch`, so an unexpected
+	// `EIO`/`EACCES` there escaped `applyCreatePlan` entirely -- and, from
+	// there, `runArtifactCreateCommand`'s outer catch reported `applied:
+	// false`, misreporting a publication that genuinely happened as though it
+	// never did. `fileOwnershipProven`'s own `deps.fileIdentity` call had the
+	// identical hole, which `deleteOwnedTempFile` (the sole best-effort
+	// temp-file cleanup primitive) inherited.
+	describe('post-published state exception containment (Finding regression, fourteenth round)', () => {
+		it('reports applied:true/incomplete (never rejecting the call) when the post-publication fileIdentity(targetPath) re-check throws an unexpected error after a real, successful hard link', async () => {
+			const plan = computePlanOrThrow()
+			const targetPath = path.join(tempDir, plan.path)
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				fileIdentity: async (target: string) => {
+					if (target === targetPath)
+						throw Object.assign(new Error('input/output error'), { code: 'EIO' })
+					return defaultApplyCreatePlanDeps.fileIdentity(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect('outcome' in result && result.outcome)
+				.toBe('incomplete')
+
+			// The canonical publication genuinely happened and must not be
+			// misreported as unapplied: the file is still on disk with exactly
+			// the planned bytes.
+			const onDisk = await fs.readFile(targetPath)
+			expect(new Uint8Array(onDisk))
+				.toEqual(plan.bytes)
+		})
+
+		it('reports applied:true/cleanup-failed (never rejecting, never a plain success) when the best-effort cleanup ownership-probe fileIdentity(tempPath) throws after a fully verified publish', async () => {
+			const plan = computePlanOrThrow()
+			const targetPath = path.join(tempDir, plan.path)
+			const fixedNonce = 'fixed-nonce-round14-cleanup'
+			const tempPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.tmp-${fixedNonce}`)
+
+			let tempFileIdentityCalls = 0
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				generateNonce: () => fixedNonce,
+				fileIdentity: async (target: string) => {
+					if (target === tempPath) {
+						tempFileIdentityCalls += 1
+						// Call #1 is the post-write identity capture: it must
+						// succeed so the rest of the publish protocol proceeds
+						// normally. Call #2+ is the FINAL, otherwise-best-effort
+						// cleanup ownership probe inside `deleteOwnedTempFile`,
+						// immediately after publication has already been fully
+						// verified -- the one this regression targets.
+						if (tempFileIdentityCalls > 1)
+							throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+					}
+					return defaultApplyCreatePlanDeps.fileIdentity(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect('outcome' in result && result.outcome)
+				.toBe('cleanup-failed')
+
+			const onDisk = await fs.readFile(targetPath)
+			expect(new Uint8Array(onDisk))
+				.toEqual(plan.bytes)
+
+			const leftoverTempFiles = (await fs.readdir(path.dirname(targetPath)))
+				.filter(name => name.includes('.tmp-'))
+			expect(leftoverTempFiles.length)
+				.toBe(1)
+		})
+
+		it('preserves applied:false/raced (never re-promoted to applied:true) when the temp-file cleanup ownership-probe throws immediately after a successful target retraction', async () => {
+			const plan = computePlanOrThrow()
+			const targetPath = path.join(tempDir, plan.path)
+			const shadowDirs: string[] = []
+			const fixedNonce = 'fixed-nonce-round14-retraction'
+			const tempPath = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.tmp-${fixedNonce}`)
+
+			let tempFileIdentityCalls = 0
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				generateNonce: () => fixedNonce,
+				fileIdentity: async (target: string) => {
+					if (target === tempPath) {
+						tempFileIdentityCalls += 1
+						if (tempFileIdentityCalls > 1)
+							throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+					}
+					return defaultApplyCreatePlanDeps.fileIdentity(target)
+				},
+				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
+					const realResult = await defaultApplyCreatePlanDeps.publishViaHardLink(tempPathArg, targetPathArg)
+					if (realResult.outcome === 'published') {
+						// Same technique as the "Finding 2 regression" test above:
+						// swap the managed chain for a DIFFERENT real directory from
+						// INSIDE `publishViaHardLink`, strictly after the real
+						// `link()` call succeeded, so the post-publication chain
+						// re-check reports a mismatch even though the published
+						// file's own content/inode is still provably this
+						// invocation's own (the hard link into the shadow directory
+						// preserves it) -- this is what drives `applyCreatePlan`
+						// into the ownership-proven retraction path below.
+						const typeDirPath = path.dirname(targetPathArg)
+						const shadowDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-shadow-round14-'))
+						shadowDirs.push(shadowDir)
+						await fs.link(targetPathArg, path.join(shadowDir, path.basename(targetPathArg)))
+						await fs.rm(typeDirPath, { recursive: true, force: true })
+						await fs.rename(shadowDir, typeDirPath)
+					}
+					return realResult
+				},
+			}
+
+			try {
+				const result = await applyCreatePlan(plan, tempDir, deps)
+
+				expect(result.applied)
+					.toBe(false)
+				expect(result.applied === false && result.outcome)
+					.toBe('raced')
+
+				// The canonical target was genuinely retracted; this must never be
+				// re-promoted back to `applied: true` merely because the
+				// SEPARATE, best-effort temp-file cleanup probe also failed.
+				await expect(fs.stat(targetPath)).rejects.toThrow()
+			}
+			finally {
+				for (const dir of shadowDirs)
+					await fs.rm(dir, { recursive: true, force: true })
+			}
+		})
+	})
+
 	it('produces a draft file that validates as a draft under full snapshot validation', async () => {
 		const engineeringDir = path.join(tempDir, '.engineering')
 		await fs.mkdir(engineeringDir, { recursive: true })

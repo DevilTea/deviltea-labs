@@ -32,18 +32,20 @@ function withSideEffectBeforeCall(base: GitExecutor, matches: (args: readonly st
 	}
 }
 
-// `unlinkMock`/`linkMock` let a test inject a real-filesystem failure/race
-// strictly inside `applyCreatePlan`'s own internals -- exercised here through
-// the CLI's actual, non-injected dependency wiring (this command has no
-// `applyCreatePlan`-deps injection point of its own; see the exit-mapping
-// regressions below). Every test that does not explicitly arm one gets a
-// plain passthrough to the real implementation.
-const { unlinkMock, linkMock, realFns } = vi.hoisted(() => ({
+// `unlinkMock`/`linkMock`/`lstatMock` let a test inject a real-filesystem
+// failure/race strictly inside `applyCreatePlan`'s own internals -- exercised
+// here through the CLI's actual, non-injected dependency wiring (this command
+// has no `applyCreatePlan`-deps injection point of its own; see the
+// exit-mapping regressions below). Every test that does not explicitly arm
+// one gets a plain passthrough to the real implementation.
+const { unlinkMock, linkMock, lstatMock, realFns } = vi.hoisted(() => ({
 	unlinkMock: vi.fn(),
 	linkMock: vi.fn(),
+	lstatMock: vi.fn(),
 	realFns: {
 		unlink: undefined as unknown as typeof import('node:fs/promises').unlink,
 		link: undefined as unknown as typeof import('node:fs/promises').link,
+		lstat: undefined as unknown as typeof import('node:fs/promises').lstat,
 	},
 }))
 
@@ -51,9 +53,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('node:fs/promises')>()
 	realFns.unlink = actual.unlink
 	realFns.link = actual.link
+	realFns.lstat = actual.lstat
 	unlinkMock.mockImplementation((...args: Parameters<typeof actual.unlink>) => actual.unlink(...args))
 	linkMock.mockImplementation((...args: Parameters<typeof actual.link>) => actual.link(...args))
-	return { ...actual, unlink: unlinkMock, link: linkMock }
+	lstatMock.mockImplementation((...args: Parameters<typeof actual.lstat>) => actual.lstat(...args))
+	return { ...actual, unlink: unlinkMock, link: linkMock, lstat: lstatMock }
 })
 
 /** Every `execIn` call fails; simulates Git becoming unavailable during project resolution. */
@@ -148,12 +152,14 @@ describe('runArtifactCreateCommand', () => {
 		await writeFile(root, '.engineering/PROJECT.md', PROJECT_MD)
 		unlinkMock.mockImplementation((...args: Parameters<typeof realFns.unlink>) => realFns.unlink(...args))
 		linkMock.mockImplementation((...args: Parameters<typeof realFns.link>) => realFns.link(...args))
+		lstatMock.mockImplementation((...args: Parameters<typeof realFns.lstat>) => realFns.lstat(...args))
 	})
 
 	afterEach(async () => {
 		await fs.rm(root, { recursive: true, force: true })
 		unlinkMock.mockClear()
 		linkMock.mockClear()
+		lstatMock.mockClear()
 	})
 
 	function deps(prompts: Prompts = neverPrompts()) {
@@ -559,6 +565,54 @@ describe('runArtifactCreateCommand', () => {
 			.toBe(true)
 		expect(json.diagnostics[0].code)
 			.toBe('EF-VAL-008')
+	})
+
+	// FINDING (P1, fourteenth round): the post-publication re-verification's
+	// own observation calls (`lstat`, via `deps.fileIdentity`) can rethrow an
+	// unexpected, non-`ENOENT` error exactly like any other `lstat`-based
+	// check -- an unguarded `await` there previously let such an error escape
+	// `applyCreatePlan` entirely after publication had ALREADY physically
+	// occurred, and this command's own outer `catch` then reported
+	// `applied: false`, misreporting a genuine publication as unapplied.
+	// Reproduced here through the CLI's real, non-injected `applyCreatePlan`
+	// wiring by forcing the real `lstat` primitive to fail for the published
+	// path itself, immediately after the real `link()` call has already
+	// succeeded.
+	it('exits 3 (applied:true, complete:false, EF-VAL-008) -- never applied:false -- when the post-publication identity re-check itself throws an unexpected error after a real, successful hard link', async () => {
+		let targetPath: string | undefined
+		let armed = false
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			const [target] = args as [string]
+			if (armed && target === targetPath) {
+				armed = false
+				throw Object.assign(new Error('input/output error'), { code: 'EIO' })
+			}
+			return realFns.lstat(...args)
+		})
+		linkMock.mockImplementation(async (...args: Parameters<typeof realFns.link>) => {
+			const [tempPathArg, targetPathArg] = args as [string, string]
+			await realFns.link(tempPathArg, targetPathArg)
+			targetPath = targetPathArg
+			armed = true
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(3)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(true)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-008')
+
+		// The publication itself genuinely happened and must not be
+		// misreported as unapplied: the file is on disk with the planned ID.
+		const written = await fs.readFile(path.join(root, '.engineering/req/REQ-001.md'), 'utf8')
+		expect(written)
+			.toContain('id: REQ-001')
 	})
 
 	// ---- Finding 11: bound-load -- `.engineering` identity threaded into ------
