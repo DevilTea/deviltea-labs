@@ -13,7 +13,7 @@ import {
 	computeCreatePlan,
 	defaultApplyCreatePlanDeps,
 } from './artifact-create'
-import { loadSnapshotFromWorkingTree } from './snapshot'
+import { defaultSnapshotFsDeps, loadSnapshotFromWorkingTree } from './snapshot'
 import { validateSnapshot } from './snapshot-validation'
 
 /** Opaque, arbitrary identity for the pure `computeCreatePlan` tests below: no filesystem is touched in that describe block, so this value is never compared against anything real -- it merely proves the field is threaded onto the resulting plan unchanged. */
@@ -856,6 +856,171 @@ describe('applyCreatePlan', () => {
 			expect(await fs.readdir(path.join(tempDir, '.engineering')))
 				.toEqual([])
 			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+		})
+	})
+
+	// FINDING 1 (P1, eleventh round): the tenth-round regression directly above
+	// forces `plan.engineeringIdentity` to a value that provably does NOT
+	// match the real, untouched `.engineering` -- it proves ORDINARY mismatch
+	// detection, not the ABA the review finding actually describes. On a
+	// filesystem that recycles a just-freed directory inode (documented ext4
+	// behavior), a `.engineering` deleted and immediately replaced with a
+	// brand-new, empty directory can be assigned the EXACT SAME `dev`/`ino`
+	// pair the plan captured -- identity alone cannot tell the two apart.
+	// `applyCreatePlan` must also re-establish a content-generation witness
+	// (configuration bytes, `PROJECT.md` bytes, and the complete visible
+	// Artifact ID set) that an empty replacement cannot reproduce.
+	describe('content-generation witness closes the identity-only ABA gap (Finding 1, eleventh round)', () => {
+		/** A complete, realistic project: config, gitignore, and `PROJECT.md` -- but deliberately ZERO Requirement artifacts, exactly matching the review finding's own "first REQ-001 ever" reproduction, where a same-prefix-only allocation re-check (`verifyAllocationStillValid`'s pre-existing `nextId` comparison) trivially matches either way. */
+		async function seedRealProject(engineeringDir: string): Promise<void> {
+			await fs.writeFile(path.join(engineeringDir, 'ef.yaml'), CONFIG_YAML)
+			await fs.writeFile(path.join(engineeringDir, '.gitignore'), GITIGNORE)
+			await fs.writeFile(path.join(engineeringDir, 'PROJECT.md'), PROJECT_MD)
+		}
+
+		it('rejects, without publishing, when `.engineering` is deleted and replaced by an empty directory whose identity is forced to alias the plan\'s captured identity at every observation point -- including the pre-publication snapshot reload\'s own pre/post-walk checks (deterministic inode-recycling simulation, never real inode recycling)', async () => {
+			const engineeringDir = path.join(tempDir, '.engineering')
+			await seedRealProject(engineeringDir)
+
+			const loaded = await loadSnapshotFromWorkingTree(tempDir)
+			expect(loaded.ok)
+				.toBe(true)
+			if (!loaded.ok)
+				return
+
+			const planResult = computeCreatePlan({ snapshot: loaded.snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity })
+			expect(planResult.ok)
+				.toBe(true)
+			if (!planResult.ok)
+				return
+			const plan = planResult.plan
+			// The exact reproduction from the review finding: the FIRST REQ-001
+			// ever, over a project with zero pre-existing Requirement artifacts.
+			expect(plan.id)
+				.toBe('REQ-001')
+
+			// ABA: delete `.engineering` entirely and replace it with a brand-new,
+			// EMPTY directory at the identical path. Rather than rely on timing or
+			// a specific filesystem/OS to reproduce a genuine dev/ino collision,
+			// force EVERY identity observation this invocation makes for this
+			// exact path -- `applyCreatePlan`'s own chain re-verification AND the
+			// snapshot reload's internal pre-walk/post-walk identity checks
+			// (`application/snapshot.ts`'s `expectedEngineeringIdentity` option) --
+			// to report the plan's captured `engineeringIdentity`, exactly as a
+			// real inode-recycling collision would.
+			await fs.rm(engineeringDir, { recursive: true, force: true })
+			await fs.mkdir(engineeringDir)
+
+			function forcedIdentity(target: string): Promise<FileIdentity | undefined> {
+				return realDirectoryIdentity(target)
+					.then(real => (real === undefined ? undefined : (target === engineeringDir ? plan.engineeringIdentity : real)))
+			}
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				directoryIdentity: forcedIdentity,
+				loadSnapshot: (root: string, expectedEngineeringIdentity: FileIdentity) =>
+					loadSnapshotFromWorkingTree(root, { ...defaultSnapshotFsDeps, directoryIdentity: forcedIdentity }, { expectedEngineeringIdentity }),
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('raced')
+
+			// Nothing was published, and the replacement `.engineering` is left
+			// exactly as the ABA left it -- empty -- never silently populated (its
+			// `req` type directory is never even created) by this invocation.
+			expect(await fs.readdir(engineeringDir))
+				.toEqual([])
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+		})
+
+		it('rejects (raced) when `PROJECT.md`\'s bytes change in place between plan computation and apply, even though `.engineering`\'s identity never changes at all (content-witness mismatch, not an ABA)', async () => {
+			const engineeringDir = path.join(tempDir, '.engineering')
+			await seedRealProject(engineeringDir)
+
+			const loaded = await loadSnapshotFromWorkingTree(tempDir)
+			expect(loaded.ok)
+				.toBe(true)
+			if (!loaded.ok)
+				return
+
+			const planResult = computeCreatePlan({ snapshot: loaded.snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity })
+			expect(planResult.ok)
+				.toBe(true)
+			if (!planResult.ok)
+				return
+			const plan = planResult.plan
+
+			// Rewrite `PROJECT.md`'s content IN PLACE -- `.engineering` itself is
+			// never touched, replaced, or recreated, so its real identity is
+			// unchanged throughout. This isolates the CONTENT half of the witness:
+			// no inode trick is involved at all.
+			await fs.writeFile(path.join(engineeringDir, 'PROJECT.md'), PROJECT_MD.replace('Example Project', 'Rewritten Project'))
+
+			const result = await applyCreatePlan(plan, tempDir)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('raced')
+
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+		})
+
+		it('rejects (raced) when `PROJECT.md`\'s content changes strictly between the pre-write checkpoint and the pre-publication allocation reload -- proving the witness is re-established at BOTH checkpoints, not only the first', async () => {
+			const engineeringDir = path.join(tempDir, '.engineering')
+			await seedRealProject(engineeringDir)
+
+			const loaded = await loadSnapshotFromWorkingTree(tempDir)
+			expect(loaded.ok)
+				.toBe(true)
+			if (!loaded.ok)
+				return
+
+			const planResult = computeCreatePlan({ snapshot: loaded.snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity })
+			expect(planResult.ok)
+				.toBe(true)
+			if (!planResult.ok)
+				return
+			const plan = planResult.plan
+
+			// `deps.loadSnapshot` is called exactly twice per invocation: once by
+			// the pre-write content-generation checkpoint, once more by the
+			// pre-publication allocation reload. Let the FIRST call observe the
+			// original, still-matching `PROJECT.md` (so the pre-write checkpoint
+			// passes) and rewrite it only ahead of the SECOND call, isolating this
+			// regression to the pre-publication checkpoint's own re-verification.
+			let loadSnapshotCalls = 0
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				loadSnapshot: async (root: string, expectedEngineeringIdentity: FileIdentity) => {
+					loadSnapshotCalls += 1
+					if (loadSnapshotCalls > 1) {
+						await fs.writeFile(path.join(root, '.engineering/PROJECT.md'), PROJECT_MD.replace('Example Project', 'Rewritten Mid-Apply'))
+					}
+					return defaultApplyCreatePlanDeps.loadSnapshot(root, expectedEngineeringIdentity)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('raced')
+			expect(loadSnapshotCalls)
+				.toBe(2)
+
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+
+			const leftoverTempFiles = (await fs.readdir(path.join(engineeringDir, 'req')))
+				.filter(name => name.includes('.tmp-'))
+			expect(leftoverTempFiles)
+				.toEqual([])
 		})
 	})
 

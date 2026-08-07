@@ -25,7 +25,18 @@
  * time (`ArtifactCreatePlan.engineeringIdentity`, threaded from
  * `loadWorkingTreeContext` -- Finding 2, tenth round; `.engineering` is never
  * created or silently re-accepted-as-new by this command, unlike the type
- * directory, which legitimately may not exist yet), write the complete file
+ * directory, which legitimately may not exist yet), ALSO re-establish a
+ * content-generation witness captured alongside that identity at plan time
+ * (`ArtifactCreatePlan.contentWitness` -- `.engineering/ef.yaml`'s bytes,
+ * `.engineering/PROJECT.md`'s bytes, and the complete visible Artifact ID
+ * set; Finding 1, eleventh round) at both the pre-write checkpoint and the
+ * pre-publication allocation reload, because identity ALONE is not proof of
+ * project generation: a filesystem that recycles a just-freed directory
+ * inode for a brand-new, unrelated `.engineering` (the same ext4 hazard
+ * `application/init.ts`'s `applyInitPlan` documents for its own claimed
+ * directory) reports the identical `dev`/`ino` pair this plan captured even
+ * though the directory instance -- and everything in it -- is entirely
+ * different; only pairing identity with content closes that ABA, write the complete file
  * at a temporary same-directory path, validate the written bytes, bind an
  * identity to the verified temporary file, re-verify the managed directory
  * chain and that the target is still absent, publish via a
@@ -129,6 +140,49 @@ export interface ComputeCreatePlanInput {
 	engineeringIdentity: FileIdentity
 }
 
+/**
+ * The project-generation CONTENT `computeCreatePlan` observed from the SAME
+ * bound `snapshot` it computed the rest of {@link ArtifactCreatePlan} from
+ * (Finding 1, eleventh round). `applyCreatePlan` re-establishes ALL THREE of
+ * these fields -- never `.engineering`'s `dev`/`ino` identity alone -- at
+ * both its pre-write checkpoint and its pre-publication allocation reload:
+ * identity proves only that a directory carries a certain inode number,
+ * never WHICH generation of the project that directory instance actually
+ * is. A filesystem that recycles a just-freed directory inode for a
+ * brand-new, unrelated `.engineering` (the same ext4 hazard documented on
+ * `application/init.ts`'s `applyInitPlan`) reports the exact identity this
+ * plan captured even though the directory -- and everything a real project
+ * would contain -- is completely different. Content closes that gap: a
+ * replacement `.engineering` that is merely empty (or otherwise generation-
+ * distinct) cannot also reproduce the SAME configuration bytes, the SAME
+ * `PROJECT.md` bytes, and the SAME complete visible Artifact ID set.
+ *
+ * Deliberately NOT scoped to the requested prefix (unlike the allocation
+ * witness `verifyAllocationStillValid` separately re-runs): a replacement
+ * project could coincidentally have zero visible Artifacts of the requested
+ * type too (exactly the reviewer's own first-`REQ-001`-ever reproduction),
+ * in which case a same-prefix-only comparison would trivially match either
+ * way. Comparing the COMPLETE visible ID set, plus configuration and
+ * `PROJECT.md` content, still tells the two generations apart.
+ *
+ * HONEST RESIDUAL: a replacement directory that byte-replicates the
+ * configuration, `PROJECT.md`, and the ENTIRE visible ID set is
+ * content-indistinguishable from the original for this mutation. This
+ * witness proves content generation, not physical continuity -- the same
+ * honest limit `application/init.ts`'s own content-ownership check
+ * documents (a content-identical same-inode replacement is accepted there
+ * too, for the identical reason: it causes no data loss and cannot be told
+ * apart from the genuine directory by any means this package has).
+ */
+export interface ContentGenerationWitness {
+	/** `snapshot.configBytes` (`.engineering/ef.yaml`) at plan time, or `undefined` when it did not exist. */
+	configBytes: Uint8Array | undefined
+	/** The bytes of `.engineering/PROJECT.md` at plan time (from `snapshot.artifacts`), or `undefined` when it did not exist as a decodable Artifact file. */
+	projectMdBytes: Uint8Array | undefined
+	/** Every Artifact ID visible ANYWHERE in `snapshot` at plan time (`collectVisibleIds`) -- the complete graph, not merely the requested prefix's own members. */
+	visibleIds: ReadonlySet<string>
+}
+
 export interface ArtifactCreatePlan {
 	type: Exclude<ArtifactType, 'project'>
 	id: string
@@ -139,6 +193,8 @@ export interface ArtifactCreatePlan {
 	changes: [{ action: 'create', path: string }]
 	/** See {@link ComputeCreatePlanInput.engineeringIdentity}. */
 	engineeringIdentity: FileIdentity
+	/** See {@link ContentGenerationWitness}. */
+	contentWitness: ContentGenerationWitness
 }
 
 export type ComputeCreatePlanFailureReason
@@ -203,6 +259,52 @@ function collectVisibleIds(snapshot: ProjectSnapshot): string[] {
 			ids.push(id)
 	}
 	return ids
+}
+
+const PROJECT_MD_PATH = '.engineering/PROJECT.md'
+
+/** The bytes of `.engineering/PROJECT.md` in `snapshot`, or `undefined` when it is not present as a discovered Artifact file (see `repository/layout.ts`'s own handling of a non-regular-file `PROJECT.md` candidate). */
+function findProjectMdBytes(snapshot: ProjectSnapshot): Uint8Array | undefined {
+	return snapshot.artifacts.find(artifact => artifact.path === PROJECT_MD_PATH)?.bytes
+}
+
+/** Capture {@link ContentGenerationWitness} from `snapshot`, at either plan time (`computeCreatePlan`) or a later re-verification reload (`applyCreatePlan`). */
+function captureContentGenerationWitness(snapshot: ProjectSnapshot): ContentGenerationWitness {
+	return {
+		configBytes: snapshot.configBytes,
+		projectMdBytes: findProjectMdBytes(snapshot),
+		visibleIds: new Set(collectVisibleIds(snapshot)),
+	}
+}
+
+/** `true` iff exactly one of `a`/`b` is `undefined`, or both are defined but byte-unequal; i.e. the inverse of "both absent, or both present and identical." */
+function optionalBytesEqual(a: Uint8Array | undefined, b: Uint8Array | undefined): boolean {
+	if (a === undefined || b === undefined)
+		return a === undefined && b === undefined
+	return bytesEqual(a, b)
+}
+
+function idSetsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+	if (a.size !== b.size)
+		return false
+	for (const id of a) {
+		if (!b.has(id))
+			return false
+	}
+	return true
+}
+
+/**
+ * `true` iff `current` (freshly captured at a re-verification checkpoint)
+ * matches `expected` (`plan.contentWitness`) exactly in all three respects:
+ * configuration bytes, `PROJECT.md` bytes, and the complete visible ID set.
+ * See {@link ContentGenerationWitness}'s own doc for why identity alone
+ * cannot substitute for this comparison.
+ */
+function contentGenerationWitnessMatches(current: ContentGenerationWitness, expected: ContentGenerationWitness): boolean {
+	return optionalBytesEqual(current.configBytes, expected.configBytes)
+		&& optionalBytesEqual(current.projectMdBytes, expected.projectMdBytes)
+		&& idSetsEqual(current.visibleIds, expected.visibleIds)
 }
 
 /**
@@ -376,6 +478,7 @@ export function computeCreatePlan(input: ComputeCreatePlanInput): ComputeCreateP
 			envelope,
 			changes: [{ action: 'create', path: filePath }],
 			engineeringIdentity,
+			contentWitness: captureContentGenerationWitness(snapshot),
 		},
 	}
 }
@@ -410,13 +513,18 @@ export interface ApplyCreatePlanDeps {
 	/**
 	 * A fresh, bounded re-enumeration of the full Artifact discovery scope
 	 * (Finding 2, ninth round) -- never the possibly-stale `snapshot`
-	 * `computeCreatePlan` was originally computed from. Used immediately
-	 * before publication to re-run the identical identity/allocation witness
+	 * `computeCreatePlan` was originally computed from. Called TWICE per
+	 * `applyCreatePlan` invocation: once as the pre-write checkpoint (see
+	 * `verifyContentGenerationWitness`), and once more immediately before
+	 * publication to re-run the identical identity/allocation/content witness
 	 * that computed the plan in the first place (see
 	 * `verifyAllocationStillValid`), so a competing writer that made a higher
-	 * same-prefix Artifact (or an identity-uncertain file) visible strictly
-	 * between plan computation and this call is caught even though it never
-	 * touches the plan's own candidate `targetPath` at all.
+	 * same-prefix Artifact (or an identity-uncertain file) visible, or
+	 * rewrote the configuration or `PROJECT.md` content, or replaced
+	 * `.engineering` itself with a content-generation-distinct directory
+	 * (Finding 1, eleventh round), strictly between plan computation and
+	 * either call is caught even though neither ever touches the plan's own
+	 * candidate `targetPath` at all.
 	 *
 	 * `expectedEngineeringIdentity` is threaded straight through to
 	 * `loadSnapshotFromWorkingTree`'s own option of the same name (Finding 2,
@@ -630,6 +738,50 @@ async function safeUnlink(deps: ApplyCreatePlanDeps, tempPath: string): Promise<
 	}
 }
 
+export type VerifyContentGenerationWitnessResult
+	= | { ok: true }
+		| { ok: false, message: string }
+
+/**
+ * Re-establish {@link ContentGenerationWitness} against a FRESH reload of the
+ * full discovery scope, bound to `plan.engineeringIdentity` exactly like
+ * `verifyAllocationStillValid` below (Finding 1, eleventh round).
+ *
+ * This is deliberately a SEPARATE, dedicated re-verification -- not folded
+ * silently into the identity-only `verifyManagedDirectoryChain` -- because
+ * identity and content answer two different questions: `verifyManagedDirectoryChain`
+ * proves `.engineering` still has the SAME `dev`/`ino` pair; this proves it
+ * is still the SAME PROJECT GENERATION. A filesystem that recycles a
+ * just-freed directory inode for a brand-new, unrelated `.engineering`
+ * (documented ext4 hazard; see `ContentGenerationWitness`'s own doc and
+ * `application/init.ts`'s identical `applyInitPlan` fix) satisfies the first
+ * question while failing the second: the reload succeeds (`deps.loadSnapshot`'s
+ * own identity check, `application/snapshot.ts`'s `expectedEngineeringIdentity`,
+ * is ITSELF only identity-based and is equally fooled), but the freshly
+ * captured configuration/`PROJECT.md`/visible-ID-set witness no longer
+ * matches what this plan was computed against.
+ *
+ * Called from TWO places in `applyCreatePlan`: once here, standalone, as the
+ * pre-write checkpoint (before `ensureDirectory` ever runs, so a replacement
+ * `.engineering`'s type directory is never created by this invocation at
+ * all), and once more folded into `verifyAllocationStillValid` itself using
+ * the SAME reload that function already performs (no second reload needed
+ * there) as the pre-publication checkpoint.
+ */
+async function verifyContentGenerationWitness(deps: ApplyCreatePlanDeps, projectRoot: string, plan: ArtifactCreatePlan): Promise<VerifyContentGenerationWitnessResult> {
+	const reloaded = await deps.loadSnapshot(projectRoot, plan.engineeringIdentity)
+	if (!reloaded.ok) {
+		return { ok: false, message: `The project '${plan.path}' was planned against could not be re-verified: ${reloaded.message}` }
+	}
+
+	const current = captureContentGenerationWitness(reloaded.snapshot)
+	if (!contentGenerationWitnessMatches(current, plan.contentWitness)) {
+		return { ok: false, message: `The configuration, 'PROJECT.md', or complete visible Artifact ID set for '${plan.path}' no longer matches what this plan was computed against; '.engineering' may have been replaced with a different directory instance since the plan was computed.` }
+	}
+
+	return { ok: true }
+}
+
 export type VerifyAllocationStillValidResult
 	= | { ok: true }
 		| { ok: false, message: string }
@@ -666,6 +818,17 @@ export type VerifyAllocationStillValidResult
  * tenth round): `deps.loadSnapshot` fails closed (`engineering-swapped`)
  * rather than silently re-deriving allocation from a DIFFERENT `.engineering`
  * substituted at the same path since the plan was computed.
+ *
+ * ALSO re-establishes the {@link ContentGenerationWitness} against this SAME
+ * reload (Finding 1, eleventh round; see `verifyContentGenerationWitness`'s
+ * own doc): the identity-bound reload above and the same-prefix `nextId`
+ * check below are both necessary but NOT sufficient on their own. A
+ * replacement `.engineering` that happens to have zero visible Artifacts of
+ * the requested prefix -- exactly the reviewer's own first-`REQ-001`-ever
+ * reproduction -- passes the `nextId` check trivially (both the original and
+ * the replacement compute the identical `REQ-001`), so only the content
+ * witness -- configuration bytes, `PROJECT.md` bytes, and the COMPLETE
+ * visible ID set across every prefix -- tells the two generations apart.
  */
 async function verifyAllocationStillValid(deps: ApplyCreatePlanDeps, projectRoot: string, plan: ArtifactCreatePlan): Promise<VerifyAllocationStillValidResult> {
 	const reloaded = await deps.loadSnapshot(projectRoot, plan.engineeringIdentity)
@@ -675,6 +838,11 @@ async function verifyAllocationStillValid(deps: ApplyCreatePlanDeps, projectRoot
 
 	const snapshot = reloaded.snapshot
 	const prefix = ID_PREFIX_BY_TYPE[plan.type]
+
+	const currentWitness = captureContentGenerationWitness(snapshot)
+	if (!contentGenerationWitnessMatches(currentWitness, plan.contentWitness)) {
+		return { ok: false, message: `The configuration, 'PROJECT.md', or complete visible Artifact ID set for '${plan.path}' changed immediately before publication; '.engineering' may have been replaced with a different directory instance since the plan was computed.` }
+	}
 
 	const uncertainArtifact = findIdentityUncertainArtifact(snapshot)
 	if (uncertainArtifact) {
@@ -723,6 +891,23 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	let chainCheck = await verifyManagedDirectoryChain(deps, projectRoot, targetPath, { engineering: plan.engineeringIdentity })
 	if (!chainCheck.ok)
 		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
+
+	// Finding 1 (eleventh round): the chain check just above proves only that
+	// `.engineering` still carries the SAME `dev`/`ino` PAIR this plan was
+	// computed against -- never that it is still the SAME PROJECT GENERATION.
+	// A filesystem that recycles a just-freed directory inode for a
+	// brand-new, unrelated `.engineering` (e.g. `rm -rf .engineering &&
+	// mkdir .engineering` on ext4) can report the identical identity even
+	// though the directory -- and everything a real project would contain --
+	// is completely different; `verifyChainComponent`'s identity comparison
+	// alone cannot tell the two apart. Re-establishing the content-generation
+	// witness here, BEFORE `ensureDirectory` ever runs, ensures a replacement
+	// `.engineering` never even has its type directory created by this
+	// invocation, let alone a file published into it. See
+	// `verifyContentGenerationWitness`'s own doc for the exact mechanism.
+	const preWriteGenerationCheck = await verifyContentGenerationWitness(deps, projectRoot, plan)
+	if (!preWriteGenerationCheck.ok)
+		return { applied: false, outcome: 'raced', message: preWriteGenerationCheck.message }
 
 	try {
 		await deps.ensureDirectory(path.dirname(targetPath))
