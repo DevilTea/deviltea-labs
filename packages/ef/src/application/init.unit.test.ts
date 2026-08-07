@@ -471,6 +471,19 @@ describe('applyInitPlan', () => {
 	// reviewer described. Neither the victim's directory nor its content may
 	// ever be removed or written by this invocation, which never actually
 	// owns it.
+	//
+	// CI REGRESSION: the first test below (a real `rm -rf` + `mkdir` + write,
+	// exactly like production code would do) was flaky on Linux ext4 but
+	// always passed on macOS/APFS, because ext4 recycles a just-freed inode
+	// for the very next `mkdir` far more readily -- an ABA hazard: the
+	// replacement victim directory can end up with the IDENTICAL `dev`/`ino`
+	// `claimDirectory` returned, so an identity-only check is fooled into
+	// believing it is still looking at the directory it claimed. Ownership is
+	// now proven by identity AND content together (`verifyClaimIntact` in
+	// `init.ts`), so this test's outcome no longer depends on whether the
+	// underlying filesystem happens to reuse the inode -- it is deterministic
+	// on every platform. The dedicated fake-identity test further down proves
+	// this directly, by forcing the identity check to be fooled on purpose.
 	describe('never removes or writes a victim swapped in for the claim after ownership was already established (Finding 1 regression)', () => {
 		it('leaves a real, pre-populated victim directory completely untouched and reports incomplete', async () => {
 			const plan = await computeValidPlan()
@@ -484,7 +497,11 @@ describe('applyInitPlan', () => {
 						// The race: substitute a real, pre-populated directory for the
 						// genuinely empty one `claimDirectory` just proved ownership of,
 						// strictly after that proof and strictly before `applyInitPlan`
-						// ever looks at `target` again.
+						// ever looks at `target` again. Whether or not the underlying
+						// filesystem happens to reuse the freed inode for this `mkdir`
+						// (ext4 commonly does; APFS/HFS+ rarely does) must no longer
+						// change the outcome -- see the content-based ownership proof in
+						// `verifyClaimIntact` (init.ts).
 						await fs.rm(target, { recursive: true, force: true })
 						await fs.mkdir(target)
 						await fs.writeFile(path.join(target, 'victim-marker.txt'), 'pre-existing victim data')
@@ -504,6 +521,63 @@ describe('applyInitPlan', () => {
 			// never prove -- by the identity `claimDirectory` itself returned --
 			// that it owns this directory, so it must neither delete nor write
 			// into it.
+			expect(await fs.readdir(engineeringPath))
+				.toEqual(['victim-marker.txt'])
+			expect(await fs.readFile(path.join(engineeringPath, 'victim-marker.txt'), 'utf8'))
+				.toBe('pre-existing victim data')
+		})
+
+		// This test does not rely on the real filesystem's inode-reuse
+		// behavior at all: `directoryIdentity` is stubbed to ALWAYS report the
+		// exact identity captured at claim time for `engineeringPath`, no
+		// matter what real directory instance is actually there -- a forced,
+		// deterministic simulation of the inode-ABA hazard (the Linux ext4
+		// regression above), independent of platform. If ownership were proven
+		// by identity alone, this fools every check in the protocol and the
+		// victim's content would be silently folded into a reported
+		// `applied: true`. The content-based half of the ownership proof must
+		// catch it regardless.
+		it('fails closed via the content-based check even when the identity check itself is completely fooled (inode-ABA, forced)', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			let claimedIdentity: { dev: number, ino: number } | undefined
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				claimDirectory: async (target: string) => {
+					const result = await defaultApplyInitPlanDeps.claimDirectory(target)
+					if (result.outcome === 'claimed') {
+						claimedIdentity = result.identity
+						// The same real race as above: destroy the genuinely empty
+						// claimed directory and substitute a real, pre-populated victim.
+						await fs.rm(target, { recursive: true, force: true })
+						await fs.mkdir(target)
+						await fs.writeFile(path.join(target, 'victim-marker.txt'), 'pre-existing victim data')
+					}
+					return result
+				},
+				directoryIdentity: async (target: string) => {
+					// Forced ABA: report the pre-swap identity for `engineeringPath`
+					// on every call, deterministically, regardless of what is
+					// actually there right now -- simulating a filesystem that always
+					// reuses the freed inode, so the identity half of the ownership
+					// proof is never able to detect this swap.
+					if (target === engineeringPath && claimedIdentity !== undefined)
+						return claimedIdentity
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The victim must survive completely untouched, exactly as above:
+			// the content-based check caught what the (deliberately fooled)
+			// identity check alone could not.
 			expect(await fs.readdir(engineeringPath))
 				.toEqual(['victim-marker.txt'])
 			expect(await fs.readFile(path.join(engineeringPath, 'victim-marker.txt'), 'utf8'))
