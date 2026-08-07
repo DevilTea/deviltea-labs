@@ -48,20 +48,23 @@ function withSideEffectBeforeCall(base: GitExecutor, matches: (args: readonly st
 	}
 }
 
-// `unlinkMock`/`linkMock`/`lstatMock` let a test inject a real-filesystem
-// failure/race strictly inside `applyCreatePlan`'s own internals -- exercised
-// here through the CLI's actual, non-injected dependency wiring (this command
-// has no `applyCreatePlan`-deps injection point of its own; see the
-// exit-mapping regressions below). Every test that does not explicitly arm
-// one gets a plain passthrough to the real implementation.
-const { unlinkMock, linkMock, lstatMock, realFns } = vi.hoisted(() => ({
+// `unlinkMock`/`linkMock`/`lstatMock`/`openMock` let a test inject a
+// real-filesystem failure/race strictly inside `applyCreatePlan`'s own
+// internals -- exercised here through the CLI's actual, non-injected
+// dependency wiring (this command has no `applyCreatePlan`-deps injection
+// point of its own; see the exit-mapping regressions below). Every test that
+// does not explicitly arm one gets a plain passthrough to the real
+// implementation.
+const { unlinkMock, linkMock, lstatMock, openMock, realFns } = vi.hoisted(() => ({
 	unlinkMock: vi.fn(),
 	linkMock: vi.fn(),
 	lstatMock: vi.fn(),
+	openMock: vi.fn(),
 	realFns: {
 		unlink: undefined as unknown as typeof import('node:fs/promises').unlink,
 		link: undefined as unknown as typeof import('node:fs/promises').link,
 		lstat: undefined as unknown as typeof import('node:fs/promises').lstat,
+		open: undefined as unknown as typeof import('node:fs/promises').open,
 	},
 }))
 
@@ -70,10 +73,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 	realFns.unlink = actual.unlink
 	realFns.link = actual.link
 	realFns.lstat = actual.lstat
+	realFns.open = actual.open
 	unlinkMock.mockImplementation((...args: Parameters<typeof actual.unlink>) => actual.unlink(...args))
 	linkMock.mockImplementation((...args: Parameters<typeof actual.link>) => actual.link(...args))
 	lstatMock.mockImplementation((...args: Parameters<typeof actual.lstat>) => actual.lstat(...args))
-	return { ...actual, unlink: unlinkMock, link: linkMock, lstat: lstatMock }
+	openMock.mockImplementation((...args: Parameters<typeof actual.open>) => actual.open(...args))
+	return { ...actual, unlink: unlinkMock, link: linkMock, lstat: lstatMock, open: openMock }
 })
 
 /** Every `execIn` call fails; simulates Git becoming unavailable during project resolution. */
@@ -169,6 +174,7 @@ describe('runArtifactCreateCommand', () => {
 		unlinkMock.mockImplementation((...args: Parameters<typeof realFns.unlink>) => realFns.unlink(...args))
 		linkMock.mockImplementation((...args: Parameters<typeof realFns.link>) => realFns.link(...args))
 		lstatMock.mockImplementation((...args: Parameters<typeof realFns.lstat>) => realFns.lstat(...args))
+		openMock.mockImplementation((...args: Parameters<typeof realFns.open>) => realFns.open(...args))
 	})
 
 	afterEach(async () => {
@@ -176,6 +182,7 @@ describe('runArtifactCreateCommand', () => {
 		unlinkMock.mockClear()
 		linkMock.mockClear()
 		lstatMock.mockClear()
+		openMock.mockClear()
 	})
 
 	function deps(prompts: Prompts = neverPrompts()) {
@@ -581,6 +588,56 @@ describe('runArtifactCreateCommand', () => {
 			.toBe(true)
 		expect(json.diagnostics[0].code)
 			.toBe('EF-VAL-008')
+	})
+
+	// FINDING 2 (P1, sixteenth round): a rejection from the temporary file's
+	// own `handle.close()` (now `OwnedFileLease.release()`, which itself never
+	// throws) must never escape as an uncaught rejection and must never be
+	// misreported as exit `3` (internal defect) when it happens BEFORE any
+	// canonical publication -- it belongs to exit `2`'s execution/permission-
+	// inability class instead. Reproduced here through the CLI's real,
+	// non-injected `applyCreatePlan` wiring by mocking the real `open()` call
+	// itself: the temporary file's handle is genuinely written and fsynced
+	// exactly as production code does, but its `close` is made to reject, and
+	// a genuine race (the canonical target created for real, from inside the
+	// SAME hook) drives a natural pre-publication rejection that the release
+	// failure then overrides.
+	it('exits 2 (applied:false, complete:false, incomplete) -- never exit 3 -- when the temporary file\'s handle close() fails before any canonical publication', async () => {
+		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
+			const [target] = args as [string, string]
+			const real = await realFns.open(...args)
+			if (typeof target === 'string' && target.includes('.tmp-')) {
+				// Simulate a genuine race, from inside this same hook, strictly
+				// after the temporary file's own handle is opened: the
+				// canonical target is created for real, so the post-write
+				// `targetExists` re-check reports a genuine race -- a natural
+				// pre-publication rejection this test's close failure then
+				// overrides.
+				const targetPath = path.join(path.dirname(target), 'REQ-001.md')
+				await fs.writeFile(targetPath, 'raced-in-from-elsewhere')
+				return {
+					writeFile: real.writeFile.bind(real),
+					sync: real.sync.bind(real),
+					stat: real.stat.bind(real),
+					read: real.read.bind(real),
+					close: async () => {
+						await real.close()
+						throw Object.assign(new Error('bad file descriptor'), { code: 'EBADF' })
+					},
+				}
+			}
+			return real
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
 	})
 
 	// FINDING (P1, fourteenth round): the post-publication re-verification's

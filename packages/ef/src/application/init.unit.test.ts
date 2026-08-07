@@ -1447,7 +1447,7 @@ describe('applyInitPlan', () => {
 						// Byte-for-byte identical to what this invocation's own
 						// `writeInitMarker` just wrote: content alone must
 						// never be sufficient to prove ownership.
-						await fs.writeFile(foreignMarkerPath, real.bytes)
+						await fs.writeFile(foreignMarkerPath, real.lease.bytes)
 						const stat = await fs.stat(foreignMarkerPath)
 						foreignIdentity = { dev: stat.dev, ino: stat.ino }
 						await fs.rm(tmpPath, { recursive: true, force: true })
@@ -1474,6 +1474,146 @@ describe('applyInitPlan', () => {
 			const survivingStat = await fs.stat(markerPath)
 			expect({ dev: survivingStat.dev, ino: survivingStat.ino })
 				.toEqual(foreignIdentity)
+		})
+	})
+
+	// FINDING (P0, sixteenth round, matching `application/artifact-create.ts`'s
+	// own finding): the fifteenth-round fix (capture identity/bytes from the
+	// creating handle) is still not enough if that handle is then CLOSED
+	// before `applyInitPlan` finishes deciding what to do with the tracked
+	// file: once closed, a recycled, byte-identical foreign replacement at the
+	// exact same path could report the exact same `(dev, ino)` the closed
+	// handle once did, fooling BOTH the identity comparison and a byte-content
+	// comparison in `entryOwnershipProven`/`entryContentProven` at once.
+	//
+	// Deterministic reproduction (no reliance on real inode recycling): the
+	// REAL `writeInitMarker` succeeds, and its returned lease's creating
+	// handle is left OPEN (this is the fix under test). This invocation's own
+	// marker file's ONE pathname link is then genuinely removed, and a
+	// byte-identical foreign file is installed at the exact same path -- then
+	// `deps.regularFileIdentity(markerPath)` is FORCED to report the ORIGINAL,
+	// handle-captured identity, simulating what a coincidental inode-recycling
+	// ABA would look like to any pathname-only observer. Because the lease's
+	// handle is still open the whole time, the underlying file's own `nlink`
+	// reaches zero the instant its one link is removed, so `fstatLive()`
+	// reports `undefined` (fail closed) regardless of what the forced
+	// `regularFileIdentity(markerPath)` claims -- the foreign marker must
+	// survive completely untouched.
+	describe('tracked-file ownership proof stays valid for as long as the lease is held, immune to a forced pathname-identity match (Finding, sixteenth round)', () => {
+		it('never deletes a byte-identical foreign init-state.json marker installed at the exact same path, even when regularFileIdentity is forced to falsely report a match', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const tmpPath = path.join(engineeringPath, '.tmp')
+			const markerPath = path.join(tmpPath, 'init-state.json')
+
+			let originalIdentity: { dev: number, ino: number } | undefined
+			let foreignBytes: Uint8Array | undefined
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				// Delegate to the REAL primitive first -- the marker is
+				// genuinely created and written, and its handle is left OPEN
+				// (returned as the lease). Only AFTER it reports success does
+				// this hook remove that ONE pathname link for real and install
+				// a byte-identical foreign file at the exact same path --
+				// exercising the real ABA setup the fix must survive.
+				writeInitMarker: async (targetPath: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(targetPath, nonce)
+					if (real.outcome === 'created') {
+						originalIdentity = real.lease.identity
+						foreignBytes = new Uint8Array(real.lease.bytes) // byte-for-byte identical
+						await fs.unlink(targetPath)
+						await fs.writeFile(targetPath, foreignBytes)
+					}
+					return real
+				},
+				// Deterministic ABA simulation: force the pathname-identity
+				// dependency to report the ORIGINAL, handle-captured identity
+				// for `markerPath` -- exactly what a coincidental real inode
+				// recycling would look like to a pathname-only observer. The
+				// fix must not be fooled by this alone.
+				regularFileIdentity: async (target: string) => {
+					if (target === markerPath && originalIdentity !== undefined)
+						return originalIdentity
+					return defaultApplyInitPlanDeps.regularFileIdentity(target)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			// The foreign marker must survive completely untouched -- because
+			// `fstatLive()` reports `undefined` (this invocation's own
+			// marker's `nlink` reached zero the instant its one link was
+			// removed) regardless of what the forced
+			// `regularFileIdentity(markerPath)` claims.
+			const survivingStat = await fs.stat(markerPath)
+			expect({ dev: survivingStat.dev, ino: survivingStat.ino })
+				.not.toEqual(originalIdentity)
+			const survivingBytes = await fs.readFile(markerPath)
+			expect(new Uint8Array(survivingBytes))
+				.toEqual(foreignBytes)
+		})
+	})
+
+	// FINDING (P1, sixteenth round, matching `application/artifact-create.ts`'s
+	// own finding): a rejection from a tracked file's own `handle.close()`
+	// (now `OwnedFileLease.release()`) must never override an already-decided
+	// `applyInitPlan` result by escaping as an uncaught rejection. `release()`
+	// itself never throws; this regression instead mocks its RETURN VALUE
+	// (`released-with-error`) and asserts `applyInitPlan`'s own
+	// `foldLeaseReleases` folds it into `applied: false, outcome: 'incomplete'`
+	// rather than silently reporting a plain, unqualified success.
+	describe('tracked-file lease release() failure containment (Finding 2, sixteenth round)', () => {
+		it('reports applied:false/incomplete (never a rejection, never a plain success) when a tracked file\'s lease fails to release after an otherwise fully successful init', async () => {
+			const plan = await computeValidPlan()
+			const releaseError = Object.assign(new Error('bad file descriptor'), { code: 'EBADF' })
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				createExclusive: async (targetPath: string, bytes: Uint8Array) => {
+					const real = await defaultApplyInitPlanDeps.createExclusive(targetPath, bytes)
+					if (real.outcome !== 'created')
+						return real
+					// `fstatLive`/`identity`/`bytes` are the REAL lease's own,
+					// unmodified -- only `release()`'s reported OUTCOME is
+					// mocked, exactly as a real close failure would surface
+					// through `OwnedFileLease`'s own non-throwing contract.
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								await real.lease.release()
+								return { outcome: 'released-with-error' as const, error: releaseError }
+							},
+						},
+					}
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+			expect(result.applied === false && result.message)
+				.toContain(releaseError.message)
+
+			// The initialization genuinely, fully completed on disk and the
+			// marker was removed -- only releasing a tracked file's lease
+			// afterward failed.
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
+			await expect(fs.stat(path.join(tempDir, '.engineering/.tmp/init-state.json'))).rejects.toThrow()
 		})
 	})
 })
