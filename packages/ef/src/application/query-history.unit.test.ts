@@ -241,25 +241,31 @@ Rationale text for REQ-001.
 
 ## Lifecycle
 
-Superseded after REQ-002 was introduced as its replacement.
+Superseded after REQ-003 was introduced as its replacement.
 `
 
 /** Same content as `REQ_001_WITH_RESOURCE`, but still `active` (no `Lifecycle` section, `EF-BODY-010`) -- used while REQ-001's Resource is added before supersession. */
 const REQ_001_WITH_RESOURCE_ACTIVE = REQ_001_WITH_RESOURCE
 	.replace('status: superseded', 'status: active')
-	.replace(/\n## Lifecycle\n\nSuperseded after REQ-002 was introduced as its replacement\.\n$/, '')
+	.replace(/\n## Lifecycle\n\nSuperseded after REQ-003 was introduced as its replacement\.\n$/, '')
 
 /**
  * Same content as `REQ_001_WITH_RESOURCE`, but with a valid `superseded-by`
- * relation to REQ-002. Eleventh-round review Finding 2: every consumed
+ * relation to REQ-003 -- a THIRD, already-`active` requirement (not REQ-002,
+ * which this shared fixture deliberately keeps `draft` forever for its own
+ * draft-only-history tests). Eleventh-round review Finding 2: every consumed
  * authoritative commit is now fully snapshot-validated, which includes
  * 05-supersession.md's own single-state invariants -- a `superseded` Artifact
- * with no direct replacement is `EF-SUP-001`, error severity. Used only by
- * the shared 7-commit fixture below (whose REQ-002 genuinely exists as a
- * valid replacement target); other, isolated fixtures elsewhere in this file
- * that reuse `REQ_001_WITH_RESOURCE` directly are unaffected by this constant.
+ * with no direct replacement is `EF-SUP-001`, error severity. Twelfth-round
+ * review Finding 1: the shared, graph-wide transition core additionally
+ * requires the direct replacement to be genuinely `active` AT THIS EXACT
+ * TRANSITION (`EF-SUP-004`, 05-supersession.md "atomicity") -- REQ-002 would
+ * never satisfy that (it stays `draft` throughout this fixture), so REQ-003
+ * is used instead. Used only by the shared 7-commit fixture below; other,
+ * isolated fixtures elsewhere in this file that reuse `REQ_001_WITH_RESOURCE`
+ * directly are unaffected by this constant.
  */
-const REQ_001_SUPERSEDED_WITH_REPLACEMENT = REQ_001_WITH_RESOURCE.replace('relations: []', 'relations:\n  - type: superseded-by\n    target: REQ-002')
+const REQ_001_SUPERSEDED_WITH_REPLACEMENT = REQ_001_WITH_RESOURCE.replace('relations: []', 'relations:\n  - type: superseded-by\n    target: REQ-003')
 
 describe('computeHistory', () => {
 	let tempDir: string
@@ -279,10 +285,17 @@ describe('computeHistory', () => {
 		await writeFile(tempDir, '.engineering/req/REQ-002.md', reqMd('REQ-002', 'draft'))
 		oids.commit2 = commitAll(tempDir, 'draft REQ-002')
 
-		// Commit 3: CHG-001 (completed) introduces REQ-001 -- both files new in this commit.
-		await writeFile(tempDir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+		// Commit 3: CHG-001 (completed) introduces REQ-001 -- both files new in
+		// this commit. Also introduces REQ-003 (active) in the SAME commit --
+		// used only as REQ-001's eventual, genuinely-active supersession
+		// replacement at commit6 below (twelfth-round review Finding 1:
+		// `EF-SUP-004` requires the direct replacement to be active AT THAT
+		// EXACT TRANSITION); REQ-003 itself is never queried by any test in
+		// this shared fixture.
+		await writeFile(tempDir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001\n  - type: introduces\n    target: REQ-003'))
 		await writeFile(tempDir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
-		oids.commit3 = commitAll(tempDir, 'introduce REQ-001 via CHG-001')
+		await writeFile(tempDir, '.engineering/req/REQ-003.md', reqMd('REQ-003', 'active'))
+		oids.commit3 = commitAll(tempDir, 'introduce REQ-001 and REQ-003 via CHG-001')
 
 		// Commit 4: draft-only edit to REQ-002 (still draft, no CHG).
 		await writeFile(tempDir, '.engineering/req/REQ-002.md', reqMd('REQ-002', 'draft')
@@ -2615,6 +2628,144 @@ describe('computeHistory: eleventh-round review Finding 3 (lifecycle-transition 
 			const outcome = await computeHistory(repo, firstAppearanceOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
 			expect(outcome)
 				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+})
+
+describe('computeHistory: twelfth-round review Finding 1 (graph-wide transition semantics, not a target-scoped subset)', () => {
+	// A target-scoped history walk only narrows every completed CHG's declared
+	// effect, lifecycle edge, and coverage to the ONE queried target. The real
+	// commit-time transaction validator (`transition-validation.ts`) instead
+	// proves CHG truthfulness/coverage for EVERY target, supersession
+	// atomicity, and lifecycle legality across the WHOLE graph in the same
+	// commit. These three tests prove `computeHistory` now reuses that SAME
+	// shared, graph-wide `evaluateTransitionBoundary` core over every
+	// post-bootstrap boundary it consumes, rather than a narrower per-target
+	// subset of the same checks.
+
+	it('fails with untrusted-data when the queried target\'s own completing CHG effect is truthful, but the SAME transaction ALSO falsely declares a "retires" effect on an unrelated, byte-identical target', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-f1-false-retire-unrelated-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			await writeFile(dir, '.engineering/req/REQ-002.md', reqMd('REQ-002', 'active'))
+			commitAll(dir, 'bootstrap, REQ-001 and REQ-002 both active')
+
+			// CHG-001 completes declaring BOTH a truthful `modifies -> REQ-001`
+			// (REQ-001's own body genuinely changes) AND a false
+			// `retires -> REQ-002` -- REQ-002's own file is left
+			// byte-for-byte UNCHANGED, so it was never genuinely retired
+			// (still `active`, identical bytes). A target-scoped walk querying
+			// REQ-001 only ever narrows to REQ-001's own relation/lifecycle
+			// edge, sees a truthful `modifies`, and would report `complete`.
+			// The real transaction validator rejects this whole commit
+			// (EF-CHG-006: an effect declared on an unchanged target) -- this
+			// walk must reuse that SAME graph-wide semantics.
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active')
+				.replace('Body text', 'Revised body text'))
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: modifies\n    target: REQ-001\n  - type: retires\n    target: REQ-002'))
+			const untrustworthyOid = commitAll(dir, 'CHG-001 truthfully modifies REQ-001 but falsely claims retires on unchanged REQ-002')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, untrustworthyOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('fails with untrusted-data when an UNRELATED active target mutates with no completing CHG at all, even though the queried target is byte-for-byte untouched in the same commit', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-f1-unrelated-uncovered-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			await writeFile(dir, '.engineering/req/REQ-002.md', reqMd('REQ-002', 'active'))
+			commitAll(dir, 'bootstrap, REQ-001 and REQ-002 both active')
+
+			// REQ-002 -- entirely unrelated to the REQ-001 query -- mutates its
+			// own body with NO completing CHG anywhere in this commit; REQ-001
+			// itself is left byte-for-byte untouched. A target-scoped walk
+			// querying REQ-001 never examines REQ-002's own coverage at all,
+			// so it would see no change to REQ-001's aggregate and report
+			// `complete`. The real transaction validator rejects this whole
+			// commit (EF-CHG-005: a changed, CHG-required target -- REQ-002 --
+			// with no completing CHG effect) -- this walk must reuse that SAME
+			// graph-wide semantics, even for a target the query never asked
+			// about.
+			await writeFile(dir, '.engineering/req/REQ-002.md', reqMd('REQ-002', 'active')
+				.replace('Body text', 'Uncovered revised body text'))
+			const uncoveredOid = commitAll(dir, 'REQ-002 mutated with no completing CHG at all; REQ-001 untouched')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, uncoveredOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome)
+				.toEqual({ kind: 'untrusted-data' })
+		}
+		finally {
+			await fs.rm(dir, { recursive: true, force: true })
+		}
+	})
+
+	it('remains complete:true (over-blocking guard) for a clean multi-commit history where a DIFFERENT target has its own, independently valid CHG-covered lifecycle in the same walk', async () => {
+		const dir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-history-f1-clean-multi-target-')))
+		try {
+			git(dir, ['init', '-q', '-b', 'main'])
+			await writeFile(dir, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(dir, '.engineering/.gitignore', '.cache/\n.generated/\n.tmp/\n.lock\n')
+			await writeFile(dir, '.engineering/PROJECT.md', PROJECT_MD)
+			commitAll(dir, 'bootstrap, no requirements yet')
+
+			// CHG-001 completes, legitimately introducing REQ-001 (absent ->
+			// present, fresh in this SAME commit).
+			await writeFile(dir, '.engineering/chg/CHG-001.md', chgMd('CHG-001', 'completed', '  - type: introduces\n    target: REQ-001'))
+			await writeFile(dir, '.engineering/req/REQ-001.md', reqMd('REQ-001', 'active'))
+			const introduceReq001Oid = commitAll(dir, 'CHG-001 introduces REQ-001')
+
+			// A LATER, separate commit: CHG-002 completes, legitimately
+			// introducing REQ-002 (also absent -> present, fresh in this
+			// commit) -- REQ-001 untouched. The pure graph-wide core runs
+			// over EVERY adjacent boundary, including this one, whose only
+			// change belongs to REQ-002; it must not spuriously reject
+			// REQ-001's own already-complete, valid history.
+			await writeFile(dir, '.engineering/chg/CHG-002.md', chgMd('CHG-002', 'completed', '  - type: introduces\n    target: REQ-002'))
+			await writeFile(dir, '.engineering/req/REQ-002.md', reqMd('REQ-002', 'active'))
+			commitAll(dir, 'CHG-002 introduces REQ-002, independently of REQ-001')
+
+			const repo = createGitRepository(dir, createGitExecutor())
+			const outcome = await computeHistory(repo, introduceReq001Oid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(outcome.kind)
+				.toBe('complete')
+			if (outcome.kind !== 'complete')
+				return
+			expect(outcome.effects)
+				.toEqual([
+					expect.objectContaining({ effect: 'introduces', status_before: null, status_after: 'active', commit_oid: introduceReq001Oid }),
+				])
+
+			// Querying past BOTH commits (REQ-001 untouched by the second) must
+			// still report REQ-001's own history as complete and unaffected.
+			const laterTipOid = git(dir, ['rev-parse', 'HEAD'])
+				.trim()
+			const laterOutcome = await computeHistory(repo, laterTipOid, 'REQ-001', 'requirement', new Map(), INTEGRATION_REF)
+			expect(laterOutcome.kind)
+				.toBe('complete')
+			if (laterOutcome.kind !== 'complete')
+				return
+			expect(laterOutcome.effects)
+				.toEqual([
+					expect.objectContaining({ effect: 'introduces', status_before: null, status_after: 'active', commit_oid: introduceReq001Oid }),
+				])
 		}
 		finally {
 			await fs.rm(dir, { recursive: true, force: true })

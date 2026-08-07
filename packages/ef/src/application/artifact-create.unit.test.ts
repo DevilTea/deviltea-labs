@@ -1024,6 +1024,92 @@ describe('applyCreatePlan', () => {
 		})
 	})
 
+	// FINDING 3 (P1, twelfth round): `LoadSnapshotResult` includes `read-error`
+	// (and execution/unavailability reasons) alongside proven state-change
+	// reasons (`engineering-swapped`, `engineering-missing`), but the
+	// pre-write and pre-publication re-verification checkpoints previously
+	// flattened EVERY reload failure into the same typed race rejection. A
+	// read/permission/I/O failure does not establish that another writer
+	// invalidated the plan -- it establishes only that this invocation could
+	// not finish checking. Such a failure must be reported as `applied: false,
+	// outcome: 'incomplete'`, never `'raced'`.
+	describe('a read-error re-verifying the plan is reported as incomplete, never a claimed race (Finding 3 regression, twelfth round)', () => {
+		it('reports incomplete (not raced) when the pre-write content-generation reload itself fails with a read-error', async () => {
+			const plan = computePlanOrThrow()
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				loadSnapshot: async () => ({ ok: false as const, reason: 'read-error' as const, message: 'stub: simulated I/O failure re-verifying the project' }),
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+			expect(result.applied === false && result.message)
+				.toContain('stub: simulated I/O failure re-verifying the project')
+
+			// Nothing was written: this checkpoint runs before `ensureDirectory`.
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+			await expect(fs.stat(path.join(tempDir, '.engineering/req'))).rejects.toThrow()
+		})
+
+		it('reports incomplete (not raced) when the pre-publication allocation reload itself fails with a read-error', async () => {
+			const plan = computePlanOrThrow()
+			let loadSnapshotCalls = 0
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				loadSnapshot: async (projectRoot: string, expectedEngineeringIdentity: FileIdentity) => {
+					loadSnapshotCalls += 1
+					// First call: the pre-write content-generation checkpoint -- let it
+					// observe the real, still-valid project so that checkpoint passes,
+					// isolating this regression to the SECOND (pre-publication) reload.
+					if (loadSnapshotCalls > 1)
+						return { ok: false as const, reason: 'read-error' as const, message: 'stub: simulated I/O failure immediately before publication' }
+					return defaultApplyCreatePlanDeps.loadSnapshot(projectRoot, expectedEngineeringIdentity)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+			expect(result.applied === false && result.message)
+				.toContain('stub: simulated I/O failure immediately before publication')
+			expect(loadSnapshotCalls)
+				.toBe(2)
+
+			await expect(fs.stat(path.join(tempDir, plan.path))).rejects.toThrow()
+			const leftoverTempFiles = (await fs.readdir(path.join(tempDir, '.engineering/req')))
+				.filter(name => name.includes('.tmp-'))
+			expect(leftoverTempFiles)
+				.toEqual([])
+		})
+
+		// `engineering-swapped` (a PROVEN identity mismatch, as opposed to
+		// `read-error`'s mere inability to check) must still be reported as a
+		// typed race, exactly as before -- this reclassification narrows what
+		// counts as a race, it does not widen `incomplete` to also cover proven
+		// state changes.
+		it('still reports raced (not incomplete) when the pre-publication reload itself reports a proven `engineering-swapped` mismatch', async () => {
+			const plan = computePlanOrThrow()
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				loadSnapshot: async () => ({ ok: false as const, reason: 'engineering-swapped' as const, message: 'stub: simulated proven identity mismatch' }),
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('raced')
+		})
+	})
+
 	// FINDING 2 (P1, ninth round): the pre-publication `targetExists` re-check
 	// alone proves only that THIS invocation's own candidate path is still
 	// unclaimed -- it says nothing about whether the requested prefix's
@@ -1273,6 +1359,138 @@ Because it is needed.
 				.filter(name => name.includes('.tmp-'))
 			expect(leftoverTempFiles.length)
 				.toBe(1)
+		})
+	})
+
+	// FINDING 2 (P1, twelfth round): the post-publication re-verification just
+	// above (managed chain identity + `targetPath`'s own `fstat` identity
+	// bound back to `tempIdentity`) proves only that the published file is
+	// genuinely THIS INVOCATION's own file, through a managed chain carrying
+	// familiar `dev`/`ino` pairs -- never that it was published into the
+	// exact PROJECT GENERATION this plan was authorized against. A canonical
+	// type directory replaced by a content-distinct generation strictly after
+	// the pre-publication reload but from INSIDE `publishViaHardLink` itself
+	// -- whose identity is forced to alias the value this invocation already
+	// captured, exactly the inode-recycling hazard `ContentGenerationWitness`
+	// documents (simulated here deterministically via a forced-identity stub,
+	// never real inode recycling) -- passes every pre-Finding-2-twelfth-round
+	// check even though it demonstrably contains an Artifact this plan never
+	// accounted for.
+	describe('post-publication content-generation witness (Finding 2 regression, twelfth round)', () => {
+		it('retracts the publish (ownership-proven) and reports a typed race -- rather than a plain success -- when the canonical type directory is replaced by a content-distinct generation from INSIDE publishViaHardLink after the real link, with the replacement\'s identity forced to alias the value already captured', async () => {
+			const engineeringDir = path.join(tempDir, '.engineering')
+			await fs.writeFile(path.join(engineeringDir, 'ef.yaml'), CONFIG_YAML)
+			await fs.writeFile(path.join(engineeringDir, '.gitignore'), GITIGNORE)
+			await fs.writeFile(path.join(engineeringDir, 'PROJECT.md'), PROJECT_MD)
+
+			const loaded = await loadSnapshotFromWorkingTree(tempDir)
+			expect(loaded.ok)
+				.toBe(true)
+			if (!loaded.ok)
+				return
+
+			const planResult = computeCreatePlan({ snapshot: loaded.snapshot, type: 'req', title: 'Title', summary: 'Summary text.', engineeringIdentity })
+			expect(planResult.ok)
+				.toBe(true)
+			if (!planResult.ok)
+				return
+			const plan = planResult.plan
+			// The exact reproduction the review finding describes: the FIRST
+			// REQ-001 ever, so a same-prefix-only allocation re-check would
+			// trivially match either way -- only the COMPLETE visible ID set
+			// tells the replacement generation apart.
+			expect(plan.id)
+				.toBe('REQ-001')
+
+			const targetPath = path.join(tempDir, plan.path)
+			const reqDirPath = path.join(engineeringDir, 'req')
+			let forcedTypeDirIdentity: FileIdentity | undefined
+
+			// Forces every observation of the `req` canonical directory's path
+			// to report whichever real identity was FIRST observed there, no
+			// matter how many times the real directory instance backing that
+			// path is later substituted -- exactly what a filesystem recycling
+			// a just-freed inode for a brand-new directory would report. Every
+			// OTHER path (in particular `.engineering` itself, never touched by
+			// this test) still reports its genuine, unforced identity.
+			function forcedIdentity(target: string): Promise<FileIdentity | undefined> {
+				return realDirectoryIdentity(target)
+					.then((real) => {
+						if (real === undefined)
+							return undefined
+						if (target !== reqDirPath)
+							return real
+						forcedTypeDirIdentity ??= real
+						return forcedTypeDirIdentity
+					})
+			}
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				directoryIdentity: forcedIdentity,
+				loadSnapshot: (root: string, expectedEngineeringIdentity: FileIdentity) =>
+					loadSnapshotFromWorkingTree(root, { ...defaultSnapshotFsDeps, directoryIdentity: forcedIdentity }, { expectedEngineeringIdentity }),
+				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
+					const realResult = await defaultApplyCreatePlanDeps.publishViaHardLink(tempPathArg, targetPathArg)
+					if (realResult.outcome === 'published') {
+						// Triggered from INSIDE this dependency, AFTER the real link()
+						// genuinely succeeded: build a content-distinct replacement
+						// `req` directory. The just-published file's exact inode is
+						// preserved at BOTH the canonical name and the temporary name
+						// (so the post-publication file-identity check, AND this
+						// invocation's own best-effort temp-file cleanup, both keep
+						// working) -- but an EXTRA, fully valid Requirement this plan
+						// never accounted for is ALSO present: a genuinely different
+						// project generation's `req` directory, not a mere rename of
+						// the original.
+						const replacementDir = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-create-replacement-req-'))
+						await fs.link(targetPathArg, path.join(replacementDir, path.basename(targetPathArg)))
+						await fs.link(tempPathArg, path.join(replacementDir, path.basename(tempPathArg)))
+						await fs.writeFile(path.join(replacementDir, 'REQ-999.md'), `---
+schema: ef/requirement@1
+type: requirement
+id: REQ-999
+title: Unrelated Replacement Requirement
+status: draft
+summary: An Artifact visible only in the replacement generation, never authorized by this plan.
+tags: []
+relations: []
+resources: []
+---
+
+## Requirement
+
+Placeholder.
+
+## Rationale
+
+Placeholder.
+
+## Acceptance Criteria
+
+- Placeholder.
+`)
+						await fs.rm(reqDirPath, { recursive: true, force: true })
+						await fs.rename(replacementDir, reqDirPath)
+					}
+					return realResult
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('raced')
+
+			// Only the entry this invocation could prove (by inode) was its own
+			// just-published file was retracted; the replacement directory's
+			// otherwise-foreign content -- the extra Requirement this plan never
+			// authorized -- is left completely untouched.
+			await expect(fs.stat(targetPath)).rejects.toThrow()
+			expect(await fs.readdir(reqDirPath))
+				.toEqual(['REQ-999.md'])
 		})
 	})
 

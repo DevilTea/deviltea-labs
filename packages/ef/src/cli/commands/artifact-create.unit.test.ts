@@ -398,6 +398,43 @@ describe('runArtifactCreateCommand', () => {
 			.toBe('raced content')
 	})
 
+	// FINDING 3 (P1, twelfth round): `applyCreatePlan`'s pre-write re-
+	// verification reload can fail with `read-error` (an I/O failure), not
+	// only a proven race -- and a read/permission/I/O failure does not
+	// establish that another writer invalidated the plan. This must map to
+	// exit `2` (`EF-VAL-001`, `complete: false`), never exit `1`
+	// (`EF-ID-004`/`raced`, `complete: true`) as a proven race would.
+	// Reproduced through the CLI's real, non-injected `applyCreatePlan`
+	// wiring (this command has no dependency-injection seam of its own for
+	// it): `.gitignore` is read unconditionally by
+	// `loadSnapshotFromWorkingTree` but never inspected by project
+	// resolution, so replacing it with a directory strictly between
+	// interactive confirmation and `applyCreatePlan`'s own internal reload
+	// forces that LATER reload -- not the command's initial project load --
+	// to fail with `read-error`.
+	it('exits 2 (incomplete, EF-VAL-001 -- not exit 1/raced) when the pre-write re-verification reload inside applyCreatePlan itself fails with a read-error', async () => {
+		const prompts: Prompts = {
+			...neverPrompts(),
+			confirmMutation: async () => {
+				await fs.rm(path.join(root, '.engineering/.gitignore'))
+				await fs.mkdir(path.join(root, '.engineering/.gitignore'))
+				return true
+			},
+		}
+		const outcome = await runArtifactCreateCommand(baseOptions({ format: 'json', noInput: false }), deps(prompts))
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-001')
+
+		await expect(fs.stat(path.join(root, '.engineering/req/REQ-001.md'))).rejects.toThrow()
+	})
+
 	// ---- Symlinked managed-directory chain (EF-FS-004 domain rejection) -------
 
 	it('exits 1 (EF-FS-004) and writes nothing outside the project when the canonical type directory is a symlink', async () => {

@@ -1,4 +1,5 @@
 import type { GitRepository } from '../git/repository'
+import type { TransitionBoundarySide } from './transition-validation'
 import { execFileSync } from 'node:child_process'
 import fs from 'node:fs/promises'
 import os from 'node:os'
@@ -6,7 +7,9 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
 import { createGitRepository } from '../git/repository'
-import { validateTransition } from './transition-validation'
+import { loadSnapshotFromCommit } from './snapshot'
+import { validateSnapshot } from './snapshot-validation'
+import { evaluateTransitionBoundary, validateTransition } from './transition-validation'
 
 const CONFIG_YAML = `schema: ef/config@1
 repository:
@@ -1478,5 +1481,89 @@ Some consequences.
 			.toBe('ADR-001')
 		expect(sup013[0]!.message)
 			.toContain('REQ-070')
+	})
+})
+
+describe('evaluateTransitionBoundary (twelfth-round review Finding 1: exported pure graph-wide core)', () => {
+	let tempDir: string
+
+	beforeEach(async () => {
+		tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-transition-boundary-')))
+		git(tempDir, ['init', '-q', '-b', 'main'])
+	})
+
+	afterEach(async () => {
+		await fs.rm(tempDir, { recursive: true, force: true })
+	})
+
+	function repo() {
+		return createGitRepository(tempDir, createGitExecutor())
+	}
+
+	/**
+	 * Assembles a {@link TransitionBoundarySide} for `oid` using ONLY the same
+	 * exported, general-purpose building blocks `transition-validation.ts`'s
+	 * own (private) `materialize` helper uses internally
+	 * (`loadSnapshotFromCommit` + `validateSnapshot` + a blob-OID tree index) --
+	 * proving `evaluateTransitionBoundary` is usable standalone, by a caller
+	 * with no access to this module's own ref/parentage orchestration (exactly
+	 * `query-history.ts`'s own position, walking historical commits it
+	 * resolved itself).
+	 */
+	async function boundarySideAt(git: GitRepository, oid: string): Promise<TransitionBoundarySide> {
+		const treeResult = await git.readTree(oid)
+		if (treeResult.kind !== 'resolved')
+			throw new Error(`expected a resolved tree at '${oid}', got '${treeResult.kind}'`)
+		const oidByPath = new Map<string, string>()
+		for (const entry of treeResult.entries) {
+			if (entry.type === 'blob')
+				oidByPath.set(entry.path, entry.oid)
+		}
+		const loadResult = await loadSnapshotFromCommit(git, oid)
+		if (!loadResult.ok)
+			throw new Error(`expected to load a snapshot at '${oid}', got reason '${loadResult.reason}'`)
+		return { snapshot: loadResult.snapshot, validation: validateSnapshot(loadResult.snapshot), oidByPath }
+	}
+
+	it('is directly callable as a pure function over two independently-assembled boundary sides, with no ref/parentage orchestration, and agrees with validateTransition\'s own diagnostics for the identical commit pair', async () => {
+		await writeMinimalProject(tempDir)
+		const baselineOid = commitAll(tempDir, 'bootstrap')
+
+		// A knowledge Artifact first appearing directly `active` with no
+		// completed CHG `introduces` effect -- illegal (EF-LIFE-003) -- so this
+		// pair carries a real, non-empty diagnostic to compare.
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', status: 'active' }))
+		const proposedOid = commitAll(tempDir, 'REQ-001 first appears active with no completed CHG introduces effect')
+
+		const before = await boundarySideAt(repo(), baselineOid)
+		const after = await boundarySideAt(repo(), proposedOid)
+
+		const pureDiagnostics = evaluateTransitionBoundary({ before, after, beforeOid: baselineOid, afterOid: proposedOid })
+		expect(pureDiagnostics.some(d => d.code === 'EF-LIFE-003'))
+			.toBe(true)
+
+		// `validateTransition` is a thin orchestrator around this SAME core: for
+		// the identical commit pair, its own diagnostics (minus whatever the
+		// orchestrator layer itself contributes, which is none for this valid,
+		// correctly-parented pair) must match exactly.
+		const orchestrated = await validateTransition({ git: repo(), baselineOid, proposedOid, operationStartRefOid: baselineOid })
+		expect(codesOf(orchestrated.diagnostics))
+			.toEqual(codesOf(pureDiagnostics))
+	})
+
+	it('reports no diagnostics for a genuinely valid transition (over-blocking guard)', async () => {
+		await writeMinimalProject(tempDir)
+		const baselineOid = commitAll(tempDir, 'bootstrap')
+
+		await writeFile(tempDir, '.engineering/chg/CHG-001.md', changeMd({ id: 'CHG-001', relations: '\n  - type: introduces\n    target: REQ-001' }))
+		await writeFile(tempDir, '.engineering/req/REQ-001.md', requirementMd({ id: 'REQ-001', status: 'active' }))
+		const proposedOid = commitAll(tempDir, 'CHG-001 completes, activates REQ-001')
+
+		const before = await boundarySideAt(repo(), baselineOid)
+		const after = await boundarySideAt(repo(), proposedOid)
+
+		const pureDiagnostics = evaluateTransitionBoundary({ before, after, beforeOid: baselineOid, afterOid: proposedOid })
+		expect(pureDiagnostics)
+			.toEqual([])
 	})
 })
