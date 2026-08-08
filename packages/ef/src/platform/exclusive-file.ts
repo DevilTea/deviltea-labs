@@ -44,7 +44,7 @@ import type { LeaseReleaseResult, OwnedFileLease } from './hard-link-publish'
 import { Buffer } from 'node:buffer'
 import { open, readFile } from 'node:fs/promises'
 
-export type { LeaseReleaseResult, OwnedFileLease } from './hard-link-publish'
+export type { LeaseReleaseResult, LiveFstatResult, OwnedFileLease } from './hard-link-publish'
 
 export type CreateExclusiveResult
 	= | { outcome: 'created', lease: OwnedFileLease }
@@ -81,6 +81,19 @@ function createOwnedFileLease(handle: FileHandle, identity: FileIdentity, bytes:
 			}
 			catch {
 				return undefined
+			}
+		},
+		async fstatLiveDetailed() {
+			if (released)
+				return { status: 'error', error: Object.assign(new Error('lease already released'), { code: 'ERR_LEASE_RELEASED' }) }
+			try {
+				const stats = await handle.stat()
+				if (stats.nlink === 0)
+					return { status: 'unlinked' }
+				return { status: 'live', identity: identityOf(stats) }
+			}
+			catch (error) {
+				return { status: 'error', error: error as NodeJS.ErrnoException }
 			}
 		},
 		async release() {
