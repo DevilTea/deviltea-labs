@@ -2167,4 +2167,117 @@ Placeholder.
 				.toEqual([])
 		})
 	})
+
+	// FINDING B (P1, eighteenth round): `applyCreatePlan` released the
+	// temporary file's lease (`tempLease`) only after a successful,
+	// non-throwing return from `runPublicationSteps` -- a bare `const natural
+	// = await runPublicationSteps(...)`, with no surrounding `try`. Every
+	// pre-publication re-check inside `runPublicationSteps`
+	// (`verifyManagedDirectoryChain`'s `isSymlink`/`directoryIdentity`,
+	// `verifyAllocationStillValid`'s reload, `targetExists`) can rethrow a
+	// non-`ENOENT` `lstat` failure exactly like any other `lstat`-based check
+	// in this package (`platform/fs-facts.ts`'s own `tryLstat`): once
+	// `writeTempFileComplete` had already returned `tempLease`, a real
+	// `EACCES`/`EIO` from the very FIRST post-write chain probe let that lease
+	// escape completely unreleased as an uncaught rejection -- directly
+	// contradicting `applyCreatePlan`'s own documented "released EXACTLY
+	// ONCE" guarantee -- and the CLI's generic top-level `catch` then reported
+	// exit `3` (an internal implementation defect) for what is, in fact, an
+	// ordinary execution/permission failure (13-cli-contract.md exit `2`'s
+	// own class).
+	describe('escaped-exception lease finalization and error classification (Finding B, eighteenth round)', () => {
+		it('releases the already-acquired temp-file lease exactly once and reports applied:false/incomplete (never a rejection) when a non-ENOENT chain probe throws immediately after a real temp write succeeds', async () => {
+			const plan = computePlanOrThrow()
+			const targetPath = path.join(tempDir, plan.path)
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+			let tempWritten = false
+			let probeThrown = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					tempWritten = true
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				// The very first probe `runPublicationSteps` makes immediately
+				// after the temporary write completes (`verifyManagedDirectoryChain`'s
+				// own `isSymlink` re-check of the managed chain).
+				isSymlink: async (target: string) => {
+					if (tempWritten && !probeThrown) {
+						probeThrown = true
+						throw probeError
+					}
+					return defaultApplyCreatePlanDeps.isSymlink(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(probeThrown)
+				.toBe(true)
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+			expect(result.applied === false && result.message)
+				.toContain(probeError.message)
+			// Structured finalization: the temp-file lease -- already acquired by
+			// the time the probe threw -- was released exactly once, never
+			// skipped by the escaping exception.
+			expect(releaseCallCount)
+				.toBe(1)
+
+			// No canonical publication occurred.
+			await expect(fs.stat(targetPath)).rejects.toThrow()
+		})
+
+		it('control: still propagates a genuine programmer/invariant error (e.g. a TypeError) as a rejection, but only after releasing the already-acquired temp-file lease exactly once', async () => {
+			const plan = computePlanOrThrow()
+			let tempWritten = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					tempWritten = true
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				isSymlink: async (target: string) => {
+					if (tempWritten)
+						throw new TypeError('invariant violated: unreachable state')
+					return defaultApplyCreatePlanDeps.isSymlink(target)
+				},
+			}
+
+			await expect(applyCreatePlan(plan, tempDir, deps))
+				.rejects.toThrow(TypeError)
+			expect(releaseCallCount)
+				.toBe(1)
+		})
+	})
 })
