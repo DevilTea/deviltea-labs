@@ -2050,6 +2050,158 @@ describe('applyInitPlan', () => {
 		})
 	})
 
+	// FINDING (P1, twenty-first round, correcting the twentieth round's own
+	// fix): the twentieth round's own fix over-corrected -- its `readDirectory`
+	// catch folded EVERY error alike into `'unavailable'`, including
+	// `ENOENT`/`ENOTDIR`. Unlike `EACCES`/`EIO`, THESE codes are themselves
+	// POSITIVE PROOF that `engineeringPath` no longer denotes a directory this
+	// invocation can list at all (e.g. renamed or removed by a racing actor in
+	// the narrow window between `verifyClaimIntact`'s `plan.targetRoot`
+	// identity re-check and this `readdir` call) -- exactly the same kind of
+	// proven discrepancy as the positive-mismatch control case immediately
+	// above. Folding them into `'unavailable'` instead reached the final,
+	// post-marker-removal checkpoint as `applied: true, outcome:
+	// 'cleanup-failed'`, silently upgrading a claim this validator itself
+	// defines as lost into a reported success -- contradicting the very
+	// control case the twentieth round's own fix introduced. These two
+	// regressions fail against that prior implementation (both would report
+	// `applied: true, outcome: 'cleanup-failed'`) and pass only once
+	// `readDirectory`'s catch classifies `ENOENT`/`ENOTDIR` as a `'mismatch'`
+	// via `isProvenDirectoryGone`, while every other error code (the existing
+	// `EACCES` regression above) keeps reporting `'unavailable'` unchanged.
+	describe('a readDirectory failure whose error code itself proves engineeringPath is gone/not-a-directory is a proven mismatch, never folded into cleanup-failed (Finding, twenty-first round)', () => {
+		it('reports applied:false/incomplete (never applied:true/cleanup-failed) when readDirectory(engineeringPath) throws a real-shaped ENOENT immediately after the marker was successfully unlinked', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			const probeError = Object.assign(new Error('ENOENT: no such file or directory, scandir'), { code: 'ENOENT', syscall: 'scandir' })
+			let markerUnlinked = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+				// Throws only once the marker has genuinely, physically been
+				// removed -- every earlier checkpoint (before publication
+				// completed) still observes faithfully and must not be disturbed.
+				readDirectory: async (targetPath: string) => {
+					if (markerUnlinked && targetPath === engineeringPath)
+						throw probeError
+					return defaultApplyInitPlanDeps.readDirectory(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		it('reports applied:false/incomplete (never applied:true/cleanup-failed) when readDirectory(engineeringPath) throws a real-shaped ENOTDIR immediately after the marker was successfully unlinked', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			const probeError = Object.assign(new Error('ENOTDIR: not a directory, scandir'), { code: 'ENOTDIR', syscall: 'scandir' })
+			let markerUnlinked = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+				readDirectory: async (targetPath: string) => {
+					if (markerUnlinked && targetPath === engineeringPath)
+						throw probeError
+					return defaultApplyInitPlanDeps.readDirectory(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		it('control: still reports applied:true/cleanup-failed when readDirectory(engineeringPath) throws EACCES (mere observation noise, not a proven mismatch) immediately after the marker was successfully unlinked', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'scandir' })
+			let markerUnlinked = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (markerPathArg: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPathArg, nonce)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				createExclusive: async (targetPath: string, bytes: Uint8Array) => {
+					const real = await defaultApplyInitPlanDeps.createExclusive(targetPath, bytes)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+				readDirectory: async (targetPath: string) => {
+					if (markerUnlinked && targetPath === engineeringPath)
+						throw probeError
+					return defaultApplyInitPlanDeps.readDirectory(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('cleanup-failed')
+
+			await expect(fs.stat(markerPath)).rejects.toThrow()
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
+
+			expect(releaseCallCount)
+				.toBe(1 + plan.files.length)
+		})
+	})
+
 	// FINDING 2 (P2, nineteenth round, correcting the eighteenth round's own
 	// fix): `isFsSystemError`'s prior bare `typeof error.code === 'string'`
 	// check misclassified a Node internal argument/invariant error -- which
