@@ -2189,7 +2189,7 @@ Placeholder.
 		it('releases the already-acquired temp-file lease exactly once and reports applied:false/incomplete (never a rejection) when a non-ENOENT chain probe throws immediately after a real temp write succeeds', async () => {
 			const plan = computePlanOrThrow()
 			const targetPath = path.join(tempDir, plan.path)
-			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
 			let tempWritten = false
 			let probeThrown = false
 			let releaseCallCount = 0
@@ -2276,6 +2276,57 @@ Placeholder.
 
 			await expect(applyCreatePlan(plan, tempDir, deps))
 				.rejects.toThrow(TypeError)
+			expect(releaseCallCount)
+				.toBe(1)
+		})
+	})
+
+	// FINDING 2 (P2, nineteenth round, correcting the eighteenth round's own
+	// fix; matching `application/init.ts`'s own identical finding and fix):
+	// `isFsSystemError`'s prior bare `typeof error.code === 'string'` check
+	// misclassified a Node internal argument/invariant error -- which routinely
+	// carries an `ERR_`-prefixed string `.code` too, e.g. `ERR_INVALID_ARG_TYPE`
+	// -- as an ordinary fs system error, silently downgrading a genuine
+	// implementation defect from 13-cli-contract.md's exit `3` class to its
+	// exit `2` class. This regression fails against that prior implementation
+	// (which would resolve with `applied: false, outcome: 'incomplete'` instead
+	// of rejecting) and passes only once the classifier also requires an
+	// errno-mnemonic-shaped `.code` (`/^E[A-Z0-9]+$/`, which an
+	// underscore-containing `ERR_...` code never matches) AND a string
+	// `.syscall`, which a Node internal argument/invariant error never carries.
+	describe('fs-system-error classification requires a real errno shape, not just a string `.code` (Finding 2, nineteenth round)', () => {
+		it('propagates a Node internal argument/invariant error carrying an ERR_-prefixed `.code` (e.g. ERR_INVALID_ARG_TYPE) as a rejection -- never misclassified as an ordinary fs system error -- after releasing the already-acquired temp-file lease exactly once', async () => {
+			const plan = computePlanOrThrow()
+			let tempWritten = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					tempWritten = true
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				isSymlink: async (target: string) => {
+					if (tempWritten)
+						throw Object.assign(new TypeError('bad internal argument'), { code: 'ERR_INVALID_ARG_TYPE' })
+					return defaultApplyCreatePlanDeps.isSymlink(target)
+				},
+			}
+
+			await expect(applyCreatePlan(plan, tempDir, deps))
+				.rejects.toThrow('bad internal argument')
 			expect(releaseCallCount)
 				.toBe(1)
 		})

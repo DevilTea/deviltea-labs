@@ -723,7 +723,7 @@ describe('runInitCommand', () => {
 		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
 			if (armed) {
 				armed = false
-				throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+				throw Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
 			}
 			return realFns.lstat(...args)
 		})

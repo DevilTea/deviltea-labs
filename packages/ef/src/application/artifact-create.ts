@@ -1158,25 +1158,47 @@ function foldLeaseRelease(plan: ArtifactCreatePlan, natural: ApplyCreatePlanResu
 }
 
 /**
- * `true` iff `error` looks like a Node `fs` system error (an `Error` carrying
- * a string `.code`, e.g. `EACCES`/`EIO`/`EPERM`) rather than a genuine
- * programmer/invariant defect such as a `TypeError` (which carries no such
- * `.code`). `ENOENT` specifically is never reachable here: every
+ * `true` iff `error` looks like a genuine Node `fs` errno system error --
+ * `EACCES`/`EIO`/`EPERM`, etc. -- rather than a programmer/invariant defect.
+ * Kept in sync with `application/init.ts`'s own identically named,
+ * identically documented helper; a future change to one MUST be mirrored in
+ * the other.
+ *
+ * Finding 2 (P2, nineteenth round, correcting the eighteenth round's own
+ * fix): a bare `typeof error.code === 'string'` check is too permissive.
+ * Node's OWN internal argument/invariant errors -- e.g. a `TypeError` thrown
+ * by a native binding for a bad argument -- routinely carry a string `.code`
+ * too, such as `ERR_INVALID_ARG_TYPE`; a real defect shaped that way would
+ * have been silently downgraded to this contract's exit `2` class instead of
+ * propagating as the exit `3` genuine-defect class 13-cli-contract.md
+ * reserves for it. A genuine `fs` errno error is distinguished by TWO
+ * properties together, never `.code` alone: `.code` matches `/^E[A-Z0-9]+$/`
+ * (an errno mnemonic such as `EACCES`/`EIO`/`EPERM` -- excluding, by
+ * construction, every `ERR_`-prefixed Node internal code, which always
+ * contains an underscore outside that pattern) AND it carries a string
+ * `.syscall` (the underlying syscall name, e.g. `lstat`/`open`/`unlink`),
+ * which every Node `fs` errno error carries and a Node internal
+ * argument/invariant error never does. `ENOENT` specifically is never
+ * reachable here: every
  * `isSymlink`/`directoryIdentity`/`isRegularFile`/`isDirectory`/`fileIdentity`
  * probe this module calls already normalizes a missing path to `undefined` or
  * `false` before ever throwing (`platform/fs-facts.ts`'s own `tryLstat`,
  * `defaultFileIdentity`'s own doc), so anything that DOES escape as an
- * exception is, by construction, some OTHER, unexpected system error -- an
- * execution/permission failure this invocation could not itself complete, not
- * a proven domain fact one way or the other. Used by `applyCreatePlan` to
- * classify an exception escaping its own pre-publication steps (Finding B,
- * eighteenth round) as 13-cli-contract.md's exit `2` class (contained as a
- * typed `incomplete` result) rather than exit `3` (reserved for a genuine
- * implementation defect, which has no such `.code` and must still propagate
- * after this module's own lease finalization).
+ * exception matching both properties is, by construction, some OTHER,
+ * unexpected system error -- an execution/permission failure this invocation
+ * could not itself complete, not a proven domain fact one way or the other.
+ * Used by `applyCreatePlan` to classify an exception escaping its own
+ * pre-publication steps (Finding B, eighteenth round) as 13-cli-contract.md's
+ * exit `2` class (contained as a typed `incomplete` result) rather than exit
+ * `3` (reserved for a genuine implementation defect, which fails at least one
+ * of the two properties above and must still propagate after this module's
+ * own lease finalization).
  */
 function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string'
+	if (!(error instanceof Error))
+		return false
+	const { code, syscall } = error as NodeJS.ErrnoException
+	return typeof code === 'string' && /^E[A-Z0-9]+$/.test(code) && typeof syscall === 'string'
 }
 
 /**
