@@ -2331,4 +2331,65 @@ Placeholder.
 				.toBe(1)
 		})
 	})
+
+	// FINDING B (twenty-second round): the very first `targetExists`
+	// pre-publication probe (`isRegularFile`/`isDirectory`/`isSymlink`, in that
+	// order) `lstat`s `plan.path` directly -- if the canonical type directory
+	// was replaced by a regular file since the plan was computed, that `lstat`
+	// itself fails `ENOTDIR` (a path component is no longer a directory), a
+	// real, non-`ENOENT` error production's `tryLstat` (`platform/fs-facts.ts`)
+	// does not normalize. This is exactly as certain a proof of a broken
+	// managed-directory chain as `verifyManagedDirectoryChain`'s own ordinary,
+	// non-throwing `'rejected'` outcome for the identical condition -- before
+	// this round, the escaping exception instead reached only
+	// `applyCreatePlan`'s generic top-level `isFsSystemError` catch, which
+	// cannot tell this PROVEN structural fact apart from a genuine `EACCES`/`EIO`
+	// observation failure, and folded both alike into `applied: false, outcome:
+	// 'incomplete'` (13-cli-contract.md exit `2`) -- silently downgrading a
+	// proven race/rejection (exit `1`, `complete: true`) into a merely
+	// "execution failed, retry" report. This regression fails against that
+	// prior implementation (which reports `outcome: 'incomplete'`) and passes
+	// only once `targetExistsOrChainRejected` classifies the escaping
+	// `ENOTDIR` as `'rejected'` instead of letting it propagate.
+	describe('a targetExists probe failure whose error code itself proves the managed chain was replaced is a domain rejection, never folded into incomplete (Finding B, twenty-second round)', () => {
+		it('reports applied:false/rejected (never applied:false/incomplete) when the canonical type directory is replaced by a real regular file, causing the first targetExists probe to throw a real-shaped ENOTDIR', async () => {
+			const plan = computePlanOrThrow()
+			const typeDirPath = path.join(tempDir, '.engineering/req')
+			await fs.writeFile(typeDirPath, 'a regular file where the canonical type directory should be')
+
+			const result = await applyCreatePlan(plan, tempDir)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The replacement file itself was never touched.
+			const content = await fs.readFile(typeDirPath, 'utf8')
+			expect(content)
+				.toBe('a regular file where the canonical type directory should be')
+		})
+
+		it('control: still reports applied:false/incomplete when that same first targetExists probe throws EACCES instead (mere observation noise, not a proven structural fact)', async () => {
+			const plan = computePlanOrThrow()
+			const targetPath = path.join(tempDir, plan.path)
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				isRegularFile: async (target: string) => {
+					if (target === targetPath)
+						throw probeError
+					return defaultApplyCreatePlanDeps.isRegularFile(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+	})
 })

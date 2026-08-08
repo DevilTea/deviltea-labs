@@ -649,6 +649,64 @@ async function targetExists(deps: ApplyCreatePlanDeps, targetPath: string): Prom
 	return (await deps.isRegularFile(targetPath)) || (await deps.isDirectory(targetPath)) || (await deps.isSymlink(targetPath))
 }
 
+/**
+ * Typed result of {@link targetExistsOrChainRejected}'s classified
+ * `targetExists` re-check, distinguishing a PROVEN managed-directory-chain
+ * rejection from the ordinary present/absent outcome `targetExists` itself
+ * reports.
+ */
+export type ClassifiedTargetExistsResult
+	= | { outcome: 'exists' | 'absent' }
+		| { outcome: 'rejected', message: string }
+
+/**
+ * `targetExists`, but classifying a structurally proven `ENOTDIR`/`ELOOP`
+ * escaping its own `isRegularFile`/`isDirectory`/`isSymlink` probes (Finding
+ * B, twenty-second round) into the SAME managed-directory-chain rejection
+ * `verifyManagedDirectoryChain` itself already reports for an ORDINARY,
+ * non-throwing observation of the identical fact -- e.g. the canonical type
+ * directory having been replaced by a regular file since the plan was
+ * computed, so `targetPath` (a path strictly beneath it) can no longer even
+ * be `lstat`'d without a path component itself failing to be a directory.
+ * Production's `tryLstat` (`platform/fs-facts.ts`) normalizes only
+ * `ENOENT`; `ENOTDIR`/`ELOOP` still throw, and every PRE-publication call
+ * site below previously let that exception propagate uncaught, all the way
+ * to `applyCreatePlan`'s generic top-level `isFsSystemError` catch -- which
+ * cannot tell this PROVEN structural fact apart from a genuine `EACCES`/`EIO`
+ * observation failure, and so folded both alike into `applied: false,
+ * outcome: 'incomplete'` (13-cli-contract.md exit `2`), silently downgrading
+ * a proven race/rejection (exit `1`, `complete: true`) into a merely
+ * "execution failed, retry" report.
+ *
+ * Every OTHER genuine fs errno error (`EACCES`/`EIO`/`EPERM`, ...) proves
+ * nothing about the chain's actual state and still propagates unchanged, to
+ * be classified by that same outer `isFsSystemError` catch exactly as before
+ * this round; a genuine non-fs-system error (a programmer/invariant defect)
+ * is not a domain fact at all and likewise still propagates, unchanged, to
+ * the exit `3` class that catch reserves for it.
+ *
+ * Left deliberately unaddressed here (a residual gap for a future round to
+ * pick up if it is ever actually reported, matching `application/init.ts`'s
+ * own documented practice for an analogous residual note): `verifyChainComponent`'s
+ * own `isSymlink`/`directoryIdentity` probes have the identical bare-call
+ * shape, and would suffer the same misclassification if an ANCESTOR of a
+ * checked chain component (rather than the component's own final path
+ * segment) were replaced by a non-directory between checkpoints. This
+ * round's reported finding is specifically about `targetExists`'s own
+ * pre-publication call sites; the analogous gap in `verifyChainComponent` is
+ * a separately-scoped concern.
+ */
+async function targetExistsOrChainRejected(deps: ApplyCreatePlanDeps, plan: ArtifactCreatePlan, targetPath: string): Promise<ClassifiedTargetExistsResult> {
+	try {
+		return { outcome: (await targetExists(deps, targetPath)) ? 'exists' : 'absent' }
+	}
+	catch (error) {
+		if (isFsSystemError(error) && (error.code === 'ENOTDIR' || error.code === 'ELOOP'))
+			return { outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
+		throw error
+	}
+}
+
 /** `lstat` identity of `.engineering` and, when distinct, the type's canonical directory, captured by one `verifyManagedDirectoryChain` call for a later call to bind against. The type directory may not exist yet (before `ensureDirectory` creates it), so it has no identity to capture until it does. */
 export interface ManagedDirectoryChainIdentity {
 	engineering?: FileIdentity
@@ -1193,6 +1251,19 @@ function foldLeaseRelease(plan: ArtifactCreatePlan, natural: ApplyCreatePlanResu
  * `3` (reserved for a genuine implementation defect, which fails at least one
  * of the two properties above and must still propagate after this module's
  * own lease finalization).
+ *
+ * Finding B (twenty-second round): a structurally proven `ENOTDIR`/`ELOOP`
+ * from `targetExists`'s own probes is no longer reachable here at all --
+ * `targetExistsOrChainRejected` (see its own doc) now classifies exactly that
+ * code pair locally, into the same `'rejected'` domain fact
+ * `verifyManagedDirectoryChain` itself already reports for the identical
+ * condition, before either pre-publication `targetExists` call site can ever
+ * let it escape this far. This function's own "not a proven domain fact one
+ * way or the other" reasoning above still holds for everything that DOES
+ * still reach it: every genuine `EACCES`/`EIO`/`EPERM` observation failure,
+ * and any `ENOTDIR`/`ELOOP` from a call site this round did not touch (e.g.
+ * `verifyChainComponent`'s own bare probes -- see
+ * `targetExistsOrChainRejected`'s own residual-scope note).
  */
 function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
 	if (!(error instanceof Error))
@@ -1251,7 +1322,17 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 async function applyCreatePlanUnsafe(plan: ArtifactCreatePlan, projectRoot: string, deps: ApplyCreatePlanDeps): Promise<ApplyCreatePlanResult> {
 	const targetPath = path.join(projectRoot, plan.path)
 
-	if (await targetExists(deps, targetPath))
+	// Finding B (twenty-second round): routed through `targetExistsOrChainRejected`
+	// rather than a bare `targetExists` call -- see that function's own doc for
+	// why a structurally proven `ENOTDIR`/`ELOOP` here (e.g. the canonical type
+	// directory already replaced by a regular file) must be reported as the
+	// same `'rejected'` domain fact `verifyManagedDirectoryChain` itself
+	// reports for the identical condition, not folded into the generic
+	// `'incomplete'` class an uncaught exception here previously fell into.
+	const initialTargetCheck = await targetExistsOrChainRejected(deps, plan, targetPath)
+	if (initialTargetCheck.outcome === 'rejected')
+		return { applied: false, outcome: 'rejected', message: initialTargetCheck.message }
+	if (initialTargetCheck.outcome === 'exists')
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
 
 	// Re-verify before ever touching the filesystem below `.engineering`:
@@ -1390,7 +1471,20 @@ async function runPublicationSteps(deps: ApplyCreatePlanDeps, projectRoot: strin
 		return { applied: false, outcome: 'rejected', message: `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.` }
 	}
 
-	if (await targetExists(deps, targetPath)) {
+	// Finding B (twenty-second round): routed through `targetExistsOrChainRejected`
+	// like the initial pre-write `targetExists` re-check above -- see that
+	// function's own doc. This call runs strictly AFTER `tempLease` was
+	// acquired, so a structurally proven `ENOTDIR`/`ELOOP` here must still run
+	// `deleteOwnedTempFile` before returning, exactly like every other
+	// post-write rejection in this function; previously, an uncaught exception
+	// here skipped straight past that cleanup call, leaking the temporary file
+	// on disk even though its lease was still released.
+	const postWriteTargetCheck = await targetExistsOrChainRejected(deps, plan, targetPath)
+	if (postWriteTargetCheck.outcome === 'rejected') {
+		await deleteOwnedTempFile(deps, tempPath, tempLease)
+		return { applied: false, outcome: 'rejected', message: postWriteTargetCheck.message }
+	}
+	if (postWriteTargetCheck.outcome === 'exists') {
 		await deleteOwnedTempFile(deps, tempPath, tempLease)
 		return { applied: false, outcome: 'raced', message: `'${plan.path}' already exists.` }
 	}
