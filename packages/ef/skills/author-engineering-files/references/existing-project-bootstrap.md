@@ -24,9 +24,9 @@ in the Agent workflow; `ef` stays the deterministic primitive and validator.
   and the human confirms no authoritative EF history exists elsewhere for
   this repository.
 - Confirm the full integration ref (`refs/heads/...`) with the human - never
-  guess or default it. Bootstrap validation (Step 8) will prove that ref's
-  first-parent history contains no `.engineering/ef.yaml`; if EF history
-  already exists there, bootstrap is the wrong workflow entirely.
+  guess or default it. Bootstrap validation (Step 8) will prove no prior
+  `.engineering/ef.yaml` exists in that ref's history at validation time; if
+  EF history already exists there, bootstrap is the wrong workflow entirely.
 
 ## Step 1 - bounded, read-only repository archaeology
 
@@ -85,6 +85,10 @@ every entry before any `ef` mutation runs. Use the existing Artifact
 semantics:
 
 - **PROJECT** - vision, scope, non-goals, context, accepted terminology.
+  PROJECT is special: exactly one exists, it is always `active`, and it is
+  created only by `ef init` in Step 4 - never by `ef artifact create`. The
+  draft/active status boundary below, and the `ef artifact create` loop in
+  Step 5, apply only to PRD/REQ/ADR/POL entries.
 - **PRD** - a meaningful product problem, user need, or desired outcome; not
   a module inventory.
 - **REQ** - one observable system contract; not every function, class, or
@@ -95,7 +99,8 @@ semantics:
   config setting into a policy.
 
 Model meaningful engineering truth; do not mirror the source tree, and do
-not mechanically over-decompose. Also propose, per accepted entry:
+not mechanically over-decompose. Also propose, per accepted PRD/REQ/ADR/POL
+entry:
 
 - **status** - see the boundary below;
 - **relations** - only where the semantic relationship is supported by
@@ -109,6 +114,12 @@ not mechanically over-decompose. Also propose, per accepted entry:
   become an EF-owned Resource; never bulk-ingest a docs directory. External
   URLs stay non-normative `reference` Resources per
   `references/draft-authoring.md`.
+
+If the human additionally accepts PROJECT relations (PROJECT's only allowed
+outgoing relation type is `references` - see the type table in
+`references/draft-authoring.md`) or PROJECT-owned Resources, these do not go
+through the loop above: `ef init` has no flags for relations or Resources,
+so Step 4 materializes them by direct edit instead.
 
 ### Initial status boundary
 
@@ -131,12 +142,19 @@ integration ref and the human-accepted PROJECT content from the inventory.
 After `init` reports `applied: true`, do not restart any workflow from the
 top: return directly here, to Step 5 below. Do **not** stop after `init` and
 publish an init-only tree: the bootstrap commit in Step 7 must carry the
-complete accepted initial state, not just the skeleton.
+complete accepted initial state, not just the skeleton. If the accepted
+inventory includes PROJECT relations or Resources, edit the generated
+`.engineering/PROJECT.md` (and place any Resource files under
+`.engineering/resources/PROJECT/`) directly now, under the normal schema
+rules in `references/draft-authoring.md` - the bootstrap exception permits
+direct PROJECT edits only before the first authoritative integration.
 
 ## Step 5 - create the accepted initial Artifacts
 
-For each accepted inventory entry, create the file through the CLI, then
-fill it by direct edits (there is no edit or activation command):
+For each accepted PRD/REQ/ADR/POL inventory entry, create the file through
+the CLI, then fill it by direct edits (there is no edit or activation
+command). Here `<type>` is one of `prd`, `req`, `adr`, `pol` - never `chg`
+during bootstrap, and PROJECT is never created this way:
 
 ```bash
 ef artifact create <type> \
@@ -178,15 +196,21 @@ until the complete initial graph is valid.
 ## Step 7 - one complete candidate bootstrap commit
 
 Have the human (or their ordinary Git tooling) create exactly one commit
-containing the complete candidate `.engineering/` tree. Place it correctly:
-if the confirmed integration ref resolved at Step 0, the candidate's first
-parent must be exactly that ref's captured tip commit - if the tip has since
-moved, rebuild the candidate on the fresh tip rather than stacking on the
-stale one. If the ref did not resolve, the candidate must be a root commit,
-or its first-parent history before the candidate must contain no
-`.engineering/ef.yaml` path. This Skill never publishes, commits to, or
-moves any branch ref - the transaction boundary of `13-cli-contract.md`
-stays outside it.
+containing the complete candidate `.engineering/` tree.
+`ef validate --scope bootstrap` resolves the configured integration ref
+fresh when it runs, so place the candidate against the ref's state as
+observed immediately before building it, not against any earlier
+observation: if the ref resolves at
+that moment, the candidate's first parent must be exactly its current tip
+commit; if it does not resolve, the candidate must be a root commit, or its
+first-parent history before the candidate must contain no
+`.engineering/ef.yaml` path. Any change to the ref's state between building
+the candidate and validating or integrating it - an unresolved ref becoming
+resolved, a resolved tip moving, or otherwise - makes the candidate stale:
+rebuild or amend the single candidate against the fresh state and revalidate
+its new full OID; never stack another commit on top. This Skill never
+publishes, commits to, or moves any branch ref - the transaction boundary of
+`13-cli-contract.md` stays outside it.
 
 ## Step 8 - bootstrap-validate the exact commit
 
@@ -198,10 +222,12 @@ Report `complete`, `valid`, `counts`, `exit_code`, and every diagnostic to
 the human. On findings, fix the working tree, then amend, replace, or
 rebuild the single candidate bootstrap commit - never append a child commit
 on top of the failed candidate, since that moves the first parent off the
-captured ref tip (or reintroduces `.engineering/ef.yaml` into first-parent
-history) and destroys bootstrap eligibility. Re-run the same command against
-the new full commit OID - never report a failed bootstrap validation as
-done.
+ref's tip at validation time (or reintroduces `.engineering/ef.yaml` into
+first-parent history) and destroys bootstrap eligibility. Because each run
+resolves the integration ref fresh, re-check the ref's current state before
+rebuilding - per Step 7, any change since the candidate was built makes it
+stale - and re-run the same command against the new full commit OID; never
+report a failed bootstrap validation as done.
 
 ## Step 9 - integration ends the bootstrap exception
 
