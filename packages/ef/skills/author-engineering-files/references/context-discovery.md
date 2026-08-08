@@ -27,8 +27,11 @@ Nearly every task starts here:
 ef query lookup PROJECT --projection full --format json --no-input
 ```
 
-`found: false` here means no EF project exists yet -> go to
-`references/project-init.md` instead. Otherwise this gives Vision, Scope,
+`found: false` here means no EF project exists yet -> return to the
+top-level workflow decision in `SKILL.md`: greenfield setup goes to
+`references/project-init.md`, an established codebase adopting EF for the
+first time goes to `references/existing-project-bootstrap.md`. Otherwise
+this gives Vision, Scope,
 Non-goals, Context, and the canonical Terminology glossary - the vocabulary
 and boundaries every later step and every draft you write must respect.
 

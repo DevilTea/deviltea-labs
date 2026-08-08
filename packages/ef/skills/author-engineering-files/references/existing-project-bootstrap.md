@@ -1,0 +1,225 @@
+# Existing-Project (Brownfield) Bootstrap
+
+Governing use cases: UC-001, UC-041, UC-043. Governing specs:
+`09-validation.md` § Bootstrap exception, `13-cli-contract.md` § Project
+Initialization and § Engineering Transaction Boundary.
+
+Use this workflow when a repository has an established codebase - existing
+behavior, docs, tests, CI, Git history - but has never used EF: no
+`.engineering/` project and no authoritative EF history. For a genuinely new
+(greenfield) repository, `references/project-init.md` alone is sufficient.
+When the state is ambiguous, ask the human which case applies; never equate
+"no `.engineering/`" with "init and bootstrap immediately."
+
+This is a workflow over the existing `ef` commands only. There is no import,
+migration, repository-analysis, edit, or activation command in the CLI, and
+this Skill never pretends otherwise: repository interpretation happens here,
+in the Agent workflow; `ef` stays the deterministic primitive and validator.
+
+## Step 0 - confirm first-time adoption
+
+- The target is exactly an existing Git worktree root.
+- `ef query lookup PROJECT --format json --no-input` finds no project
+  (`found: false`, or discovery fails because no `.engineering/` exists),
+  and the human confirms no authoritative EF history exists elsewhere for
+  this repository.
+- Confirm the full integration ref (`refs/heads/...`) with the human - never
+  guess or default it. Bootstrap validation (Step 8) will prove that ref's
+  first-parent history contains no `.engineering/ef.yaml`; if EF history
+  already exists there, bootstrap is the wrong workflow entirely.
+
+## Step 1 - bounded, read-only repository archaeology
+
+Before EF exists there is no EF graph to query, so the repository itself is
+the only evidence source. This is the **only** situation in which this Skill
+gathers broad context by reading repository files directly, and even here the
+reading is staged and bounded - never "read every file":
+
+1. Start with high-signal project documents: README, package metadata and
+   manifests, existing product or architecture docs, ADR/RFC/decision
+   records, contributor and quality docs.
+2. From those, list candidate knowledge areas (likely PRD/REQ/ADR/POL
+   subjects).
+3. Only for those candidate areas, inspect targeted evidence: public APIs
+   and externally observable behavior; tests and fixtures (especially
+   behavior/contract tests); CI, release, and quality configuration; source
+   structure only as needed to understand the established architecture; Git
+   history, issues, and PRs only when they materially clarify intent or a
+   historical decision.
+
+This phase is strictly read-only: no file edits, no `ef` mutations. Its
+license expires the moment the first authoritative EF state is integrated -
+after that, the staged queries in `references/context-discovery.md` answer
+EF questions, and repository archaeology is never again a substitute for
+them.
+
+## Step 2 - separate observation from engineering intent
+
+Never silently convert what the repository does into what the project
+intends:
+
+```text
+observed implementation behavior != intended requirement
+existing dependency/structure    != deliberate architecture decision
+lint/configuration setting       != automatically an engineering policy
+historical code                  != evidence of historical rationale
+```
+
+Everything derived from archaeology is a **candidate**. For each candidate,
+retain enough evidence for the human to judge it - conceptually:
+
+```text
+Candidate: REQ - <one observable contract>
+Evidence: <the docs/tests/APIs that support it>
+Uncertainty: <what was not found or remains unconfirmed>
+Recommendation: draft or active, with the reason
+```
+
+This presentation shape is for the conversation with the human only; it is
+not an EF file format and never gets written into Artifact bodies as-is.
+
+## Step 3 - human-confirmed initial knowledge inventory
+
+Propose one complete inventory and let the human accept, edit, or reject
+every entry before any `ef` mutation runs. Use the existing Artifact
+semantics:
+
+- **PROJECT** - vision, scope, non-goals, context, accepted terminology.
+- **PRD** - a meaningful product problem, user need, or desired outcome; not
+  a module inventory.
+- **REQ** - one observable system contract; not every function, class, or
+  file.
+- **ADR** - a significant established decision and its trade-offs; never
+  fabricate historical rationale that evidence does not support.
+- **POL** - a recurring cross-cutting rule; do not promote every lint or
+  config setting into a policy.
+
+Model meaningful engineering truth; do not mirror the source tree, and do
+not mechanically over-decompose. Also propose, per accepted entry:
+
+- **status** - see the boundary below;
+- **relations** - only where the semantic relationship is supported by
+  evidence and the human accepts it, using the narrowest valid type from the
+  ontology in `references/draft-authoring.md`. Incoming relations are always
+  derived by query, never stored. Never write speculative
+  `introduces`/`modifies`/`retires` relations - those belong to a CHG, and
+  bootstrap has no CHG;
+- **resources** - copy or attach an existing repository document into
+  `.engineering/resources/<OWNER-ID>/` only when the human intends it to
+  become an EF-owned Resource; never bulk-ingest a docs directory. External
+  URLs stay non-normative `reference` Resources per
+  `references/draft-authoring.md`.
+
+### Initial status boundary
+
+- `active` only when the human explicitly accepts the statement as current
+  authoritative engineering truth **and** the Artifact satisfies the active
+  body requirements in `references/draft-authoring.md`.
+- `draft` whenever intent is still uncertain, evidence is incomplete, or
+  wording remains under discussion.
+- Never `active` merely because the current implementation behaves that way.
+- Never synthesize CHG Artifacts to explain pre-EF history so that initial
+  active knowledge can exist - the bootstrap exception makes that
+  unnecessary by design.
+
+## Step 4 - initialize EF
+
+Follow `references/project-init.md` exactly (`--dry-run` plan -> human
+confirmation -> identical command with `--yes`), using the confirmed
+integration ref and the human-accepted PROJECT content from the inventory.
+Do **not** stop after `init` and publish an init-only tree: the bootstrap
+commit in Step 7 must carry the complete accepted initial state, not just
+the skeleton.
+
+## Step 5 - create the accepted initial Artifacts
+
+For each accepted inventory entry, create the file through the CLI, then
+fill it by direct edits (there is no edit or activation command):
+
+```bash
+ef artifact create <type> \
+  --title "<text>" \
+  --summary "<text>" \
+  --format json \
+  --no-input \
+  --dry-run
+# show the plan; after human confirmation, identical command with --yes:
+ef artifact create <type> \
+  --title "<text>" \
+  --summary "<text>" \
+  --format json \
+  --no-input \
+  --yes
+```
+
+1. The command always writes a `status: draft` skeleton. Fill frontmatter
+   and body with ordinary file edits per `references/draft-authoring.md`.
+2. For entries the human accepted as initial **active** truth, edit the file
+   directly into a valid active state (status plus complete required
+   sections). The bootstrap contract explicitly permits this before the
+   first authoritative integration; it is **not** a precedent for bypassing
+   CHG afterwards.
+3. Add the accepted relations and Resources.
+
+Never create a CHG, `superseded`, or `retired` Artifact anywhere in the
+bootstrap state.
+
+## Step 6 - validate the complete working tree
+
+```bash
+ef validate --scope snapshot --format json --no-input
+```
+
+Run the fix-reverify loop from `references/validation-and-diagnostics.md`
+until the complete initial graph is valid.
+
+## Step 7 - one complete candidate bootstrap commit
+
+Have the human (or their ordinary Git tooling) create exactly one commit
+containing the complete candidate `.engineering/` tree. This Skill never
+publishes, commits to, or moves any branch ref - the transaction boundary of
+`13-cli-contract.md` stays outside it.
+
+## Step 8 - bootstrap-validate the exact commit
+
+```bash
+ef validate --scope bootstrap --proposed <full-commit-oid> --format json --no-input
+```
+
+Report `complete`, `valid`, `counts`, `exit_code`, and every diagnostic to
+the human. Fix findings in the working tree, recommit, and revalidate the
+new commit OID - never report a failed bootstrap validation as done.
+
+## Step 9 - integration ends the bootstrap exception
+
+Integration (UC-043's conditional compare-and-swap) happens outside this
+Skill, performed by the human or CI. The state change it causes is permanent
+and must never be missed:
+
+```text
+before first authoritative EF integration:
+  initial PRD/REQ/ADR/POL may become active without CHG
+
+after first authoritative EF integration:
+  the bootstrap exception is gone
+  active/PROJECT/control-file/Resource changes require the normal
+  CHG-backed transition rules in references/chg-planning.md
+```
+
+"We are documenting existing behavior" is never again a reason to skip a
+CHG once authoritative EF history exists.
+
+## Do not fabricate provenance
+
+The bootstrap is a truthful genesis snapshot, not a reconstruction of
+fictional EF history:
+
+- no CHG Artifacts for changes that happened before EF existed, ever;
+- no invented dates, sources, decisions, rationale, rejected alternatives,
+  or owners;
+- when a choice is clearly established but its original rationale is
+  unavailable, record only what current evidence or maintainer confirmation
+  supports - never a plausible story stated as fact;
+- existing historical ADR/RFC/docs may serve as evidence, or be attached as
+  Resources under the normal Resource rules, but only with explicit human
+  intent.

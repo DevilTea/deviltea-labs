@@ -11,6 +11,11 @@ worktree. If discovery already finds a project (an `ef query lookup PROJECT
 refuses to overwrite or merge with an existing `.engineering` path and exits
 `1` as a domain rejection.
 
+For an established (brownfield) codebase adopting EF for the first time,
+this file covers only the `ef init` step: enter through
+`references/existing-project-bootstrap.md`, which sequences repository
+archaeology and the human-confirmed initial knowledge inventory around it.
+
 ## Preconditions to confirm with the human first
 
 - The target directory is exactly a Git worktree root (not an arbitrary
@@ -85,8 +90,16 @@ for envelope field order rules that also apply to PROJECT).
 ## After `init` reports `applied: true`
 
 `ef init` only publishes files to the working tree - it does not commit, and
-it never updates any branch ref itself. Tell the human the next steps are
-theirs to perform through ordinary Git and CI, matching UC-001/UC-043:
+it never updates any branch ref itself.
+
+If this is brownfield adoption and initial PRD/REQ/ADR/POL knowledge still
+needs capturing, do not commit or bootstrap-validate the init-only tree yet:
+continue through `references/existing-project-bootstrap.md` and produce one
+complete candidate initial EF state first.
+
+Otherwise (greenfield, nothing further to capture), tell the human the next
+steps are theirs to perform through ordinary Git and CI, matching
+UC-001/UC-043:
 
 1. Commit the candidate `.engineering/` tree.
 2. Validate it as a bootstrap:

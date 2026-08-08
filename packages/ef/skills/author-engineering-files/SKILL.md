@@ -1,6 +1,6 @@
 ---
 name: author-engineering-files
-description: Author and maintain EF Core engineering files (PROJECT, PRD, REQ, ADR, POL, CHG) under `.engineering/` through the deterministic `ef` CLI - initializing a project, discovering context with staged read-only queries, creating draft Artifacts, planning CHG-backed transitions for active content, and validating the result. Use when the user asks to set up an EF project, write or edit a PRD/REQ/ADR/POL/CHG file, plan an engineering change, run or fix `ef validate` diagnostics, or otherwise author EF content with `@deviltea/ef`.
+description: Author and maintain EF Core engineering files (PROJECT, PRD, REQ, ADR, POL, CHG) under `.engineering/` through the deterministic `ef` CLI - initializing a project, bootstrapping EF for an existing (brownfield) codebase, discovering context with staged read-only queries, creating draft Artifacts, planning CHG-backed transitions for active content, and validating the result. Use when the user asks to set up an EF project, introduce/adopt EF in an existing repository or establish its first engineering files, write or edit a PRD/REQ/ADR/POL/CHG file, plan an engineering change, run or fix `ef validate` diagnostics, or otherwise author EF content with `@deviltea/ef`.
 ---
 
 # Author Engineering Files
@@ -18,11 +18,17 @@ its shape or assume a result without executing the command.
 
 ## Non-negotiable rules
 
-1. **Query before loading or changing broad context.** Never read or edit
-   many files by hand to "get oriented." Use the staged composition in
-   `references/context-discovery.md` (`query list`/`search`/`impact` -> pick
-   exact IDs -> `resolve-current` if needed -> `query lookup --projection
-   full` -> `resource read` only for explicitly selected Resources).
+1. **Query before loading or changing broad context.** Once a valid EF
+   project exists, never read or edit many files by hand to "get oriented."
+   Use the staged composition in `references/context-discovery.md` (`query
+   list`/`search`/`impact` -> pick exact IDs -> `resolve-current` if needed
+   -> `query lookup --projection full` -> `resource read` only for
+   explicitly selected Resources). The single exception is first-time
+   brownfield adoption, where no EF state exists to query yet:
+   `references/existing-project-bootstrap.md` defines a bounded, read-only
+   repository archaeology phase for that case only. After the first
+   authoritative EF state is integrated, EF queries answer EF questions -
+   never keep using repository archaeology as a substitute.
 2. **Drafts are not canonical truth.** A `status: draft` Artifact may be
    created and freely edited with no CHG. Any change to *active* content -
    frontmatter, body, tags, relations, Resources, `ef.yaml`, `.gitignore` -
@@ -54,8 +60,14 @@ its shape or assume a result without executing the command.
 
 ```text
 1. Is there an existing .engineering/ project?
-   no  -> references/project-init.md (ef init)
    yes -> continue
+   no  -> is this an established codebase (existing behavior, docs, tests,
+          Git history) rather than a fresh/greenfield setup?
+          no (greenfield)   -> references/project-init.md (ef init)
+          yes, or ambiguous -> references/existing-project-bootstrap.md
+                               (ask the human when the evidence is unclear;
+                               never equate "no .engineering/" with "init
+                               and bootstrap immediately")
 
 2. Load minimal context for the task
    -> references/context-discovery.md
@@ -77,6 +89,10 @@ its shape or assume a result without executing the command.
 
 - `references/project-init.md` - `ef init` flags, the dry-run/yes plan
   pattern, and initialization guardrails.
+- `references/existing-project-bootstrap.md` - first-time EF adoption for an
+  established codebase: bounded repository archaeology, human-confirmed
+  initial knowledge inventory, the initial draft/active status boundary, and
+  one complete bootstrap state validated with snapshot then bootstrap scope.
 - `references/context-discovery.md` - the staged query composition, exact
   `ef query *` / `ef resource read` syntax, and why no step may be skipped.
 - `references/draft-authoring.md` - `ef artifact create <type>`, required
