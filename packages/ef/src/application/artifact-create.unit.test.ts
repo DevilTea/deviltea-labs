@@ -2834,4 +2834,254 @@ Placeholder.
 				.toBe(1)
 		})
 	})
+
+	// FINDING P1 (twenty-fifth round): the twenty-fourth round's shared
+	// classifier folded `ENOTDIR`/`ELOOP`/`EEXIST` into `'rejected'` at every
+	// mutating syscall boundary, but left `ENOENT` folded into the generic
+	// `'incomplete'` class everywhere -- including at the `writeTempFileComplete`
+	// (`open('wx+')`) and `publishViaHardLink` (`link()`) boundaries, where a
+	// real `ENOENT` there is NOT mere observation noise: it can only mean a
+	// required parent directory (or, for `link()`, the temporary file's own
+	// pathname) that the immediately preceding `verifyManagedDirectoryChain`
+	// re-check just proved present has since disappeared -- a positive
+	// path-disappearance race exactly as proven as the `ENOTDIR`/`ELOOP` cases
+	// already classified. Silently folding it into `'incomplete'` downgraded a
+	// proven race/rejection (exit `1`) into a merely "execution failed, retry"
+	// report (exit `2`). Fixed by threading an operation-context ('mkdir' |
+	// 'temp-open' | 'hard-link') through `classifyStructuralOrExecutionFsFailure`
+	// so `ENOENT` folds to `'rejected'` ONLY at the `'temp-open'`/`'hard-link'`
+	// boundaries -- never globally, and never at `'mkdir'`, whose real recursive
+	// `mkdir` dependency does not reach this classifier with `ENOENT` in the
+	// first place (it creates every missing ancestor itself). Every regression
+	// below fails against the prior implementation (which reported
+	// `outcome: 'incomplete'` for all three) and passes only once each call
+	// site's `ENOENT` is classified per its own boundary.
+	describe('a real ENOENT at the temp-open and hard-link syscall boundaries classifies as a positive path-disappearance race, operation-aware rather than global (Finding P1, twenty-fifth round)', () => {
+		it('writeTempFileComplete: reports applied:false/rejected (real ENOENT), with no canonical target ever created, when the entire type directory is removed strictly after the post-ensure chain re-check and before the real open(\'wx+\') runs', async () => {
+			const plan = computePlanOrThrow()
+			const typeDirPath = path.join(tempDir, '.engineering/req')
+			let ensured = false
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				ensureDirectory: async (target: string) => {
+					await defaultApplyCreatePlanDeps.ensureDirectory(target)
+					if (target === typeDirPath)
+						ensured = true
+				},
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					// Runs strictly AFTER `ensureDirectory` created the real type
+					// directory AND the post-ensure chain re-check (immediately
+					// preceding this call) already passed against it -- only NOW is
+					// it removed entirely (no replacement), so the real `open('wx+')`
+					// itself must observe a genuine `ENOENT`, not `ENOTDIR`.
+					if (ensured)
+						await fs.rm(typeDirPath, { recursive: true, force: true })
+					return realWriteTempFileComplete(tempPathArg, bytes)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			expect(await pathExists(typeDirPath))
+				.toBe(false)
+
+			// No canonical target was ever created.
+			expect(await pathExists(path.join(tempDir, plan.path)))
+				.toBe(false)
+		})
+
+		it('writeTempFileComplete: control -- still reports applied:false/incomplete when open(\'wx+\') fails with EACCES instead (mere observation noise, not a proven structural fact)', async () => {
+			const plan = computePlanOrThrow()
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async () => ({ outcome: 'failed' as const, error: Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'open' }) }),
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		it('publishViaHardLink: reports applied:false/rejected (real ENOENT), releasing the temp lease exactly once and never destructively touching any other entry, when the entire type directory (and the temporary file inside it) is removed strictly after the final pre-publication chain re-check and before the real link() runs', async () => {
+			const plan = computePlanOrThrow()
+			const typeDirPath = path.join(tempDir, '.engineering/req')
+			let tempWritten = false
+			let mutated = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					tempWritten = true
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
+					// Runs strictly AFTER the temporary file was written AND the
+					// final pre-publication chain re-check (immediately preceding
+					// this call) already passed against the real type directory --
+					// only NOW is the entire directory removed (no replacement), so
+					// the real `link()` call itself must observe a genuine `ENOENT`
+					// (the source pathname it was about to link no longer resolves).
+					if (tempWritten && !mutated) {
+						mutated = true
+						await fs.rm(typeDirPath, { recursive: true, force: true })
+					}
+					return realPublishViaHardLink(tempPathArg, targetPathArg)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The lease was released exactly once.
+			expect(releaseCallCount)
+				.toBe(1)
+
+			// No canonical target was ever created.
+			expect(await pathExists(path.join(tempDir, plan.path)))
+				.toBe(false)
+		})
+
+		it('publishViaHardLink: reports applied:false/rejected (real ENOENT) when ONLY the temporary file\'s own pathname is removed (the type directory itself, and everything else in it, stays intact) strictly before the real link() runs -- the still-open lease is released cleanly, and the fail-closed ownership-proven cleanup never destructively touches an unrelated sibling entry', async () => {
+			const plan = computePlanOrThrow()
+			const typeDirPath = path.join(tempDir, '.engineering/req')
+			// A non-`.md` extension deliberately: `repository/layout.ts`'s own
+			// discovery only sweeps directly-nested `*.md` files into the
+			// candidate Artifact set, so this sibling stays inert to the real
+			// `verifyAllocationStillValid`/`verifyContentGenerationWitness`
+			// reloads this invocation ALSO performs -- it exists purely to prove
+			// the fail-closed ownership-proven cleanup below never destructively
+			// touches it, not to participate in allocation.
+			const siblingPath = path.join(typeDirPath, 'unrelated-sibling.txt')
+			let mutated = false
+			let releaseCallCount = 0
+			let releaseError: NodeJS.ErrnoException | undefined
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					// An unrelated sibling file, already present in the type
+					// directory before publication is ever attempted, to prove the
+					// fail-closed ownership-proven cleanup below never touches state
+					// this invocation did not itself create.
+					await fs.writeFile(siblingPath, 'unrelated content untouched by this invocation')
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								const outcome = await real.lease.release()
+								if (outcome.outcome === 'released-with-error')
+									releaseError = outcome.error
+								return outcome
+							},
+						},
+					}
+				},
+				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
+					// Runs strictly AFTER the temporary file was written AND the
+					// final pre-publication chain re-check (immediately preceding
+					// this call) already passed -- only NOW is the temporary file's
+					// OWN pathname link removed, while its lease's creating handle
+					// stays open (still pinning the inode): the real `link()` call
+					// itself must observe a genuine `ENOENT` for the now-unresolvable
+					// source pathname.
+					if (!mutated) {
+						mutated = true
+						await fs.unlink(tempPathArg)
+					}
+					return realPublishViaHardLink(tempPathArg, targetPathArg)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The lease was released exactly once, and cleanly -- the retained
+			// handle stayed open and valid the entire time, proving the inode
+			// itself was never actually freed by the pathname removal above.
+			expect(releaseCallCount)
+				.toBe(1)
+			expect(releaseError)
+				.toBeUndefined()
+
+			// The unrelated sibling entry was never touched by the fail-closed
+			// ownership-proven cleanup (ownership of the now-nameless temp file
+			// cannot be re-proven by a fresh pathname `lstat`, so no destructive
+			// `unlink` is attempted against anything).
+			const siblingContent = await fs.readFile(siblingPath, 'utf8')
+			expect(siblingContent)
+				.toBe('unrelated content untouched by this invocation')
+
+			// No canonical target was ever created.
+			expect(await pathExists(path.join(tempDir, plan.path)))
+				.toBe(false)
+		})
+
+		it('publishViaHardLink: control -- still reports applied:false/incomplete when link() fails with EACCES instead (mere observation noise, not a proven structural fact)', async () => {
+			const plan = computePlanOrThrow()
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				publishViaHardLink: async () => ({ outcome: 'failed' as const, error: Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'link' }) }),
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		it('ensureDirectory: control -- an ENOENT thrown here (a shape the real recursive mkdir dependency never actually produces) still folds to applied:false/incomplete, never rejected -- the operation-aware ENOENT fold above applies only at the temp-open/hard-link boundaries, deliberately never at mkdir', async () => {
+			const plan = computePlanOrThrow()
+			const probeError = Object.assign(new Error('no such file or directory'), { code: 'ENOENT', syscall: 'mkdir' })
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				ensureDirectory: async () => {
+					throw probeError
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+	})
 })

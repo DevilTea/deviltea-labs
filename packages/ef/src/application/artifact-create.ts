@@ -1338,28 +1338,42 @@ function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
 }
 
 /**
+ * Which mutating syscall boundary `classifyStructuralOrExecutionFsFailure` is
+ * classifying an error from (twenty-fifth round). Threaded through explicitly
+ * -- rather than classifying `ENOENT` identically everywhere -- because
+ * `ENOENT`'s domain meaning differs by boundary: at `'temp-open'` and
+ * `'hard-link'` it is a proven positive-path-disappearance race (see the
+ * function's own doc below), but at `'mkdir'` it is not reachable at all
+ * under this module's own real dependency (`fsMkdir` with `{ recursive: true
+ * }` never raises `ENOENT` for a missing ancestor -- it creates the entire
+ * chain), so folding it in there would only risk misclassifying some other,
+ * unrelated future caller.
+ */
+type StructuralFsFailureBoundary = 'mkdir' | 'temp-open' | 'hard-link'
+
+/**
  * The single shared pre-publication syscall-failure classifier / result fold
- * (twenty-fourth round). The twenty-second and twenty-third rounds routed
- * `targetExists`'s and `verifyChainComponent`'s own THROWN `ENOTDIR`/`ELOOP`
- * probe failures through this same classification, but three further
- * MUTATING syscall boundaries -- `ensureDirectory`'s recursive `mkdir`
- * (a thrown exception), and `writeTempFileComplete`'s `open('wx+')` /
- * `publishViaHardLink`'s `link()` (each already caught internally and
- * returned as a typed `{ outcome: 'failed', error }` result, never thrown) --
- * still unconditionally folded ANY failure alike into `applied: false,
- * outcome: 'incomplete'` (13-cli-contract.md exit `2`), regardless of what
- * the preserved `error` actually was. That silently downgraded a PROVEN
- * managed-directory-chain rejection into a merely "execution failed, retry"
- * report, AND let a genuine implementation defect escape exit `3` merely
- * because a primitive chose to return it as a typed result rather than throw
- * it.
+ * (twenty-fourth round; extended twenty-fifth round). The twenty-second and
+ * twenty-third rounds routed `targetExists`'s and `verifyChainComponent`'s own
+ * THROWN `ENOTDIR`/`ELOOP` probe failures through this same classification,
+ * but three further MUTATING syscall boundaries -- `ensureDirectory`'s
+ * recursive `mkdir` (a thrown exception), and `writeTempFileComplete`'s
+ * `open('wx+')` / `publishViaHardLink`'s `link()` (each already caught
+ * internally and returned as a typed `{ outcome: 'failed', error }` result,
+ * never thrown) -- still unconditionally folded ANY failure alike into
+ * `applied: false, outcome: 'incomplete'` (13-cli-contract.md exit `2`),
+ * regardless of what the preserved `error` actually was. That silently
+ * downgraded a PROVEN managed-directory-chain rejection into a merely
+ * "execution failed, retry" report, AND let a genuine implementation defect
+ * escape exit `3` merely because a primitive chose to return it as a typed
+ * result rather than throw it.
  *
  * - `ENOTDIR`/`ELOOP` (an ancestor path component of the target was itself
  *   replaced by a non-directory or a symlink cycle since the immediately
  *   preceding checkpoint) fold to `'rejected'` -- the SAME domain fact
  *   `verifyManagedDirectoryChain`'s own ordinary, non-throwing checks already
  *   report for the identical condition (EF-FS-004, exit `1`), never
- *   `'incomplete'`.
+ *   `'incomplete'`. Unconditional across every `boundary`.
  * - `EEXIST` also folds to `'rejected'`: it is reachable here ONLY from
  *   `ensureDirectory`'s recursive `mkdir` (a directory that already exists is
  *   silently tolerated by `{ recursive: true }`; the ONLY way recursive
@@ -1368,7 +1382,32 @@ function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
  *   `open('wx+')` and `publishViaHardLink`'s own `link()` each already siphon
  *   their OWN `EEXIST` off into a dedicated `already-exists`/`target-exists`
  *   outcome before their result ever reaches this classifier, so an `EEXIST`
- *   arriving here is unambiguous.
+ *   arriving here is unambiguous. Unconditional across every `boundary`.
+ * - `ENOENT`, ONLY at the `'temp-open'` and `'hard-link'` boundaries, ALSO
+ *   folds to `'rejected'` (twenty-fifth round, Finding P1): a real
+ *   `open(tempPath, 'wx+')` or `link(tempPath, targetPath)` raises `ENOENT`
+ *   exclusively when a required parent directory component no longer exists
+ *   -- and every call site below only ever reaches this classifier strictly
+ *   AFTER the immediately preceding `verifyManagedDirectoryChain` re-check
+ *   already proved that same parent directory real and present. Two
+ *   concrete windows: (1) the type directory is removed strictly between the
+ *   post-`ensureDirectory` chain re-verification and `writeTempFileComplete`'s
+ *   own real `open('wx+')`; (2) the type directory (or the temporary
+ *   pathname itself) is removed strictly between the final pre-publication
+ *   chain re-verification and `publishViaHardLink`'s own real `link()` --
+ *   note the temp file's lease is still held in that second case, so its
+ *   inode stays pinned even though its one remaining pathname link was just
+ *   removed. Both are a positive path-disappearance PROVEN by the syscall
+ *   itself, immediately following an already-verified necessary precondition
+ *   -- exactly the same class of proven managed-directory-chain race
+ *   `ENOTDIR`/`ELOOP` above already report, never a merely inconclusive
+ *   observation failure. `'mkdir'` deliberately does NOT get this treatment:
+ *   `ensureDirectory`'s real dependency (`fsMkdir` with `{ recursive: true
+ *   }`) creates every missing ancestor itself and so never raises `ENOENT`
+ *   for one; recursive `mkdir`'s well-documented `ENOENT` case (a
+ *   non-existent DRIVE or an otherwise fundamentally invalid path, on
+ *   platforms where that applies) is not the same proven mid-flight race and
+ *   is correctly left folded into `'incomplete'` here, unchanged.
  * - Every OTHER genuine fs errno (`EACCES`/`EIO`/`EPERM`, ...) proves nothing
  *   about the chain's actual state: folds to `'incomplete'`.
  * - A non-errno error -- a genuine programmer/invariant defect, even one
@@ -1385,10 +1424,12 @@ function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
  *   whether that function returns normally or throws (Finding B, eighteenth
  *   round) -- so a re-thrown defect here is contained identically either way.
  */
-function classifyStructuralOrExecutionFsFailure(error: unknown): 'rejected' | 'incomplete' {
+function classifyStructuralOrExecutionFsFailure(error: unknown, boundary: StructuralFsFailureBoundary): 'rejected' | 'incomplete' {
 	if (!isFsSystemError(error))
 		throw error
 	if (error.code === 'ENOTDIR' || error.code === 'ELOOP' || error.code === 'EEXIST')
+		return 'rejected'
+	if (error.code === 'ENOENT' && (boundary === 'temp-open' || boundary === 'hard-link'))
 		return 'rejected'
 	return 'incomplete'
 }
@@ -1510,7 +1551,7 @@ async function applyCreatePlanUnsafe(plan: ArtifactCreatePlan, projectRoot: stri
 		// `verifyManagedDirectoryChain` itself already reports for the identical
 		// condition, and even a non-errno programmer/invariant defect, which must
 		// still reach exit `3` rather than being silently downgraded to exit `2`.
-		const outcome = classifyStructuralOrExecutionFsFailure(error)
+		const outcome = classifyStructuralOrExecutionFsFailure(error, 'mkdir')
 		const message = outcome === 'rejected'
 			? `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.`
 			: `Failed to ensure the canonical directory for '${plan.path}': ${(error as Error).message}`
@@ -1540,7 +1581,7 @@ async function applyCreatePlanUnsafe(plan: ArtifactCreatePlan, projectRoot: stri
 		// re-verification and this call) and even a non-errno
 		// programmer/invariant defect, which must still reach exit `3`. See
 		// `classifyStructuralOrExecutionFsFailure`'s own doc.
-		const outcome = classifyStructuralOrExecutionFsFailure(writeResult.error)
+		const outcome = classifyStructuralOrExecutionFsFailure(writeResult.error, 'temp-open')
 		const message = outcome === 'rejected'
 			? `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.`
 			: `Failed to write the temporary file for '${plan.path}'.`
@@ -1814,7 +1855,7 @@ async function runPublicationSteps(deps: ApplyCreatePlanDeps, projectRoot: strin
 	// which branch follows: `deleteOwnedTempFile` is fully non-throwing, and a
 	// re-thrown defect below must not skip this best-effort step.
 	await deleteOwnedTempFile(deps, tempPath, tempLease)
-	const outcome = classifyStructuralOrExecutionFsFailure(publishResult.error)
+	const outcome = classifyStructuralOrExecutionFsFailure(publishResult.error, 'hard-link')
 	const message = outcome === 'rejected'
 		? `The managed directory chain for '${plan.path}' contains a forbidden symlink or was replaced.`
 		: `Failed to publish '${plan.path}': ${publishResult.error.message}`

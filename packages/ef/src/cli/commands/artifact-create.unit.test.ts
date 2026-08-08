@@ -631,6 +631,69 @@ describe('runArtifactCreateCommand', () => {
 		await expect(fs.stat(typeDirPath)).rejects.toThrow()
 	})
 
+	// FINDING P1 (twenty-fifth round): a real `ENOENT` from the mutating
+	// `open('wx+')`/`link()` syscalls at these same two boundaries was, until
+	// now, unconditionally folded into exit `2`'s generic `'incomplete'` class
+	// -- even though it can only mean a required parent directory (or, for
+	// `link()`, the temporary file's own pathname) that the immediately
+	// preceding managed-directory-chain re-check just proved present has since
+	// disappeared: the identical positive-path-disappearance race the
+	// `ENOTDIR` regressions above already map to exit `1`'s `EF-FS-004`
+	// `'rejected'` class. Reproduced here through the CLI's real, non-injected
+	// `applyCreatePlan` wiring, mirroring the `ENOTDIR` regressions' own
+	// `openMock`/`linkMock` interception pattern.
+	it('exits 1 (EF-FS-004, complete:true) -- never exit 2 -- when the real open(\'wx+\') call for the temporary file observes a genuine ENOENT (the entire canonical type directory removed immediately beforehand)', async () => {
+		let armed = true
+		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
+			const [target] = args as [string, string]
+			if (armed && typeof target === 'string' && target.includes('.tmp-')) {
+				armed = false
+				await fs.rm(path.dirname(target), { recursive: true, force: true })
+			}
+			return realFns.open(...args)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(1)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(true)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-FS-004')
+
+		await expect(fs.stat(path.join(root, '.engineering/req/REQ-001.md'))).rejects.toThrow()
+	})
+
+	it('exits 1 (EF-FS-004, complete:true) -- never exit 2 -- when the real link() call observes a genuine ENOENT (the temporary file\'s own pathname removed immediately beforehand, its lease still held open)', async () => {
+		let armed = true
+		linkMock.mockImplementation(async (...args: Parameters<typeof realFns.link>) => {
+			const [tempPathArg, targetPathArg] = args as [string, string]
+			if (armed && typeof tempPathArg === 'string' && tempPathArg.includes('.tmp-')) {
+				armed = false
+				await realFns.unlink(tempPathArg)
+			}
+			return realFns.link(tempPathArg, targetPathArg)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(1)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(true)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-FS-004')
+
+		await expect(fs.stat(path.join(root, '.engineering/req/REQ-001.md'))).rejects.toThrow()
+	})
+
 	it('exits 2 (incomplete, not raced) when the temporary file cannot be written (unwritable canonical directory)', async () => {
 		// The canonical type directory exists (so `ensureDirectory` and the
 		// initial target-existence check both succeed cleanly) but is
