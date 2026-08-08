@@ -255,6 +255,26 @@ export async function runInitCommand(options: InitCommandOptions, deps: InitComm
 	try {
 		const applyResult = await applyInitPlan(plan)
 		if (applyResult.applied) {
+			// `outcome === 'applied'` is the only fully-verified, plain success;
+			// `outcome === 'cleanup-failed'` (initialization genuinely completed
+			// and the marker was removed, but a tracked file lease could not be
+			// cleanly released afterward) is the 13-cli-contract.md "publication
+			// succeeds but a later cleanup or internal operation fails" case:
+			// `complete: false`, `applied: true`, exit `3` -- never exit `2`,
+			// which is reserved for missing/declined authorization, and never a
+			// plain unqualified success, since either state must not misreport
+			// the published fact (matching `cli/commands/artifact-create.ts`'s
+			// own mapping).
+			if (applyResult.outcome !== 'applied') {
+				return mutationOutcome(options, 3, {
+					complete: false,
+					applied: true,
+					dryRun: false,
+					changes: applyResult.changes,
+					artifact,
+					diagnostics: [{ code: 'EF-VAL-008', severity: 'error', message: applyResult.message, related: [] }],
+				})
+			}
 			return mutationOutcome(options, 0, { complete: true, applied: true, dryRun: false, changes: applyResult.changes, artifact, diagnostics: [] })
 		}
 		if (applyResult.outcome === 'raced') {

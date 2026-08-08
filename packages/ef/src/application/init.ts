@@ -477,6 +477,26 @@ export const defaultApplyInitPlanDeps: ApplyInitPlanDeps = {
 
 export type ApplyInitPlanResult
 	= | { applied: true, outcome: 'applied', changes: InitPlanChange[] }
+		/**
+		 * Initialization genuinely, fully completed -- `applyInitPlanCore`
+		 * already verified the claim was never swapped out and removed the
+		 * initialization marker under the exact same ownership-proof standard
+		 * as every other deletion -- but releasing a tracked file's lease
+		 * (the marker's own, or a planned file's) immediately afterward failed
+		 * (Finding 1, seventeenth round, matching
+		 * `ApplyCreatePlanResult`'s own `cleanup-failed` variant). `applied:
+		 * true` because publication itself genuinely, physically occurred;
+		 * `outcome: 'cleanup-failed'` because a later, POST-completion
+		 * internal operation -- accounting for this invocation's own file
+		 * handles -- did not. 13-cli-contract.md: "If publication succeeds
+		 * but a later cleanup or internal operation fails, ... `complete:
+		 * false`, `applied: true`, and exit `3`; the implementation MUST NOT
+		 * misreport the published state as unapplied." Distinct from the
+		 * `outcome: 'incomplete'` variant below, which reports a claim that
+		 * was never proven to have completed in the first place -- never a
+		 * completed one whose only failure was in cleaning up afterward.
+		 */
+		| { applied: true, outcome: 'cleanup-failed', changes: InitPlanChange[], message: string }
 		| { applied: false, outcome: 'raced', message: string }
 		| { applied: false, outcome: 'incomplete', message: string }
 
@@ -1199,23 +1219,35 @@ async function releaseAllLeases(leases: readonly OwnedFileLease[]): Promise<Leas
  * Fold every tracked file lease's `release()` outcome into `natural` --
  * `applyInitPlanCore`'s own already-decided result.
  *
- * Finding 2 (P1, sixteenth round, matching `application/artifact-create.ts`'s
- * own `foldLeaseRelease`): `release()` never throws, so a close failure can
- * never escape as an uncaught rejection here either. Unlike
- * `ApplyCreatePlanResult`, `ApplyInitPlanResult` has no separate "verified but
- * a later cleanup step failed" outcome to fold a POST-completion release
- * failure into -- every tracked lease here is released only once, right
- * before this function's caller returns, well after `applyInitPlanCore`
- * already decided its own result. A release failure is therefore surfaced
- * only when it would otherwise be silently swallowed by an unqualified
- * success: if `natural` already reports `applied: false` (a proven race, or
- * an already-incomplete abort), a release failure changes nothing further --
- * that result already correctly reports this invocation did not complete. If
+ * Finding 1 (P1, seventeenth round, correcting the sixteenth round's own
+ * fix): `release()` never throws, so a close failure can never escape as an
+ * uncaught rejection here either -- that part of the sixteenth round's fix
+ * was correct. What was wrong is WHICH `ApplyInitPlanResult` a release
+ * failure was folded into. Every tracked lease here (the marker's, and every
+ * planned file's) is released only once, right before this function's
+ * caller returns -- structurally, well after `applyInitPlanCore` already
+ * decided its own result. That ordering means a release failure can be
+ * reached from `natural.applied === true` ONLY once `applyInitPlanCore` has
+ * already verified the claim was never swapped out and removed the marker
+ * under its full ownership-proof standard: i.e. only strictly AFTER
+ * publication genuinely, physically completed. The sixteenth round's fix
+ * downgraded that case to `applied: false, outcome: 'incomplete'`, which
+ * misreported a genuinely completed publication as never having happened --
+ * exactly the `13-cli-contract.md` "MUST NOT misreport the published state
+ * as unapplied" violation Finding 1 of this round caught. If `natural`
+ * already reports `applied: false` (a proven race, or an already-incomplete
+ * abort -- publication never completed, or was never provably completed),
+ * that result already carries its own, more specific explanation of why this
+ * invocation did not complete; a release failure changes nothing further and
+ * is not folded in at all (unchanged from before this round's fix). If
  * `natural` reports `applied: true` (the plan fully materialized, verified,
  * and the marker was removed), a release failure means this invocation could
- * not even cleanly account for its own file handles afterward; that is
- * downgraded to `outcome: 'incomplete'` rather than silently reported as a
- * plain, unqualified success.
+ * not even cleanly account for its own file handles afterward, AFTER
+ * publication itself genuinely succeeded; that is folded into the `outcome:
+ * 'cleanup-failed'` variant (matching `application/artifact-create.ts`'s own
+ * `foldLeaseRelease`) -- `applied: true` throughout -- rather than silently
+ * reported as a plain, unqualified success, and never downgraded to
+ * `applied: false`.
  */
 function foldLeaseReleases(natural: ApplyInitPlanResult, releases: readonly LeaseReleaseResult[]): ApplyInitPlanResult {
 	if (!natural.applied)
@@ -1225,7 +1257,7 @@ function foldLeaseReleases(natural: ApplyInitPlanResult, releases: readonly Leas
 	if (failed === undefined)
 		return natural
 
-	return { applied: false, outcome: 'incomplete', message: `'ef init' completed and its initialization marker was removed, but a tracked file's handle could not be cleanly released afterward: ${failed.error.message}.` }
+	return { applied: true, outcome: 'cleanup-failed', changes: natural.changes, message: `'ef init' completed and its initialization marker was removed, but a tracked file's handle could not be cleanly released afterward: ${failed.error.message}.` }
 }
 
 /**

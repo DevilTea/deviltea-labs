@@ -639,17 +639,24 @@ describe('runInitCommand', () => {
 	})
 
 	// FINDING 2 (P1, sixteenth round, matching `cli/commands/artifact-create.ts`'s
-	// own regression): a rejection from a tracked file's own `handle.close()`
-	// (now `OwnedFileLease.release()`, which itself never throws) must never
-	// escape as an uncaught rejection and must never be misreported as exit
-	// `3` (internal defect) -- it belongs to exit `2`'s execution/permission-
-	// inability class instead (13-cli-contract.md's exit table). Reproduced
-	// here through the CLI's real, non-injected `applyInitPlan` wiring by
-	// mocking the real `open()` call itself: the marker's own handle is
-	// genuinely written exactly as production code does, but its `close` is
-	// made to reject, downgrading an otherwise fully successful `ef init` from
-	// exit `0` to exit `2`.
-	it('exits 2 (applied:false, complete:false, incomplete) -- never exit 3, never a plain success -- when a tracked file\'s handle close() fails', async () => {
+	// own regression; corrected in the seventeenth round -- see
+	// `application/init.ts`'s own Finding 1, seventeenth round): a rejection
+	// from a tracked file's own `handle.close()` (now
+	// `OwnedFileLease.release()`, which itself never throws) must never
+	// escape as an uncaught rejection. Initialization genuinely, physically
+	// completed here -- the marker was verified and removed -- before the
+	// release failure occurred, so 13-cli-contract.md's "publication succeeds
+	// but a later cleanup or internal operation fails" rule applies:
+	// `complete: false`, `applied: true`, exit `3`, `EF-VAL-008` (matching
+	// `cli/commands/artifact-create.ts`'s own mapping) -- never `applied:
+	// false` (the sixteenth round's own mistake, which misreported a
+	// completed publication as never having happened), and never a plain
+	// success. Reproduced here through the CLI's real, non-injected
+	// `applyInitPlan` wiring by mocking the real `open()` call itself: the
+	// marker's own handle is genuinely written exactly as production code
+	// does, but its `close` is made to reject, downgrading an otherwise fully
+	// successful `ef init` from exit `0` to exit `3`.
+	it('exits 3 (applied:true, complete:false, cleanup-failed, EF-VAL-008) -- never applied:false, never exit 2, never a plain success -- when a tracked file\'s handle close() fails', async () => {
 		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
 			const [target] = args as [string]
 			const real = await realFns.open(...args)
@@ -670,12 +677,14 @@ describe('runInitCommand', () => {
 		const outcome = await runInitCommand(baseOptions({ yes: true }), deps())
 
 		expect(outcome.exitCode)
-			.toBe(2)
+			.toBe(3)
 		const json = JSON.parse(outcome.stdout as string)
 		expect(json.complete)
 			.toBe(false)
 		expect(json.applied)
-			.toBe(false)
+			.toBe(true)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-008')
 
 		// The initialization genuinely, fully completed on disk -- only
 		// releasing the marker's lease afterward failed.
