@@ -8,7 +8,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SCHEMA_BY_TYPE } from '../domain/model'
 import { directoryIdentity as realDirectoryIdentity } from '../platform/fs-facts'
-import { writeTempFileComplete as realWriteTempFileComplete } from '../platform/hard-link-publish'
+import { publishViaHardLink as realPublishViaHardLink, writeTempFileComplete as realWriteTempFileComplete } from '../platform/hard-link-publish'
 import {
 	applyCreatePlan,
 	computeCreatePlan,
@@ -561,7 +561,14 @@ describe('applyCreatePlan', () => {
 		const plan = computePlanOrThrow()
 		const deps = {
 			...defaultApplyCreatePlanDeps,
-			publishViaHardLink: async () => ({ outcome: 'failed' as const, error: new Error('disk full') }),
+			// A real, errno-shaped failure (`code` + `syscall`, exactly what a
+			// genuine `link()` I/O failure carries) that is neither a recognized
+			// capability-absence code nor a structurally proven chain rejection
+			// (twenty-fourth round: `classifyStructuralOrExecutionFsFailure` now
+			// re-throws a non-errno-shaped error as a genuine defect, so this mock
+			// must itself be realistically errno-shaped to keep exercising the
+			// "generic execution failure" branch this test targets).
+			publishViaHardLink: async () => ({ outcome: 'failed' as const, error: Object.assign(new Error('disk full'), { code: 'EIO', syscall: 'link' }) }),
 		}
 
 		const result = await applyCreatePlan(plan, tempDir, deps)
@@ -622,7 +629,10 @@ describe('applyCreatePlan', () => {
 		const plan = computePlanOrThrow()
 		const deps = {
 			...defaultApplyCreatePlanDeps,
-			writeTempFileComplete: async () => ({ outcome: 'failed' as const, error: Object.assign(new Error('no space left on device'), { code: 'ENOSPC' }) }),
+			// Real, errno-shaped (`code` + `syscall`, twenty-fourth round: see the
+			// analogous comment on the publish-failure test above) execution
+			// failure, distinct from a structurally proven chain rejection.
+			writeTempFileComplete: async () => ({ outcome: 'failed' as const, error: Object.assign(new Error('no space left on device'), { code: 'ENOSPC', syscall: 'open' }) }),
 		}
 
 		const result = await applyCreatePlan(plan, tempDir, deps)
@@ -2539,6 +2549,289 @@ Placeholder.
 			const content = await fs.readFile(engineeringPath, 'utf8')
 			expect(content)
 				.toBe('a regular file where .engineering should be, post-write')
+		})
+	})
+
+	// FINDING (twenty-fourth round): the twenty-second and twenty-third rounds
+	// classified a structurally proven `ENOTDIR`/`ELOOP` escaping `targetExists`'s
+	// and `verifyChainComponent`'s own OBSERVATION probes, but three further
+	// MUTATING syscall boundaries were left unclassified: `ensureDirectory`'s
+	// recursive `mkdir` (a thrown exception), `writeTempFileComplete`'s
+	// `open('wx+')`, and `publishViaHardLink`'s `link()` (the latter two already
+	// caught internally and returned as a typed `{ outcome: 'failed', error }`
+	// result, never thrown). All three unconditionally folded ANY failure alike
+	// into `applied: false, outcome: 'incomplete'`, discarding the preserved
+	// errno entirely -- silently downgrading a proven managed-directory-chain
+	// rejection into a merely "execution failed, retry" report, and letting a
+	// non-errno programmer/invariant defect escape exit `3` merely because a
+	// primitive returned it as a typed result rather than throwing it. Every
+	// regression below fails against that prior implementation (which reports
+	// `outcome: 'incomplete'`, or resolves rather than rejects for a non-errno
+	// defect) and passes only once each call site routes its error through the
+	// new shared `classifyStructuralOrExecutionFsFailure`.
+	describe('every remaining mutating syscall boundary classifies a structurally proven ENOTDIR/ELOOP/EEXIST as a rejection, and a non-errno defect as a genuine defect, never folding either into incomplete (Finding, twenty-fourth round)', () => {
+		it('ensureDirectory: reports applied:false/rejected (real ENOTDIR) when an ancestor of the type directory is replaced by a regular file strictly before the real recursive mkdir runs', async () => {
+			const plan = computePlanOrThrow()
+			const engineeringPath = path.join(tempDir, '.engineering')
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				// Mutate strictly between the pre-write content-generation reload
+				// (`verifyContentGenerationWitness`, which runs immediately before
+				// `ensureDirectory`) and `ensureDirectory`'s own real `mkdir` call:
+				// the reload itself must still observe the REAL, untouched
+				// `.engineering` (so it passes cleanly), and only afterward is it
+				// replaced.
+				loadSnapshot: async (projectRoot: string, expectedEngineeringIdentity: FileIdentity) => {
+					const result = await defaultApplyCreatePlanDeps.loadSnapshot(projectRoot, expectedEngineeringIdentity)
+					await fs.rm(engineeringPath, { recursive: true, force: true })
+					await fs.writeFile(engineeringPath, 'a regular file where .engineering should be, pre-mkdir')
+					return result
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The replacement file itself was never touched.
+			const content = await fs.readFile(engineeringPath, 'utf8')
+			expect(content)
+				.toBe('a regular file where .engineering should be, pre-mkdir')
+		})
+
+		it('ensureDirectory: control -- still reports applied:false/incomplete when the recursive mkdir fails with EACCES instead (mere observation noise, not a proven structural fact)', async () => {
+			const plan = computePlanOrThrow()
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'mkdir' })
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				ensureDirectory: async () => {
+					throw probeError
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		it('ensureDirectory: propagates a non-errno Node internal argument/invariant error as a genuine defect, never folded into incomplete', async () => {
+			const plan = computePlanOrThrow()
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				ensureDirectory: async () => {
+					throw Object.assign(new TypeError('bad internal argument'), { code: 'ERR_INVALID_ARG_TYPE' })
+				},
+			}
+
+			await expect(applyCreatePlan(plan, tempDir, deps))
+				.rejects.toThrow('bad internal argument')
+		})
+
+		it('ensureDirectory: reports applied:false/rejected (real EEXIST, final-component-non-directory case) when the type directory path itself is replaced by a regular file strictly before the real recursive mkdir runs', async () => {
+			const plan = computePlanOrThrow()
+			const typeDirPath = path.join(tempDir, '.engineering/req')
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				loadSnapshot: async (projectRoot: string, expectedEngineeringIdentity: FileIdentity) => {
+					const result = await defaultApplyCreatePlanDeps.loadSnapshot(projectRoot, expectedEngineeringIdentity)
+					await fs.writeFile(typeDirPath, 'a regular file where the canonical type directory should be, pre-mkdir')
+					return result
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			const content = await fs.readFile(typeDirPath, 'utf8')
+			expect(content)
+				.toBe('a regular file where the canonical type directory should be, pre-mkdir')
+		})
+
+		it('writeTempFileComplete: reports applied:false/rejected (real ENOTDIR), with no canonical target ever created, when the type directory is replaced by a regular file strictly after the post-ensure chain re-check and before the real open(\'wx+\') runs', async () => {
+			const plan = computePlanOrThrow()
+			const typeDirPath = path.join(tempDir, '.engineering/req')
+			let ensured = false
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				ensureDirectory: async (target: string) => {
+					await defaultApplyCreatePlanDeps.ensureDirectory(target)
+					if (target === typeDirPath)
+						ensured = true
+				},
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					// Runs strictly AFTER `ensureDirectory` created the real type
+					// directory AND the post-ensure chain re-check (immediately
+					// preceding this call) already passed against it -- only NOW is it
+					// replaced, so the fault lands exactly in the narrow window this
+					// syscall boundary alone can still observe.
+					if (ensured) {
+						await fs.rm(typeDirPath, { recursive: true, force: true })
+						await fs.writeFile(typeDirPath, 'a regular file where the canonical type directory should be, pre-open')
+					}
+					return realWriteTempFileComplete(tempPathArg, bytes)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			const content = await fs.readFile(typeDirPath, 'utf8')
+			expect(content)
+				.toBe('a regular file where the canonical type directory should be, pre-open')
+
+			// No canonical target was ever created.
+			expect(await pathExists(path.join(tempDir, plan.path)))
+				.toBe(false)
+		})
+
+		it('writeTempFileComplete: control -- still reports applied:false/incomplete when open(\'wx+\') fails with EACCES instead (mere observation noise, not a proven structural fact)', async () => {
+			const plan = computePlanOrThrow()
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async () => ({ outcome: 'failed' as const, error: Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'open' }) }),
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		it('writeTempFileComplete: propagates a non-errno defect wrapped in the primitive\'s own failed-result error field as a genuine defect, never folded into incomplete', async () => {
+			const plan = computePlanOrThrow()
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async () => ({ outcome: 'failed' as const, error: Object.assign(new TypeError('bad internal argument'), { code: 'ERR_INVALID_ARG_TYPE' }) }),
+			}
+
+			await expect(applyCreatePlan(plan, tempDir, deps))
+				.rejects.toThrow('bad internal argument')
+		})
+
+		it('publishViaHardLink: reports applied:false/rejected (real ENOTDIR), releasing the temp lease exactly once and never destructively touching the foreign replacement, when the type directory is replaced by a regular file strictly after the final pre-publication chain re-check and before the real link() runs', async () => {
+			const plan = computePlanOrThrow()
+			const typeDirPath = path.join(tempDir, '.engineering/req')
+			let tempWritten = false
+			let mutated = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					tempWritten = true
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				publishViaHardLink: async (tempPathArg: string, targetPathArg: string) => {
+					// Runs strictly AFTER the temporary file was written AND the final
+					// pre-publication chain re-check (immediately preceding this call)
+					// already passed against the real type directory -- only NOW is it
+					// replaced, so the fault lands exactly in the narrow window only
+					// the real `link()` call itself can still observe.
+					if (tempWritten && !mutated) {
+						mutated = true
+						await fs.rm(typeDirPath, { recursive: true, force: true })
+						await fs.writeFile(typeDirPath, 'a regular file where the canonical type directory should be, pre-link')
+					}
+					return realPublishViaHardLink(tempPathArg, targetPathArg)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The lease was released exactly once.
+			expect(releaseCallCount)
+				.toBe(1)
+
+			// The foreign replacement now occupying the type directory path was
+			// never destructively touched by the ownership-proven cleanup attempt
+			// (its ownership cannot be proven against this invocation's own lease).
+			const content = await fs.readFile(typeDirPath, 'utf8')
+			expect(content)
+				.toBe('a regular file where the canonical type directory should be, pre-link')
+
+			// No canonical target was ever created.
+			expect(await pathExists(path.join(tempDir, plan.path)))
+				.toBe(false)
+		})
+
+		it('publishViaHardLink: control -- still reports applied:false/incomplete when link() fails with EACCES instead (mere observation noise, not a proven structural fact)', async () => {
+			const plan = computePlanOrThrow()
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				publishViaHardLink: async () => ({ outcome: 'failed' as const, error: Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'link' }) }),
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		it('publishViaHardLink: propagates a non-errno defect wrapped in the primitive\'s own failed-result error field as a genuine defect, releasing the temp lease exactly once, never folded into incomplete', async () => {
+			const plan = computePlanOrThrow()
+			let releaseCallCount = 0
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				publishViaHardLink: async () => ({ outcome: 'failed' as const, error: Object.assign(new TypeError('bad internal argument'), { code: 'ERR_INVALID_ARG_TYPE' }) }),
+			}
+
+			await expect(applyCreatePlan(plan, tempDir, deps))
+				.rejects.toThrow('bad internal argument')
+			expect(releaseCallCount)
+				.toBe(1)
 		})
 	})
 })
