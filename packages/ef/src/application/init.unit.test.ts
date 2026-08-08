@@ -1561,15 +1561,21 @@ describe('applyInitPlan', () => {
 	})
 
 	// FINDING (P1, sixteenth round, matching `application/artifact-create.ts`'s
-	// own finding): a rejection from a tracked file's own `handle.close()`
-	// (now `OwnedFileLease.release()`) must never override an already-decided
-	// `applyInitPlan` result by escaping as an uncaught rejection. `release()`
-	// itself never throws; this regression instead mocks its RETURN VALUE
-	// (`released-with-error`) and asserts `applyInitPlan`'s own
-	// `foldLeaseReleases` folds it into `applied: false, outcome: 'incomplete'`
-	// rather than silently reporting a plain, unqualified success.
-	describe('tracked-file lease release() failure containment (Finding 2, sixteenth round)', () => {
-		it('reports applied:false/incomplete (never a rejection, never a plain success) when a tracked file\'s lease fails to release after an otherwise fully successful init', async () => {
+	// own finding; corrected in the seventeenth round -- see Finding 1,
+	// seventeenth round, and `foldLeaseReleases`'s own doc): a rejection from a
+	// tracked file's own `handle.close()` (now `OwnedFileLease.release()`)
+	// must never override an already-decided `applyInitPlan` result by
+	// escaping as an uncaught rejection. `release()` itself never throws; this
+	// regression instead mocks its RETURN VALUE (`released-with-error`) and
+	// asserts `applyInitPlan`'s own `foldLeaseReleases` folds it into
+	// `applied: true, outcome: 'cleanup-failed'` -- initialization genuinely,
+	// physically completed (the marker was verified and removed) and MUST NOT
+	// be misreported as unapplied (13-cli-contract.md) -- rather than
+	// silently reporting a plain, unqualified success, and rather than the
+	// sixteenth round's own mistaken `applied: false, outcome: 'incomplete'`,
+	// which misreported a completed publication as never having happened.
+	describe('tracked-file lease release() failure containment (Finding 2, sixteenth round; corrected Finding 1, seventeenth round)', () => {
+		it('reports applied:true/cleanup-failed (never a rejection, never applied:false, never a plain success) when a tracked file\'s lease fails to release after an otherwise fully successful init', async () => {
 			const plan = await computeValidPlan()
 			const releaseError = Object.assign(new Error('bad file descriptor'), { code: 'EBADF' })
 
@@ -1599,10 +1605,10 @@ describe('applyInitPlan', () => {
 			const result = await applyInitPlan(plan, deps)
 
 			expect(result.applied)
-				.toBe(false)
-			expect(result.applied === false && result.outcome)
-				.toBe('incomplete')
-			expect(result.applied === false && result.message)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('cleanup-failed')
+			expect(result.applied === true && result.outcome === 'cleanup-failed' && result.message)
 				.toContain(releaseError.message)
 
 			// The initialization genuinely, fully completed on disk and the
