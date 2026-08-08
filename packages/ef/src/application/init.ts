@@ -825,6 +825,34 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	 * Only `verifyClaimIntact`'s own typed result (consumed solely by
 	 * `applyInitPlanCore`'s final, POST-marker-removal checkpoint) actually
 	 * needs the distinction this function exposes.
+	 *
+	 * Audited (twenty-first round, alongside the `readDirectory` fix this same
+	 * round makes -- see `isProvenDirectoryGone`'s own doc): the FILE branch's
+	 * `'error'` status below needs no analogous `ENOENT`-vs-noise split.
+	 * `fstatLiveDetailed()` calls `fstat` through the lease's OWN retained,
+	 * still-open file handle -- a syscall keyed to the handle's inode
+	 * directly, never by re-resolving `entry.path` -- so it cannot itself fail
+	 * `ENOENT` merely because the path was unlinked or renamed; that fact
+	 * surfaces instead as `nlink === 0`, already reported as the distinct,
+	 * positively proven `'unlinked'` status one line below. Anything that
+	 * reaches `'error'` here (e.g. a transient `EIO`, or the handle's `fd`
+	 * itself becoming invalid) is therefore always a genuine observation
+	 * failure, never a structural proof of absence -- `'unavailable'` remains
+	 * correct for every case that reaches it.
+	 *
+	 * The DIRECTORY branch's `deps.directoryIdentity(entry.path)` call is
+	 * NOT wrapped in a `try`/`catch` at all, so an `ENOTDIR`/`EACCES`/`EIO`
+	 * escaping it (unlike the always-non-throwing `tryLstat`-derived
+	 * `undefined` for a plain `ENOENT`) propagates out of `verifyClaimIntact`
+	 * uncaught -- identical, deliberate, already-reviewed behavior to this
+	 * same function's own `plan.targetRoot` identity check two lines above
+	 * `readDirectory`'s call, both contained by `applyInitPlanCore`'s
+	 * surrounding `try`/`catch` (see that catch's own doc) rather than typed
+	 * here. Splitting THAT escape into a typed `'mismatch'` too would be a
+	 * second, separately-scoped change -- it is not this round's reported P1,
+	 * which is specifically `readDirectory`'s own blanket catch -- so it is
+	 * left as is here; noted for a future round to pick up if it is ever
+	 * actually reported.
 	 */
 	async function entryOwnershipStatus(entry: CreatedEntry): Promise<'mismatch' | 'proven' | 'unavailable'> {
 		if (entry.kind === 'directory') {
@@ -933,7 +961,13 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	 * `'unavailable'` is a mere OBSERVATION failure (`readDirectory` or a
 	 * tracked file lease's `fstatLiveDetailed()` could not tell either way --
 	 * e.g. a transient `EACCES`/`EIO`) that proves nothing about the claim's
-	 * actual state. Both outcomes are the un-verified case pre-completion --
+	 * actual state. A `readDirectory` failure whose error code ITSELF proves
+	 * `engineeringPath` no longer denotes a listable directory (`ENOENT`,
+	 * `ENOTDIR`, `ELOOP` -- see `isProvenDirectoryGone`) is a `'mismatch'`, not
+	 * an `'unavailable'`: finding, twenty-first round, correcting the
+	 * twentieth round's own fix, which folded these proven codes in with
+	 * genuine noise like `EACCES`/`EIO`. Both outcomes are the un-verified case
+	 * pre-completion --
 	 * every checkpoint before the marker is removed treats `!== 'intact'`
 	 * identically, fail-closed, exactly like the prior plain-boolean contract
 	 * (see each call site). The distinction matters ONLY to the single
@@ -994,11 +1028,32 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		// honestly instead, so that checkpoint alone can fold it into
 		// `cleanup-failed` rather than misreport an already-completed
 		// publication as unapplied.
+		//
+		// Finding (P1, twenty-first round, correcting the above): the twentieth
+		// round's own fix over-corrected by folding EVERY `readdir` error alike
+		// into `'unavailable'`, including `ENOENT`/`ENOTDIR` (and, for the same
+		// reason, `ELOOP`) -- but these codes are not mere observation noise
+		// like `EACCES`/`EIO`; they are themselves POSITIVE PROOF that
+		// `engineeringPath` no longer denotes a directory this invocation can
+		// list at all (e.g. renamed or removed by a racing actor in the narrow
+		// window between the `plan.targetRoot` identity re-check immediately
+		// above and this `readdir` call). Reaching the final post-marker-removal
+		// checkpoint as `'unavailable'` there means `applied: true, outcome:
+		// 'cleanup-failed'`; reaching it as `'mismatch'` means `applied: false,
+		// outcome: 'incomplete'` -- the twentieth round's own positive-mismatch
+		// control case requires exactly the latter for a proven claim loss, so
+		// folding `ENOENT`/`ENOTDIR` into `'unavailable'` silently upgraded a
+		// lost claim into a reported success. `isProvenDirectoryGone` (see its
+		// own doc) now splits the two: a structurally proven absence/non-
+		// directory reports `'mismatch'`, honestly; everything else still falls
+		// back to `'unavailable'`, unchanged.
 		let currentEntries: string[]
 		try {
 			currentEntries = await deps.readDirectory(engineeringPath)
 		}
-		catch {
+		catch (error) {
+			if (isProvenDirectoryGone(error))
+				return 'mismatch'
 			return 'unavailable'
 		}
 		if (currentEntries.length !== createdTopLevelNames.size)
@@ -1405,6 +1460,40 @@ function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
 		return false
 	const { code, syscall } = error as NodeJS.ErrnoException
 	return typeof code === 'string' && /^E[A-Z0-9]+$/.test(code) && typeof syscall === 'string'
+}
+
+/**
+ * `true` iff `error` is a genuine `fs` errno error (per `isFsSystemError`)
+ * whose `.code` is ITSELF positive proof that the probed path no longer
+ * denotes a listable directory -- `ENOENT` (the path, or an ancestor
+ * component, is simply gone), `ENOTDIR` (a component that used to be a
+ * directory is now something else -- a file, for instance -- swapped in over
+ * it), or `ELOOP` (too many symlinks were encountered resolving the path;
+ * since every path this module probes this way was itself verified as a
+ * real, non-symlink directory when its identity was captured, an `ELOOP`
+ * here proves a symlink was swapped in at that exact path since, exactly the
+ * same reasoning `platform/fs-facts.ts`'s `readRegularFileNoFollow` already
+ * applies to an `ELOOP` from `open(..., O_NOFOLLOW)`). Every OTHER fs errno
+ * code (`EACCES`, `EIO`, `EPERM`, ...) proves nothing about the path's actual
+ * state -- only that this invocation could not observe it this time -- and
+ * must stay classified as a mere observation failure, never folded in here.
+ *
+ * Finding (P1, twenty-first round, correcting the twentieth round's own
+ * fix): `verifyClaimIntact`'s `readDirectory(engineeringPath)` catch folded
+ * EVERY error alike into `'unavailable'`, including `ENOENT`/`ENOTDIR` --
+ * unlike `EACCES`/`EIO`, THESE codes are themselves positively proven
+ * discrepancies, not mere noise: `engineeringPath` genuinely no longer
+ * denotes a directory this invocation can list, exactly as certain a fact as
+ * a `readdir` call that succeeded but returned a foreign name set. Reaching
+ * the post-marker-removal checkpoint as `'unavailable'` folds it into
+ * `applied: true, outcome: 'cleanup-failed'` instead of the `applied: false,
+ * outcome: 'incomplete'` the twentieth round's own positive-mismatch control
+ * case requires for exactly this kind of proven claim loss -- silently
+ * upgrading a lost claim into a reported success. See `verifyClaimIntact`'s
+ * own `readDirectory` call site for the fix built on this classifier.
+ */
+function isProvenDirectoryGone(error: unknown): boolean {
+	return isFsSystemError(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR' || error.code === 'ELOOP')
 }
 
 /**
