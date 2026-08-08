@@ -1158,12 +1158,75 @@ function foldLeaseRelease(plan: ArtifactCreatePlan, natural: ApplyCreatePlanResu
 }
 
 /**
+ * `true` iff `error` looks like a Node `fs` system error (an `Error` carrying
+ * a string `.code`, e.g. `EACCES`/`EIO`/`EPERM`) rather than a genuine
+ * programmer/invariant defect such as a `TypeError` (which carries no such
+ * `.code`). `ENOENT` specifically is never reachable here: every
+ * `isSymlink`/`directoryIdentity`/`isRegularFile`/`isDirectory`/`fileIdentity`
+ * probe this module calls already normalizes a missing path to `undefined` or
+ * `false` before ever throwing (`platform/fs-facts.ts`'s own `tryLstat`,
+ * `defaultFileIdentity`'s own doc), so anything that DOES escape as an
+ * exception is, by construction, some OTHER, unexpected system error -- an
+ * execution/permission failure this invocation could not itself complete, not
+ * a proven domain fact one way or the other. Used by `applyCreatePlan` to
+ * classify an exception escaping its own pre-publication steps (Finding B,
+ * eighteenth round) as 13-cli-contract.md's exit `2` class (contained as a
+ * typed `incomplete` result) rather than exit `3` (reserved for a genuine
+ * implementation defect, which has no such `.code` and must still propagate
+ * after this module's own lease finalization).
+ */
+function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
+	return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string'
+}
+
+/**
  * Perform the exact 13-cli-contract.md "Draft Artifact hard-link
  * publication" protocol for an already-computed `plan`. `projectRoot` is the
  * absolute project root the plan's project-relative paths are resolved
  * against.
+ *
+ * Finding B (eighteenth round): a prior implementation let an unexpected
+ * exception from any of this function's own fs observation/execution steps
+ * (`targetExists`, `verifyManagedDirectoryChain`, `verifyContentGenerationWitness`,
+ * and -- inside `runPublicationSteps` -- every pre-publication re-check that
+ * runs after the temporary file's lease is acquired) propagate as an
+ * uncaught rejection. When that happened strictly AFTER `writeTempFileComplete`
+ * had already returned `tempLease` (e.g. a non-`ENOENT` `EACCES`/`EIO` from the
+ * very first post-write managed-chain probe in `runPublicationSteps`), the
+ * un-guarded `const natural = await runPublicationSteps(...)` below skipped
+ * `tempLease.release()` entirely -- contradicting this function's own
+ * documented "released EXACTLY ONCE" guarantee -- and the CLI's generic
+ * top-level `catch` then reported exit `3` (an internal implementation
+ * defect) for what is, in fact, an ordinary execution/permission failure
+ * (13-cli-contract.md exit `2`'s own class). The entire body below is now
+ * wrapped so that: (1) whenever a temp-file lease has been acquired, it is
+ * released exactly once via structured (`try`/`catch`, never a bare `await`)
+ * finalization, regardless of whether `runPublicationSteps` returned normally
+ * or threw; and (2) any exception that escapes -- before OR after the lease
+ * was acquired -- is classified by `isFsSystemError`: a "predictable" fs
+ * observation/execution failure is contained as a typed
+ * `applied: false, outcome: 'incomplete'` result (nothing was proven
+ * materialized, published, or verified at the point such a failure occurred,
+ * so `applied: false` is accurate); a genuine non-fs-system error (e.g. a
+ * violated invariant surfacing as a `TypeError`) still propagates, after
+ * finalization, as the exit `3` this contract reserves for it. The existing
+ * post-publication exception containment inside `runPublicationSteps` itself
+ * (Finding, fourteenth round) is unchanged: this outer layer only ever
+ * observes an exception from there when a genuine defect (not an fs system
+ * error already contained internally) is thrown.
  */
 export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: string, deps: ApplyCreatePlanDeps = defaultApplyCreatePlanDeps): Promise<ApplyCreatePlanResult> {
+	try {
+		return await applyCreatePlanUnsafe(plan, projectRoot, deps)
+	}
+	catch (error) {
+		if (isFsSystemError(error))
+			return { applied: false, outcome: 'incomplete', message: `An unexpected filesystem failure interrupted the creation of '${plan.path}' before it could complete: ${error.message}.` }
+		throw error
+	}
+}
+
+async function applyCreatePlanUnsafe(plan: ArtifactCreatePlan, projectRoot: string, deps: ApplyCreatePlanDeps): Promise<ApplyCreatePlanResult> {
 	const targetPath = path.join(projectRoot, plan.path)
 
 	if (await targetExists(deps, targetPath))
@@ -1250,8 +1313,25 @@ export async function applyCreatePlan(plan: ArtifactCreatePlan, projectRoot: str
 	// discarded or allowed to override an already-decided outcome via an
 	// uncaught rejection).
 	const tempLease = writeResult.lease
-	const natural = await runPublicationSteps(deps, projectRoot, plan, targetPath, tempPath, tempLease, chainCheck)
-	return foldLeaseRelease(plan, natural, await tempLease.release())
+	let natural: ApplyCreatePlanResult | undefined
+	let thrown: unknown
+	try {
+		natural = await runPublicationSteps(deps, projectRoot, plan, targetPath, tempPath, tempLease, chainCheck)
+	}
+	catch (error) {
+		thrown = error
+	}
+
+	// Structured finalization (Finding B, eighteenth round): the temp-file
+	// lease is released here exactly once, regardless of whether
+	// `runPublicationSteps` returned normally or threw -- never skipped by an
+	// early rethrow the way an un-guarded `await` chain would.
+	const release = await tempLease.release()
+
+	if (thrown !== undefined)
+		throw thrown
+
+	return foldLeaseRelease(plan, natural!, release)
 }
 
 /**

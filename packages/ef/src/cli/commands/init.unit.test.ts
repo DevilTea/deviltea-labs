@@ -10,23 +10,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createGitExecutor } from '../../git/executor'
 import { runInitCommand } from './init'
 
-// `openMock` lets a test inject a real-filesystem handle-close failure
-// strictly inside `applyInitPlan`'s own internals -- exercised here through
-// the CLI's actual, non-injected dependency wiring (this command has no
+// `openMock`/`lstatMock` let a test inject a real-filesystem failure strictly
+// inside `applyInitPlan`'s own internals -- exercised here through the CLI's
+// actual, non-injected dependency wiring (this command has no
 // `applyInitPlan`-deps injection point of its own). Every test that does not
-// explicitly arm it gets a plain passthrough to the real implementation.
-const { openMock, realFns } = vi.hoisted(() => ({
+// explicitly arm one gets a plain passthrough to the real implementation.
+const { openMock, lstatMock, realFns } = vi.hoisted(() => ({
 	openMock: vi.fn(),
+	lstatMock: vi.fn(),
 	realFns: {
 		open: undefined as unknown as typeof import('node:fs/promises').open,
+		lstat: undefined as unknown as typeof import('node:fs/promises').lstat,
 	},
 }))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('node:fs/promises')>()
 	realFns.open = actual.open
+	realFns.lstat = actual.lstat
 	openMock.mockImplementation((...args: Parameters<typeof actual.open>) => actual.open(...args))
-	return { ...actual, open: openMock }
+	lstatMock.mockImplementation((...args: Parameters<typeof actual.lstat>) => actual.lstat(...args))
+	return { ...actual, open: openMock, lstat: lstatMock }
 })
 
 /** Wraps a real executor, forcing failure for every `execIn` call; used to simulate `computeInitPlan`'s own read-only Git checks becoming unavailable. */
@@ -120,11 +124,13 @@ describe('runInitCommand', () => {
 		root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'ef-cli-init-')))
 		git(root, ['init', '-q', '-b', 'main'])
 		openMock.mockImplementation((...args: Parameters<typeof realFns.open>) => realFns.open(...args))
+		lstatMock.mockImplementation((...args: Parameters<typeof realFns.lstat>) => realFns.lstat(...args))
 	})
 
 	afterEach(async () => {
 		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		openMock.mockClear()
+		lstatMock.mockClear()
 	})
 
 	function deps(prompts: Prompts = neverPrompts()) {
@@ -689,5 +695,82 @@ describe('runInitCommand', () => {
 		// The initialization genuinely, fully completed on disk -- only
 		// releasing the marker's lease afterward failed.
 		await expect(fs.stat(path.join(root, '.engineering', 'ef.yaml'))).resolves.toBeTruthy()
+	})
+
+	// FINDING A (P1, eighteenth round): `applyInitPlan`'s internal
+	// ownership-proof probes (`verifyClaimIntact`'s own
+	// `directoryIdentity(plan.targetRoot)` call, among others) can rethrow a
+	// non-`ENOENT` `lstat` failure exactly like any other `lstat`-based check
+	// in this package -- once the marker's own lease was already tracked (the
+	// marker having already been written for real), an un-guarded `await`
+	// chain in `applyInitPlan` let such a failure escape as an uncaught
+	// rejection entirely, and this command's own generic top-level `catch`
+	// then reported exit `3` (an internal implementation defect) for what is,
+	// in fact, an ordinary execution/permission failure -- 13-cli-contract.md
+	// exit `2`'s own class. Reproduced here through the CLI's real,
+	// non-injected `applyInitPlan` wiring by forcing the real `lstat`
+	// primitive to fail exactly once, immediately after the real marker
+	// `open()` call has already succeeded.
+	it('exits 2 (applied:false, complete:false, incomplete) -- never exit 3 -- when a non-ENOENT identity probe throws immediately after the marker is written for real', async () => {
+		let armed = false
+		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
+			const [target] = args as [string]
+			const real = await realFns.open(...args)
+			if (typeof target === 'string' && target.endsWith(path.join('.tmp', 'init-state.json')))
+				armed = true
+			return real
+		})
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			if (armed) {
+				armed = false
+				throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+			}
+			return realFns.lstat(...args)
+		})
+
+		const outcome = await runInitCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-001')
+	})
+
+	// Control: a genuine programmer/invariant error (never carrying an fs
+	// `.code`) from the exact same call site must still be reported as exit
+	// `3` -- the classification distinguishes an ordinary execution/permission
+	// failure from a real internal defect, it does not blanket-contain every
+	// exception.
+	it('control: still exits 3 (an internal defect) when a genuine programmer error is thrown from the same identity-probe call site', async () => {
+		let armed = false
+		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
+			const [target] = args as [string]
+			const real = await realFns.open(...args)
+			if (typeof target === 'string' && target.endsWith(path.join('.tmp', 'init-state.json')))
+				armed = true
+			return real
+		})
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			if (armed) {
+				armed = false
+				throw new TypeError('invariant violated: unreachable state')
+			}
+			return realFns.lstat(...args)
+		})
+
+		const outcome = await runInitCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(3)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
 	})
 })

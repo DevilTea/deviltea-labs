@@ -1216,6 +1216,26 @@ async function releaseAllLeases(leases: readonly OwnedFileLease[]): Promise<Leas
 }
 
 /**
+ * `true` iff `error` looks like a Node `fs` system error (an `Error` carrying
+ * a string `.code`, e.g. `EACCES`/`EIO`/`EPERM`) rather than a genuine
+ * programmer/invariant defect such as a `TypeError` (which carries no such
+ * `.code`). `ENOENT` specifically is never reachable here: every
+ * `directoryIdentity`/`regularFileIdentity` probe this module calls already
+ * normalizes a missing path to `undefined` before ever throwing
+ * (`platform/fs-facts.ts`'s own `tryLstat`), so anything that DOES escape as
+ * an exception is, by construction, some OTHER, unexpected system error -- an
+ * execution/permission failure this invocation could not itself complete, not
+ * a proven domain fact one way or the other. Used by `applyInitPlan` to
+ * classify an exception escaping `applyInitPlanCore` as 13-cli-contract.md's
+ * exit `2` class (contained as a typed `incomplete` result) rather than exit
+ * `3` (reserved for a genuine implementation defect, which has no such `.code`
+ * and must still propagate after this module's own lease finalization).
+ */
+function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
+	return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string'
+}
+
+/**
  * Fold every tracked file lease's `release()` outcome into `natural` --
  * `applyInitPlanCore`'s own already-decided result.
  *
@@ -1263,17 +1283,66 @@ function foldLeaseReleases(natural: ApplyInitPlanResult, releases: readonly Leas
 /**
  * Perform the exact 13-cli-contract.md "Initialization claim-and-complete
  * protocol" for an already-validated `plan` (see `applyInitPlanCore`'s own
- * doc for the full protocol). This thin wrapper's ONLY job is lease
- * lifecycle: every FILE entry `applyInitPlanCore` creates (the marker, and
- * every planned file) is tracked in `fileLeases` as it is created, and
- * released -- exactly once each, regardless of outcome -- immediately after
- * `applyInitPlanCore` returns, so `entryOwnershipProven`'s `fstatLive()`-based
- * checks stay valid for the ENTIRE protocol, never released mid-flight (see
- * `foldLeaseReleases`'s own doc for how a release failure is folded into the
- * reported result).
+ * doc for the full protocol). This thin wrapper has two jobs:
+ *
+ * 1. Lease lifecycle: every FILE entry `applyInitPlanCore` creates (the
+ *    marker, and every planned file) is tracked in `fileLeases` as it is
+ *    created, and released -- exactly once each, regardless of outcome --
+ *    immediately after `applyInitPlanCore` settles, so `entryOwnershipProven`'s
+ *    `fstatLive()`-based checks stay valid for the ENTIRE protocol, never
+ *    released mid-flight (see `foldLeaseReleases`'s own doc for how a release
+ *    failure is folded into the reported result).
+ * 2. Structured finalization and error classification (Finding A, eighteenth
+ *    round): a prior implementation released `fileLeases` only after a
+ *    successful, non-throwing return from `applyInitPlanCore` -- a bare
+ *    `const natural = await applyInitPlanCore(...)`, with no surrounding
+ *    `try`. `applyInitPlanCore`'s internal ownership-proof probes
+ *    (`verifyClaimIntact`'s and `entryOwnershipProven`'s
+ *    `directoryIdentity`/`regularFileIdentity` calls, `establishFreshDirectoryIdentity`'s,
+ *    `abort`'s own re-check, and the very first `directoryIdentity(plan.targetRoot)`
+ *    call) all rethrow a non-`ENOENT` `lstat` failure exactly like any other
+ *    `lstat`-based check in this package (`platform/fs-facts.ts`'s own
+ *    `tryLstat`): a real `EACCES`/`EIO` surfacing from ANY of them, at ANY
+ *    point after the marker's own lease was already tracked in `fileLeases`
+ *    (e.g. `writeInitMarker` having already succeeded), let that lease escape
+ *    completely unreleased as an uncaught rejection -- directly contradicting
+ *    this wrapper's own "exactly once each, regardless of outcome" guarantee
+ *    -- and the CLI's own generic top-level `catch` then reported exit `3`
+ *    (an internal implementation defect) for what is, in fact, an ordinary
+ *    execution/permission failure (13-cli-contract.md exit `2`'s own class).
+ *    Both halves are fixed together below: `fileLeases` is released exactly
+ *    once, whether `applyInitPlanCore` returned normally OR threw, via
+ *    structured (`try`/`catch`, never a bare `await`) finalization; a caught
+ *    exception is then itself classified -- `isFsSystemError` contains a
+ *    "predictable" fs observation/execution failure as a typed
+ *    `applied: false, outcome: 'incomplete'` result (never a stronger claim:
+ *    nothing was proven materialized, verified, or removed at the point such
+ *    a failure occurred), and only a genuine non-fs-system error (e.g. a
+ *    violated invariant surfacing as a `TypeError`) still propagates, after
+ *    finalization, as the exit `3` this contract reserves for it.
  */
 export async function applyInitPlan(plan: InitPlan, deps: ApplyInitPlanDeps = defaultApplyInitPlanDeps): Promise<ApplyInitPlanResult> {
 	const fileLeases: OwnedFileLease[] = []
-	const natural = await applyInitPlanCore(plan, deps, fileLeases)
-	return foldLeaseReleases(natural, await releaseAllLeases(fileLeases))
+	let natural: ApplyInitPlanResult | undefined
+	let thrown: unknown
+	try {
+		natural = await applyInitPlanCore(plan, deps, fileLeases)
+	}
+	catch (error) {
+		thrown = error
+	}
+
+	// Structured finalization: every tracked lease is released here exactly
+	// once, regardless of whether `applyInitPlanCore` returned normally or
+	// threw -- never skipped by an early rethrow the way an un-guarded
+	// `await` chain would (Finding A, eighteenth round).
+	const releases = await releaseAllLeases(fileLeases)
+
+	if (thrown !== undefined) {
+		if (isFsSystemError(thrown))
+			return { applied: false, outcome: 'incomplete', message: `An unexpected filesystem failure interrupted initialization before it could complete: ${thrown.message}.` }
+		throw thrown
+	}
+
+	return foldLeaseReleases(natural!, releases)
 }

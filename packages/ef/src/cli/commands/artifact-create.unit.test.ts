@@ -688,6 +688,84 @@ describe('runArtifactCreateCommand', () => {
 			.toContain('id: REQ-001')
 	})
 
+	// FINDING B (P1, eighteenth round): `applyCreatePlan`'s pre-publication
+	// re-checks (`verifyManagedDirectoryChain`'s own `isSymlink`/`directoryIdentity`
+	// calls, among others) can rethrow a non-`ENOENT` `lstat` failure exactly
+	// like any other `lstat`-based check in this package -- once the
+	// temporary file's own lease was already acquired (the temp file having
+	// already been written for real), an un-guarded `await` chain in
+	// `applyCreatePlan` let such a failure escape as an uncaught rejection
+	// entirely, and this command's own generic top-level `catch` then
+	// reported exit `3` (an internal implementation defect) for what is, in
+	// fact, an ordinary execution/permission failure -- 13-cli-contract.md
+	// exit `2`'s own class. Reproduced here through the CLI's real,
+	// non-injected `applyCreatePlan` wiring by forcing the real `lstat`
+	// primitive to fail exactly once, immediately after the real temporary
+	// file `open()` call has already succeeded.
+	it('exits 2 (applied:false, complete:false, incomplete) -- never exit 3 -- when the first post-write managed-chain probe throws immediately after a real temp write succeeds', async () => {
+		let armed = false
+		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
+			const [target] = args as [string]
+			const real = await realFns.open(...args)
+			if (typeof target === 'string' && target.includes('.tmp-'))
+				armed = true
+			return real
+		})
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			if (armed) {
+				armed = false
+				throw Object.assign(new Error('permission denied'), { code: 'EACCES' })
+			}
+			return realFns.lstat(...args)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
+
+		// No canonical publication occurred.
+		await expect(fs.stat(path.join(root, '.engineering/req/REQ-001.md'))).rejects.toThrow()
+	})
+
+	// Control: a genuine programmer/invariant error (never carrying an fs
+	// `.code`) from the exact same call site must still be reported as exit
+	// `3` -- the classification distinguishes an ordinary execution/permission
+	// failure from a real internal defect, it does not blanket-contain every
+	// exception.
+	it('control: still exits 3 (an internal defect) when a genuine programmer error is thrown from the same post-write chain-probe call site', async () => {
+		let armed = false
+		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
+			const [target] = args as [string]
+			const real = await realFns.open(...args)
+			if (typeof target === 'string' && target.includes('.tmp-'))
+				armed = true
+			return real
+		})
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			if (armed) {
+				armed = false
+				throw new TypeError('invariant violated: unreachable state')
+			}
+			return realFns.lstat(...args)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(3)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
+	})
+
 	// ---- Finding 11: bound-load -- `.engineering` identity threaded into ------
 	// ---- the snapshot walk, exactly like query/validate ------------------------
 

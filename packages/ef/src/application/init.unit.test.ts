@@ -1622,4 +1622,112 @@ describe('applyInitPlan', () => {
 			await expect(fs.stat(path.join(tempDir, '.engineering/.tmp/init-state.json'))).rejects.toThrow()
 		})
 	})
+
+	// FINDING A (P1, eighteenth round): `applyInitPlan` released every tracked
+	// file lease (`fileLeases`) only after a successful, non-throwing return
+	// from `applyInitPlanCore` -- a bare `const natural = await
+	// applyInitPlanCore(...)`, with no surrounding `try`. `applyInitPlanCore`'s
+	// internal ownership-proof probes (`verifyClaimIntact`'s own
+	// `deps.directoryIdentity(plan.targetRoot)` call, among others) all rethrow
+	// a non-`ENOENT` `lstat` failure exactly like any other `lstat`-based check
+	// in this package (`platform/fs-facts.ts`'s own `tryLstat`): once the
+	// marker's own lease had already been pushed onto `fileLeases`
+	// (`writeInitMarker` having already succeeded), a real `EACCES`/`EIO` from
+	// ANY later probe let that lease escape completely unreleased as an
+	// uncaught rejection -- directly contradicting `applyInitPlan`'s own
+	// documented "exactly once each, regardless of outcome" guarantee -- and
+	// the CLI's generic top-level `catch` then reported exit `3` (an internal
+	// implementation defect) for what is, in fact, an ordinary
+	// execution/permission failure (13-cli-contract.md exit `2`'s own class).
+	describe('escaped-exception lease finalization and error classification (Finding A, eighteenth round)', () => {
+		it('releases the already-tracked marker lease exactly once and reports applied:false/incomplete (never a rejection) when a non-ENOENT identity probe throws after the marker lease is held', async () => {
+			const plan = await computeValidPlan()
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+			let markerWritten = false
+			let probeThrown = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (markerPath: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPath, nonce)
+					if (real.outcome !== 'created')
+						return real
+					markerWritten = true
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				// The first probe `verifyClaimIntact` makes immediately after the
+				// marker lease is tracked (the very next loop iteration, before any
+				// planned directory is created).
+				directoryIdentity: async (target: string) => {
+					if (markerWritten && target === plan.targetRoot && !probeThrown) {
+						probeThrown = true
+						throw probeError
+					}
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(probeThrown)
+				.toBe(true)
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+			expect(result.applied === false && result.message)
+				.toContain(probeError.message)
+			// Structured finalization: the marker's lease -- the only one
+			// tracked by the time the probe threw -- was released exactly once,
+			// never skipped by the escaping exception.
+			expect(releaseCallCount)
+				.toBe(1)
+		})
+
+		it('control: still propagates a genuine programmer/invariant error (e.g. a TypeError) as a rejection, but only after releasing every tracked lease exactly once', async () => {
+			const plan = await computeValidPlan()
+			let markerWritten = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (markerPath: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPath, nonce)
+					if (real.outcome !== 'created')
+						return real
+					markerWritten = true
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				directoryIdentity: async (target: string) => {
+					if (markerWritten && target === plan.targetRoot)
+						throw new TypeError('invariant violated: unreachable state')
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
+				},
+			}
+
+			await expect(applyInitPlan(plan, deps))
+				.rejects.toThrow(TypeError)
+			expect(releaseCallCount)
+				.toBe(1)
+		})
+	})
 })
