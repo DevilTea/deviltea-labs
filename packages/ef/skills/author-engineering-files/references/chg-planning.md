@@ -8,6 +8,13 @@ below is a direct file edit, not a CLI subcommand).
 
 ## Decide whether a CHG is required
 
+Everything in this section presumes authoritative EF history already exists.
+Before the first authoritative bootstrap integration, the bootstrap
+exception applies instead (see `references/existing-project-bootstrap.md`):
+the entire initial state, including PRD/REQ/ADR/POL entering as `draft` or
+`active`, needs no CHG. That exception ends permanently at the first
+integration.
+
 A CHG is **required** for any of:
 
 - creating an Artifact directly as `active`;
@@ -31,7 +38,9 @@ have to be) for:
 - creating or editing a draft Artifact;
 - `draft -> retired`;
 - creating, editing, or retiring a draft CHG;
-- atomic project bootstrap (`ef init`'s own output, before its first commit);
+- the atomic project bootstrap state, before its first authoritative
+  integration - `ef init`'s own output plus any initial draft/active
+  knowledge authored per `references/existing-project-bootstrap.md`;
 - pre-integration provisional-ID collision repair.
 
 When unsure whether a target is "active," check its `status` with `ef query

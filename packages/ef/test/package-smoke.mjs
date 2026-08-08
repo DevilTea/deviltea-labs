@@ -221,6 +221,10 @@ function main() {
 			const skillFile = join(installedSkillsDirectory, skillName, 'SKILL.md')
 			assert(`installed package ships skills/${skillName}/SKILL.md`, existsSync(skillFile), `expected ${skillFile}`)
 		}
+		{
+			const brownfieldReference = join(installedSkillsDirectory, 'author-engineering-files', 'references', 'existing-project-bootstrap.md')
+			assert('installed package ships the existing-project bootstrap reference', existsSync(brownfieldReference), `expected ${brownfieldReference}`)
+		}
 
 		// ---- (a) ef version --format json --------------------------------------
 
