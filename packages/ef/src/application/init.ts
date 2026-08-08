@@ -1191,16 +1191,53 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	// correctly, no longer there.
 	createdStack.splice(markerEntryIndex, 1)
 
-	if (!(await verifyClaimIntact())) {
-		// The claim was swapped out from under us in the narrow window between
-		// the marker removal above and this final check. The marker -- this
-		// invocation's sole ownership proof once the claim itself is no longer
-		// verifiable -- is already gone, so cleanup cannot safely remove
-		// anything further here; report incomplete rather than misreport a
-		// successful application (13-cli-contract.md "the implementation MUST
-		// NOT misreport the published state as unapplied" applies symmetrically
-		// in the other direction: it also must not misreport an unproven state
-		// as applied).
+	// Publication-phase witness (Finding 1, nineteenth round, correcting the
+	// eighteenth round's own fix): the marker removal immediately above is
+	// 13-cli-contract.md's own boundary -- "`applied: true` for `init` requires
+	// removal of the matching initialization marker" -- so the instant
+	// `deleteOwnedEntry(markerEntry)` returned `true`, publication genuinely,
+	// physically completed. Everything from here on is merely this invocation
+	// trying to OBSERVE that already-published state, never to bring it about.
+	// A prior implementation called this final `verifyClaimIntact()` the exact
+	// same way as every earlier, PRE-completion checkpoint: an ordinary
+	// `lstat`-based exception escaping it (a non-`ENOENT` `EIO`/`EACCES` from
+	// `deps.directoryIdentity(plan.targetRoot)`, exactly like any other
+	// `lstat`-based check in this package) propagated uncaught out of
+	// `applyInitPlanCore`, straight into `applyInitPlan`'s generic
+	// pre-completion classifier (`isFsSystemError`), which contains it as
+	// `applied: false, outcome: 'incomplete'` -- the eighteenth round's own fix
+	// for exceptions escaping BEFORE completion, reapplied here where it
+	// misreports a genuinely completed publication as never having happened
+	// (13-cli-contract.md "the implementation MUST NOT misreport the published
+	// state as unapplied", the exact violation the seventeenth round's Finding
+	// 1 already closed for a lease-release failure at this same post-marker-
+	// removal point). The fix: this one observation is caught locally, right
+	// here, and folded into the existing `cleanup-failed` variant --
+	// `applied: true` (publication genuinely happened), mapped by the CLI to
+	// `complete: false`, exit `3`, `EF-VAL-008` -- never allowed to reach the
+	// generic pre-completion classifier that assumes nothing was yet
+	// materialized.
+	let claimStillObservablyIntact: boolean
+	try {
+		claimStillObservablyIntact = await verifyClaimIntact()
+	}
+	catch (error) {
+		return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but the claim could not be re-verified afterward: ${(error as Error).message}.` }
+	}
+
+	if (!claimStillObservablyIntact) {
+		// Unchanged from before this round: this is a PROVEN mismatch (a
+		// completed, non-throwing observation), not a mere observation failure
+		// -- `verifyClaimIntact` itself returned `false`, meaning the claim was
+		// swapped out from under us in the narrow window between the marker
+		// removal above and this final check. The marker -- this invocation's
+		// sole ownership proof once the claim itself is no longer verifiable --
+		// is already gone, so cleanup cannot safely remove anything further
+		// here; report incomplete rather than misreport a successful
+		// application (13-cli-contract.md "the implementation MUST NOT
+		// misreport the published state as unapplied" applies symmetrically in
+		// the other direction: it also must not misreport an unproven state as
+		// applied).
 		return { applied: false, outcome: 'incomplete', message: claimIntactFailureMessage }
 	}
 
@@ -1216,23 +1253,44 @@ async function releaseAllLeases(leases: readonly OwnedFileLease[]): Promise<Leas
 }
 
 /**
- * `true` iff `error` looks like a Node `fs` system error (an `Error` carrying
- * a string `.code`, e.g. `EACCES`/`EIO`/`EPERM`) rather than a genuine
- * programmer/invariant defect such as a `TypeError` (which carries no such
- * `.code`). `ENOENT` specifically is never reachable here: every
- * `directoryIdentity`/`regularFileIdentity` probe this module calls already
- * normalizes a missing path to `undefined` before ever throwing
- * (`platform/fs-facts.ts`'s own `tryLstat`), so anything that DOES escape as
- * an exception is, by construction, some OTHER, unexpected system error -- an
- * execution/permission failure this invocation could not itself complete, not
- * a proven domain fact one way or the other. Used by `applyInitPlan` to
- * classify an exception escaping `applyInitPlanCore` as 13-cli-contract.md's
- * exit `2` class (contained as a typed `incomplete` result) rather than exit
- * `3` (reserved for a genuine implementation defect, which has no such `.code`
+ * `true` iff `error` looks like a genuine Node `fs` errno system error --
+ * `EACCES`/`EIO`/`EPERM`, etc. -- rather than a programmer/invariant defect.
+ * Kept in sync with `application/artifact-create.ts`'s own identically named,
+ * identically documented helper; a future change to one MUST be mirrored in
+ * the other.
+ *
+ * Finding 2 (P2, nineteenth round, correcting the eighteenth round's own
+ * fix): a bare `typeof error.code === 'string'` check is too permissive.
+ * Node's OWN internal argument/invariant errors -- e.g. a `TypeError` thrown
+ * by a native binding for a bad argument -- routinely carry a string `.code`
+ * too, such as `ERR_INVALID_ARG_TYPE`; a real defect shaped that way would
+ * have been silently downgraded to this contract's exit `2` class instead of
+ * propagating as the exit `3` genuine-defect class 13-cli-contract.md
+ * reserves for it. A genuine `fs` errno error is distinguished by TWO
+ * properties together, never `.code` alone: `.code` matches `/^E[A-Z0-9]+$/`
+ * (an errno mnemonic such as `EACCES`/`EIO`/`EPERM` -- excluding, by
+ * construction, every `ERR_`-prefixed Node internal code, which always
+ * contains an underscore outside that pattern) AND it carries a string
+ * `.syscall` (the underlying syscall name, e.g. `lstat`/`open`/`unlink`),
+ * which every Node `fs` errno error carries and a Node internal
+ * argument/invariant error never does. `ENOENT` specifically is never
+ * reachable here: every `directoryIdentity`/`regularFileIdentity` probe this
+ * module calls already normalizes a missing path to `undefined` before ever
+ * throwing (`platform/fs-facts.ts`'s own `tryLstat`), so anything that DOES
+ * escape as an exception matching both properties is, by construction, some
+ * OTHER, unexpected system error -- an execution/permission failure this
+ * invocation could not itself complete, not a proven domain fact one way or
+ * the other. Used by `applyInitPlan` to classify an exception escaping
+ * `applyInitPlanCore` as 13-cli-contract.md's exit `2` class (contained as a
+ * typed `incomplete` result) rather than exit `3` (reserved for a genuine
+ * implementation defect, which fails at least one of the two properties above
  * and must still propagate after this module's own lease finalization).
  */
 function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === 'string'
+	if (!(error instanceof Error))
+		return false
+	const { code, syscall } = error as NodeJS.ErrnoException
+	return typeof code === 'string' && /^E[A-Z0-9]+$/.test(code) && typeof syscall === 'string'
 }
 
 /**

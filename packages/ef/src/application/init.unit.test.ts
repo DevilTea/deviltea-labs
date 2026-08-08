@@ -1642,7 +1642,7 @@ describe('applyInitPlan', () => {
 	describe('escaped-exception lease finalization and error classification (Finding A, eighteenth round)', () => {
 		it('releases the already-tracked marker lease exactly once and reports applied:false/incomplete (never a rejection) when a non-ENOENT identity probe throws after the marker lease is held', async () => {
 			const plan = await computeValidPlan()
-			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
 			let markerWritten = false
 			let probeThrown = false
 			let releaseCallCount = 0
@@ -1726,6 +1726,159 @@ describe('applyInitPlan', () => {
 
 			await expect(applyInitPlan(plan, deps))
 				.rejects.toThrow(TypeError)
+			expect(releaseCallCount)
+				.toBe(1)
+		})
+	})
+
+	// FINDING 1 (P1, nineteenth round, correcting the eighteenth round's own
+	// fix): the marker's removal (`deleteOwnedEntry(markerEntry)` returning
+	// `true`) is 13-cli-contract.md's own applied-boundary for `init`. A prior
+	// implementation treated the LAST `verifyClaimIntact()` call -- made
+	// immediately AFTER that removal already succeeded -- exactly like every
+	// EARLIER, pre-completion checkpoint: an ordinary non-`ENOENT` `EIO`/`EACCES`
+	// escaping `deps.directoryIdentity(plan.targetRoot)` there propagated
+	// uncaught out of `applyInitPlanCore`, straight into `applyInitPlan`'s
+	// generic `isFsSystemError` classifier, which contained it as `applied:
+	// false, outcome: 'incomplete'` -- misreporting a publication that had
+	// ALREADY, genuinely, physically completed (the marker was gone and every
+	// planned byte was on disk) as never having happened at all. This regression
+	// fails against that prior implementation and passes only once the final
+	// post-marker-removal observation is caught locally and folded into the
+	// existing `cleanup-failed` variant instead.
+	describe('publication-phase witness: an exception from the final post-marker-removal claim re-check is contained, never misreported as unapplied (Finding 1, nineteenth round)', () => {
+		it('reports applied:true/cleanup-failed (never applied:false/incomplete) when directoryIdentity(targetRoot) throws immediately after the marker was successfully removed, with the marker absent, every planned byte on disk, and every tracked lease released exactly once', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			const probeError = Object.assign(new Error('input/output error'), { code: 'EIO', syscall: 'lstat' })
+			let markerUnlinked = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (markerPathArg: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPathArg, nonce)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				createExclusive: async (targetPath: string, bytes: Uint8Array) => {
+					const real = await defaultApplyInitPlanDeps.createExclusive(targetPath, bytes)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				// The marker's own removal (`deleteOwnedEntry`, routed through
+				// `deps.unlink`) is this success path's one destructive step: mark
+				// it complete only once THAT real removal has actually happened.
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+				// The FIRST call `verifyClaimIntact()` makes on every checkpoint,
+				// including the final, post-marker-removal one this regression
+				// targets. Throws only once the marker has genuinely, physically
+				// been removed -- every earlier checkpoint (before publication
+				// completed) still observes faithfully and must not be disturbed.
+				directoryIdentity: async (targetPath: string) => {
+					if (markerUnlinked && targetPath === plan.targetRoot)
+						throw probeError
+					return defaultApplyInitPlanDeps.directoryIdentity(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('cleanup-failed')
+			expect(result.applied === true && result.outcome === 'cleanup-failed' && result.message)
+				.toContain(probeError.message)
+
+			// Publication genuinely, physically completed -- the marker is gone
+			// and every planned byte is on disk, exactly as a plain success would
+			// leave them. The ONLY thing that failed is this invocation's own
+			// final attempt to OBSERVE that already-published state.
+			await expect(fs.stat(markerPath)).rejects.toThrow()
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
+
+			// Every tracked lease -- the marker's own, and every planned file's --
+			// was released exactly once, never skipped and never double-released.
+			expect(releaseCallCount)
+				.toBe(1 + plan.files.length)
+		})
+	})
+
+	// FINDING 2 (P2, nineteenth round, correcting the eighteenth round's own
+	// fix): `isFsSystemError`'s prior bare `typeof error.code === 'string'`
+	// check misclassified a Node internal argument/invariant error -- which
+	// routinely carries an `ERR_`-prefixed string `.code` too, e.g.
+	// `ERR_INVALID_ARG_TYPE` -- as an ordinary fs system error, silently
+	// downgrading a genuine implementation defect from 13-cli-contract.md's
+	// exit `3` class to its exit `2` class. This regression fails against that
+	// prior implementation (which would resolve with `applied: false, outcome:
+	// 'incomplete'` instead of rejecting) and passes only once the classifier
+	// also requires an errno-mnemonic-shaped `.code` (`/^E[A-Z0-9]+$/`, which an
+	// underscore-containing `ERR_...` code never matches) AND a string
+	// `.syscall`, which a Node internal argument/invariant error never carries.
+	describe('fs-system-error classification requires a real errno shape, not just a string `.code` (Finding 2, nineteenth round)', () => {
+		it('propagates a Node internal argument/invariant error carrying an ERR_-prefixed `.code` (e.g. ERR_INVALID_ARG_TYPE) as a rejection -- never misclassified as an ordinary fs system error -- after releasing every tracked lease exactly once', async () => {
+			const plan = await computeValidPlan()
+			let markerWritten = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (markerPath: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPath, nonce)
+					if (real.outcome !== 'created')
+						return real
+					markerWritten = true
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				directoryIdentity: async (target: string) => {
+					if (markerWritten && target === plan.targetRoot)
+						throw Object.assign(new TypeError('bad internal argument'), { code: 'ERR_INVALID_ARG_TYPE' })
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
+				},
+			}
+
+			await expect(applyInitPlan(plan, deps))
+				.rejects.toThrow('bad internal argument')
 			expect(releaseCallCount)
 				.toBe(1)
 		})
