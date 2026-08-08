@@ -782,25 +782,66 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	 *
 	 * For a `'file'` entry (Finding P0, sixteenth round): compares a FRESH
 	 * pathname observation (`deps.regularFileIdentity`) against the entry's
-	 * OWN lease's LIVE `fstat` (`lease.fstatLive()`) -- never a statically
+	 * OWN lease's LIVE `fstat` (`lease.fstatLiveDetailed()`, since the
+	 * twentieth round -- see that method's own doc) -- never a statically
 	 * captured identity alone. While the lease is held, POSIX guarantees the
 	 * kernel cannot free this inode for reuse by an unrelated file, so a
 	 * match here is sound proof of "same file, right now," immune to the
 	 * inode-recycling ABA a stale, closed-handle identity comparison could not
-	 * rule out. A released lease, or one whose `fstatLive()` fails (e.g. the
-	 * tracked path's last link was removed), makes ownership unprovable --
-	 * fail closed.
+	 * rule out. A released lease, one that is genuinely unlinked, or one whose
+	 * live `fstat` observation itself fails (e.g. a transient `EACCES`/`EIO`),
+	 * all make ownership unprovable here -- fail closed.
+	 *
+	 * Delegates to {@link entryOwnershipStatus}, the typed variant that
+	 * distinguishes a PROVEN mismatch from a mere OBSERVATION failure --
+	 * folding both non-`'proven'` outcomes into `false` reproduces this
+	 * function's own fail-closed contract exactly, unchanged (see
+	 * `entryOwnershipStatus`'s own doc on why the distinction matters only to
+	 * `verifyClaimIntact`'s post-marker-removal caller, never to a
+	 * destructive-deletion decision such as `entrySafeToDelete`).
 	 */
 	async function entryOwnershipProven(entry: CreatedEntry): Promise<boolean> {
+		return (await entryOwnershipStatus(entry)) === 'proven'
+	}
+
+	/**
+	 * The typed counterpart of {@link entryOwnershipProven} (finding, twentieth
+	 * round): a FILE entry's ownership re-check goes through
+	 * `entry.lease.fstatLiveDetailed()` rather than the plain, boolean-shaped
+	 * `fstatLive()` -- distinguishing a positively PROVEN `'unlinked'` (the
+	 * tracked path's last link was genuinely removed) from a mere `'error'`
+	 * (the retained handle's own `fstat` call itself failed, e.g. a transient
+	 * `EIO`/`EACCES`, proving nothing about the entry's actual state) rather
+	 * than collapsing both alike into one boolean `false`, exactly like
+	 * `verifyClaimIntact`'s own `readDirectory` call must distinguish a
+	 * genuine name-set mismatch from a `readdir` observation failure.
+	 *
+	 * `entryOwnershipProven` itself still folds `'mismatch'` and
+	 * `'unavailable'` together into `false` -- its own fail-closed contract,
+	 * used by every PRE-completion checkpoint and by `entrySafeToDelete`'s
+	 * destructive-deletion decision, is deliberately UNCHANGED: there is no
+	 * completed publication yet for either of those callers to misreport as
+	 * unapplied, so failing closed on either outcome remains exactly correct.
+	 * Only `verifyClaimIntact`'s own typed result (consumed solely by
+	 * `applyInitPlanCore`'s final, POST-marker-removal checkpoint) actually
+	 * needs the distinction this function exposes.
+	 */
+	async function entryOwnershipStatus(entry: CreatedEntry): Promise<'mismatch' | 'proven' | 'unavailable'> {
 		if (entry.kind === 'directory') {
 			const current = await deps.directoryIdentity(entry.path)
-			return current !== undefined && sameFileIdentity(current, entry.identity)
+			if (current === undefined)
+				return 'mismatch'
+			return sameFileIdentity(current, entry.identity) ? 'proven' : 'mismatch'
 		}
-		const liveIdentity = await entry.lease.fstatLive()
-		if (liveIdentity === undefined)
-			return false
+		const live = await entry.lease.fstatLiveDetailed()
+		if (live.status === 'error')
+			return 'unavailable'
+		if (live.status === 'unlinked')
+			return 'mismatch'
 		const current = await deps.regularFileIdentity(entry.path)
-		return current !== undefined && sameFileIdentity(current, liveIdentity)
+		if (current === undefined)
+			return 'mismatch'
+		return sameFileIdentity(current, live.identity) ? 'proven' : 'mismatch'
 	}
 
 	/**
@@ -885,7 +926,32 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	}
 
 	/**
-	 * `true` iff ALL of the following hold:
+	 * Typed result of {@link verifyClaimIntact} (finding, twentieth round,
+	 * correcting the nineteenth round's own fix): `'mismatch'` is a POSITIVELY
+	 * PROVEN observation that the claim no longer holds (a completed,
+	 * non-throwing check found a genuine identity/name/link discrepancy);
+	 * `'unavailable'` is a mere OBSERVATION failure (`readDirectory` or a
+	 * tracked file lease's `fstatLiveDetailed()` could not tell either way --
+	 * e.g. a transient `EACCES`/`EIO`) that proves nothing about the claim's
+	 * actual state. Both outcomes are the un-verified case pre-completion --
+	 * every checkpoint before the marker is removed treats `!== 'intact'`
+	 * identically, fail-closed, exactly like the prior plain-boolean contract
+	 * (see each call site). The distinction matters ONLY to the single
+	 * checkpoint that runs immediately after the marker's removal has already,
+	 * genuinely succeeded (13-cli-contract.md's own applied-boundary for
+	 * `init`): a PROVEN `'mismatch'` there still reports the existing
+	 * unapplied-claim semantics (nothing left to retract, but also nothing
+	 * safely claimed as it should not have been), while `'unavailable'` there
+	 * must be folded into the existing `applied: true, outcome:
+	 * 'cleanup-failed'` variant instead -- publication already, physically
+	 * completed, and 13-cli-contract.md's "the implementation MUST NOT
+	 * misreport the published state as unapplied" forbids reporting a mere
+	 * observation failure as though it had proven otherwise.
+	 */
+	type ClaimIntactResult = 'intact' | 'mismatch' | 'unavailable'
+
+	/**
+	 * `'intact'` iff ALL of the following hold:
 	 *
 	 * 1. `plan.targetRoot` is still a real, non-symlink directory with the
 	 *    identical identity captured above.
@@ -899,41 +965,58 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	 *    passed the old one-directional check).
 	 * 3. Every path tracked in `createdStack` -- not just top-level names --
 	 *    still denotes, by fresh `lstat` identity, the EXACT entry this
-	 *    invocation created there (`entryOwnershipProven`). This is the
+	 *    invocation created there (`entryOwnershipStatus`). This is the
 	 *    per-entry exact-witness half: a same-name substitution at an
 	 *    already-tracked path (different content, different `dev`/`ino`) is
 	 *    caught here even when the top-level name set is unchanged.
+	 *
+	 * Otherwise returns `'mismatch'` for a POSITIVELY PROVEN discrepancy, or
+	 * `'unavailable'` for a mere OBSERVATION failure -- see
+	 * {@link ClaimIntactResult}'s own doc for exactly which checks below
+	 * distinguish the two and why.
 	 *
 	 * The identity check alone is insufficient: see `applyInitPlan`'s own
 	 * documentation on the inode-ABA hazard this content check exists to
 	 * close. See also the residual-risk note on `applyInitPlan` itself for
 	 * what neither check can catch.
 	 */
-	async function verifyClaimIntact(): Promise<boolean> {
+	async function verifyClaimIntact(): Promise<ClaimIntactResult> {
 		const currentRoot = await deps.directoryIdentity(plan.targetRoot)
 		if (currentRoot === undefined || !sameFileIdentity(currentRoot, targetRootIdentity!))
-			return false
+			return 'mismatch'
 
+		// Finding (P1, twentieth round): a bare `catch { return false }` here
+		// folded a genuine `readdir` OBSERVATION failure (a non-`ENOENT`
+		// `EACCES`/`EIO`) together with a positively PROVEN name-set mismatch
+		// into the exact same boolean `false` -- indistinguishable, by the time
+		// this invocation's ONE final, post-marker-removal checkpoint consumed
+		// it, from a genuine discrepancy. `'unavailable'` reports the failure
+		// honestly instead, so that checkpoint alone can fold it into
+		// `cleanup-failed` rather than misreport an already-completed
+		// publication as unapplied.
 		let currentEntries: string[]
 		try {
 			currentEntries = await deps.readDirectory(engineeringPath)
 		}
 		catch {
-			return false
+			return 'unavailable'
 		}
 		if (currentEntries.length !== createdTopLevelNames.size)
-			return false
+			return 'mismatch'
 		for (const name of currentEntries) {
 			if (!createdTopLevelNames.has(name))
-				return false
+				return 'mismatch'
 		}
 
 		for (const entry of createdStack) {
-			if (!(await entryOwnershipProven(entry)))
-				return false
+			const status = await entryOwnershipStatus(entry)
+			if (status === 'unavailable')
+				return 'unavailable'
+			if (status === 'mismatch')
+				return 'mismatch'
 		}
 
-		return true
+		return 'intact'
 	}
 
 	const claimIntactFailureMessage = `'${engineeringPath}' no longer denotes the directory this invocation claimed.`
@@ -1030,7 +1113,7 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		return { applied: false, outcome: 'incomplete', message }
 	}
 
-	if (!(await verifyClaimIntact()))
+	if ((await verifyClaimIntact()) !== 'intact')
 		return abort(claimIntactFailureMessage)
 
 	try {
@@ -1056,7 +1139,7 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		createdTopLevelNames.add('.tmp')
 	}
 
-	if (!(await verifyClaimIntact()))
+	if ((await verifyClaimIntact()) !== 'intact')
 		return abort(claimIntactFailureMessage)
 
 	// Finding (P0, fifteenth round, matching `platform/hard-link-publish.ts`'s
@@ -1090,7 +1173,7 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	}
 
 	for (const dir of plan.directories) {
-		if (!(await verifyClaimIntact()))
+		if ((await verifyClaimIntact()) !== 'intact')
 			return abort(claimIntactFailureMessage)
 		const dirPath = path.join(plan.targetRoot, dir)
 		try {
@@ -1110,7 +1193,7 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	}
 
 	for (const file of plan.files) {
-		if (!(await verifyClaimIntact()))
+		if ((await verifyClaimIntact()) !== 'intact')
 			return abort(claimIntactFailureMessage)
 		const filePath = path.join(plan.targetRoot, file.path)
 		// Finding (P0, fifteenth round, matching `platform/hard-link-publish.ts`'s
@@ -1138,7 +1221,7 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		createdTopLevelNames.add(topLevelChildName(file.path))
 	}
 
-	if (!(await verifyClaimIntact()))
+	if ((await verifyClaimIntact()) !== 'intact')
 		return abort(claimIntactFailureMessage)
 
 	for (const dir of plan.directories) {
@@ -1158,14 +1241,14 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 			return abort(`File '${file.path}' was not materialized with the planned bytes.`)
 	}
 
-	if (!(await verifyClaimIntact()))
+	if ((await verifyClaimIntact()) !== 'intact')
 		return abort(claimIntactFailureMessage)
 
 	const finalMarker = await deps.readInitMarker(markerPath)
 	if (finalMarker.outcome !== 'found' || finalMarker.marker.nonce !== nonce)
 		return abort('The initialization marker no longer contains the invocation\'s nonce.')
 
-	if (!(await verifyClaimIntact()))
+	if ((await verifyClaimIntact()) !== 'intact')
 		return abort(claimIntactFailureMessage)
 
 	// The marker's own removal is this success path's one and only destructive
@@ -1192,44 +1275,75 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	createdStack.splice(markerEntryIndex, 1)
 
 	// Publication-phase witness (Finding 1, nineteenth round, correcting the
-	// eighteenth round's own fix): the marker removal immediately above is
-	// 13-cli-contract.md's own boundary -- "`applied: true` for `init` requires
-	// removal of the matching initialization marker" -- so the instant
-	// `deleteOwnedEntry(markerEntry)` returned `true`, publication genuinely,
-	// physically completed. Everything from here on is merely this invocation
-	// trying to OBSERVE that already-published state, never to bring it about.
-	// A prior implementation called this final `verifyClaimIntact()` the exact
-	// same way as every earlier, PRE-completion checkpoint: an ordinary
-	// `lstat`-based exception escaping it (a non-`ENOENT` `EIO`/`EACCES` from
-	// `deps.directoryIdentity(plan.targetRoot)`, exactly like any other
-	// `lstat`-based check in this package) propagated uncaught out of
-	// `applyInitPlanCore`, straight into `applyInitPlan`'s generic
-	// pre-completion classifier (`isFsSystemError`), which contains it as
-	// `applied: false, outcome: 'incomplete'` -- the eighteenth round's own fix
-	// for exceptions escaping BEFORE completion, reapplied here where it
-	// misreports a genuinely completed publication as never having happened
-	// (13-cli-contract.md "the implementation MUST NOT misreport the published
-	// state as unapplied", the exact violation the seventeenth round's Finding
-	// 1 already closed for a lease-release failure at this same post-marker-
-	// removal point). The fix: this one observation is caught locally, right
-	// here, and folded into the existing `cleanup-failed` variant --
+	// eighteenth round's own fix; Finding, twentieth round, correcting the
+	// nineteenth round's own fix in turn): the marker removal immediately
+	// above is 13-cli-contract.md's own boundary -- "`applied: true` for
+	// `init` requires removal of the matching initialization marker" -- so the
+	// instant `deleteOwnedEntry(markerEntry)` returned `true`, publication
+	// genuinely, physically completed. Everything from here on is merely this
+	// invocation trying to OBSERVE that already-published state, never to
+	// bring it about.
+	//
+	// The nineteenth round's own fix caught only a `verifyClaimIntact()` call
+	// that THREW -- an ordinary `lstat`-based exception escaping
+	// `deps.directoryIdentity(plan.targetRoot)`. It missed two internal
+	// observation failures that `verifyClaimIntact` itself, by design, never
+	// let escape as an exception in the first place: (a) `readDirectory`'s own
+	// bare `catch { return false }`, which folded a non-`ENOENT`
+	// `EACCES`/`EIO` `readdir` failure into the exact same boolean `false` as a
+	// positively proven name-set mismatch, and (b) a tracked FILE entry's
+	// `fstatLive()`-based re-check, which returned the same `undefined` for
+	// "genuinely unlinked" as for "the retained handle's own `fstat` call
+	// itself failed." Both silently reached this checkpoint as an ordinary
+	// `false`, indistinguishable from a genuine discrepancy, and fell into the
+	// `applied: false, outcome: 'incomplete'` branch below -- again
+	// misreporting a publication that had ALREADY, genuinely, physically
+	// completed as never having happened (13-cli-contract.md "the
+	// implementation MUST NOT misreport the published state as unapplied").
+	//
+	// The fix: `verifyClaimIntact` now returns a typed `ClaimIntactResult`
+	// (`'intact' | 'mismatch' | 'unavailable'`) that distinguishes a
+	// POSITIVELY PROVEN mismatch from a mere OBSERVATION failure throughout,
+	// via `entryOwnershipStatus` and `readDirectory`'s own typed handling
+	// (see `ClaimIntactResult`'s and `entryOwnershipStatus`'s own doc). Every
+	// EARLIER, pre-completion checkpoint still fails closed identically on
+	// either non-`'intact'` outcome -- unchanged behavior, see each call site
+	// above. Only THIS final, post-marker-removal checkpoint tells them apart:
+	// `'unavailable'` is folded into the existing `cleanup-failed` variant --
 	// `applied: true` (publication genuinely happened), mapped by the CLI to
-	// `complete: false`, exit `3`, `EF-VAL-008` -- never allowed to reach the
-	// generic pre-completion classifier that assumes nothing was yet
-	// materialized.
-	let claimStillObservablyIntact: boolean
+	// `complete: false`, exit `3`, `EF-VAL-008` -- exactly like an escaped
+	// exception here already was; `'mismatch'` keeps the existing
+	// `applied: false, outcome: 'incomplete'` semantics below, unchanged from
+	// before this round. A `verifyClaimIntact()` call that still somehow
+	// throws (e.g. `deps.directoryIdentity(plan.targetRoot)`'s own escaping
+	// `lstat` failure, never internally caught) is, as before, contained
+	// locally right here rather than reaching the generic pre-completion
+	// classifier that assumes nothing was yet materialized.
+	let claimStatus: ClaimIntactResult
 	try {
-		claimStillObservablyIntact = await verifyClaimIntact()
+		claimStatus = await verifyClaimIntact()
 	}
 	catch (error) {
 		return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but the claim could not be re-verified afterward: ${(error as Error).message}.` }
 	}
 
-	if (!claimStillObservablyIntact) {
+	if (claimStatus === 'unavailable') {
+		// A mere OBSERVATION failure, never a proven discrepancy: the marker is
+		// genuinely gone and every planned byte is genuinely on disk (verified
+		// above), so this invocation's own final attempt to OBSERVE that
+		// already-published state is the ONLY thing that failed. Reporting
+		// `incomplete` here would repeat the exact misreport this round's fix
+		// exists to close; fold it into the existing `cleanup-failed` variant
+		// instead, exactly like an exception escaping this same checkpoint
+		// already is above.
+		return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but the claim could not be re-verified afterward: ${claimIntactFailureMessage}` }
+	}
+
+	if (claimStatus === 'mismatch') {
 		// Unchanged from before this round: this is a PROVEN mismatch (a
 		// completed, non-throwing observation), not a mere observation failure
-		// -- `verifyClaimIntact` itself returned `false`, meaning the claim was
-		// swapped out from under us in the narrow window between the marker
+		// -- `verifyClaimIntact` itself returned `'mismatch'`, meaning the claim
+		// was swapped out from under us in the narrow window between the marker
 		// removal above and this final check. The marker -- this invocation's
 		// sole ownership proof once the claim itself is no longer verifiable --
 		// is already gone, so cleanup cannot safely remove anything further

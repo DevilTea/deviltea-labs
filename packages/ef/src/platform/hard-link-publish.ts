@@ -94,12 +94,44 @@ export interface OwnedFileLease {
 	 */
 	fstatLive: () => Promise<FileIdentity | undefined>
 	/**
+	 * The typed counterpart of {@link fstatLive}, for a caller that must tell
+	 * "provably unlinked" apart from "the observation itself failed" rather
+	 * than fail closed against both alike (finding, twentieth round,
+	 * `application/init.ts`'s post-marker-removal `verifyClaimIntact`): a
+	 * PRE-completion destructive-deletion decision (`entrySafeToDelete` /
+	 * `entryOwnershipProven`) is correct to fail closed on either outcome via
+	 * `fstatLive`'s plain `undefined` -- there is no distinction that changes
+	 * what it should do. A POST-publication observer, once the physical
+	 * publication step has already, genuinely succeeded, needs the
+	 * distinction: a positively PROVEN mismatch (`'unlinked'`) still reports
+	 * the existing unapplied-claim semantics, but a mere OBSERVATION failure
+	 * (`'error'`, e.g. a transient `EIO`/`EACCES` from the retained handle's
+	 * own `fstat`) must not be misreported as a proven mismatch --
+	 * 13-cli-contract.md's "the implementation MUST NOT misreport the
+	 * published state as unapplied" applies here exactly as it does to an
+	 * escaped exception.
+	 *
+	 * Returns `{ status: 'error' }` (never throws) when: the lease has
+	 * already been released; or the retained handle's own `fstat` call fails
+	 * for any reason. Returns `{ status: 'unlinked' }` when the underlying
+	 * entry provably no longer has any pathname referring to it (`nlink ===
+	 * 0`). Otherwise returns `{ status: 'live', identity }`, identical to what
+	 * {@link fstatLive} would have returned.
+	 */
+	fstatLiveDetailed: () => Promise<LiveFstatResult>
+	/**
 	 * Close the retained handle. Never throws (see {@link LeaseReleaseResult}).
 	 * Idempotent: calling this more than once simply reports the first call's
 	 * outcome again, without attempting a second, invalid `close()`.
 	 */
 	release: () => Promise<LeaseReleaseResult>
 }
+
+/** The typed result of {@link OwnedFileLease.fstatLiveDetailed}. See that method's own doc. */
+export type LiveFstatResult
+	= | { status: 'live', identity: FileIdentity }
+		| { status: 'unlinked' }
+		| { status: 'error', error: NodeJS.ErrnoException }
 
 function identityOf(stats: { dev: number, ino: number }): FileIdentity {
 	return { dev: stats.dev, ino: stats.ino }
@@ -123,6 +155,19 @@ function createOwnedFileLease(handle: FileHandle, identity: FileIdentity, bytes:
 			}
 			catch {
 				return undefined
+			}
+		},
+		async fstatLiveDetailed() {
+			if (released)
+				return { status: 'error', error: Object.assign(new Error('lease already released'), { code: 'ERR_LEASE_RELEASED' }) }
+			try {
+				const stats = await handle.stat()
+				if (stats.nlink === 0)
+					return { status: 'unlinked' }
+				return { status: 'live', identity: identityOf(stats) }
+			}
+			catch (error) {
+				return { status: 'error', error: error as NodeJS.ErrnoException }
 			}
 		},
 		async release() {

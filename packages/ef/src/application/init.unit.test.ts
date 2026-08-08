@@ -1834,6 +1834,222 @@ describe('applyInitPlan', () => {
 		})
 	})
 
+	// FINDING (P1, twentieth round, correcting the nineteenth round's own fix):
+	// the nineteenth round's fix caught only a `verifyClaimIntact()` call that
+	// THREW. It missed two internal observation failures `verifyClaimIntact`
+	// itself, by design, never let escape as a thrown exception in the first
+	// place: `readDirectory`'s own bare `catch { return false }` (folding a
+	// non-`ENOENT` `EACCES`/`EIO` `readdir` failure into the exact same
+	// boolean `false` as a positively proven name-set mismatch), and a tracked
+	// FILE entry's `fstatLive()`-based re-check (returning the same
+	// `undefined` for "genuinely unlinked" as for "the retained handle's own
+	// `fstat` call itself failed"). Both reached the final, post-marker-
+	// removal checkpoint as an ordinary `false`, indistinguishable from a
+	// genuine discrepancy, and fell into `applied: false, outcome:
+	// 'incomplete'` -- again misreporting a publication that had ALREADY,
+	// genuinely, physically completed as never having happened
+	// (13-cli-contract.md "the implementation MUST NOT misreport the
+	// published state as unapplied"). These regressions fail against that
+	// prior implementation and pass only once `verifyClaimIntact` returns a
+	// typed `'intact' | 'mismatch' | 'unavailable'` result and the final
+	// checkpoint folds `'unavailable'` into the existing `cleanup-failed`
+	// variant, while a POSITIVELY PROVEN post-marker mismatch keeps the
+	// existing `applied: false, outcome: 'incomplete'` semantics unchanged.
+	describe('publication-phase witness: internal readdir/fstat observation failures at the final post-marker-removal checkpoint are typed, never conflated with a proven mismatch (Finding, twentieth round)', () => {
+		it('reports applied:true/cleanup-failed (never applied:false/incomplete) when readDirectory(engineeringPath) throws EACCES immediately after the marker was successfully unlinked, with the marker absent, every planned byte on disk, and every tracked lease released exactly once', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'readdir' })
+			let markerUnlinked = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (markerPathArg: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPathArg, nonce)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				createExclusive: async (targetPath: string, bytes: Uint8Array) => {
+					const real = await defaultApplyInitPlanDeps.createExclusive(targetPath, bytes)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				// The marker's own removal (`deleteOwnedEntry`, routed through
+				// `deps.unlink`) is this success path's one destructive step: mark
+				// it complete only once THAT real removal has actually happened.
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+				// `readDirectory` is called on every `verifyClaimIntact` checkpoint,
+				// including the final, post-marker-removal one this regression
+				// targets. Throws only once the marker has genuinely, physically
+				// been removed -- every earlier checkpoint (before publication
+				// completed) still observes faithfully and must not be disturbed.
+				readDirectory: async (targetPath: string) => {
+					if (markerUnlinked && targetPath === engineeringPath)
+						throw probeError
+					return defaultApplyInitPlanDeps.readDirectory(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('cleanup-failed')
+
+			// Publication genuinely, physically completed -- the marker is gone
+			// and every planned byte is on disk, exactly as a plain success would
+			// leave them. The ONLY thing that failed is this invocation's own
+			// final attempt to OBSERVE that already-published state.
+			await expect(fs.stat(markerPath)).rejects.toThrow()
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
+
+			// Every tracked lease -- the marker's own, and every planned file's --
+			// was released exactly once, never skipped and never double-released.
+			expect(releaseCallCount)
+				.toBe(1 + plan.files.length)
+		})
+
+		it('reports applied:true/cleanup-failed (never applied:false/incomplete) when a tracked file lease\'s live fstat observation fails immediately after the marker was successfully unlinked, with the marker absent, every planned byte on disk, and every tracked lease released exactly once', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			const probeError = Object.assign(new Error('input/output error'), { code: 'EIO', syscall: 'fstat' })
+			let markerUnlinked = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (markerPathArg: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPathArg, nonce)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				// Every planned file's lease keeps its REAL `identity`/`bytes` and
+				// `fstatLive` -- only `fstatLiveDetailed()` is stubbed to fail, and
+				// only once the marker has genuinely, physically been removed
+				// (the exact live-observation call `verifyClaimIntact`'s final,
+				// post-marker-removal checkpoint makes for a tracked FILE entry).
+				createExclusive: async (targetPath: string, bytes: Uint8Array) => {
+					const real = await defaultApplyInitPlanDeps.createExclusive(targetPath, bytes)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							fstatLiveDetailed: async () => {
+								if (markerUnlinked)
+									return { status: 'error' as const, error: probeError }
+								return real.lease.fstatLiveDetailed()
+							},
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('cleanup-failed')
+
+			await expect(fs.stat(markerPath)).rejects.toThrow()
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
+
+			expect(releaseCallCount)
+				.toBe(1 + plan.files.length)
+		})
+
+		it('control: still reports applied:false/incomplete when a POSITIVELY PROVEN foreign entry appears in `.engineering` immediately after the marker was successfully unlinked', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			let markerUnlinked = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+				// A genuinely observed (never thrown) extra top-level name, only
+				// once the marker has genuinely, physically been removed: a
+				// positively PROVEN mismatch, never a mere observation failure --
+				// must keep the existing `applied: false, outcome: 'incomplete'`
+				// semantics, unlike the `'unavailable'` regressions above.
+				readDirectory: async (targetPath: string) => {
+					const real = await defaultApplyInitPlanDeps.readDirectory(targetPath)
+					if (markerUnlinked && targetPath === engineeringPath)
+						return [...real, 'foreign-entry-installed-by-a-racing-actor']
+					return real
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+	})
+
 	// FINDING 2 (P2, nineteenth round, correcting the eighteenth round's own
 	// fix): `isFsSystemError`'s prior bare `typeof error.code === 'string'`
 	// check misclassified a Node internal argument/invariant error -- which
