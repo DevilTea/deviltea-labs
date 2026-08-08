@@ -564,6 +564,73 @@ describe('runArtifactCreateCommand', () => {
 		await expect(fs.stat(targetPath)).rejects.toThrow()
 	})
 
+	// FINDING (twenty-third round): the twenty-second round's fix above left a
+	// documented residual gap -- `verifyChainComponent`'s own bare
+	// `isSymlink`/`directoryIdentity` probes have the identical bare-call shape,
+	// and would suffer the same misclassification for an ANCESTOR of a checked
+	// chain component (rather than the component's own final path segment)
+	// replaced by a non-directory between checkpoints. Reproduced here through
+	// the CLI's real, non-injected `applyCreatePlan` wiring: the type
+	// directory's own `isSymlink` probe (`.engineering/req`, which does not yet
+	// exist for this first REQ) is forced to fail `ENOTDIR` -- exactly as it
+	// genuinely would if `.engineering` itself had just been replaced by a
+	// regular file, since `.engineering` is an ancestor path component of
+	// `.engineering/req`.
+	it('exits 1 (EF-FS-004, complete:true) -- never exit 2 -- when the type directory\'s own chain-component probe throws a real-shaped ENOTDIR (an ancestor was replaced)', async () => {
+		const typeDirPath = path.join(root, '.engineering/req')
+		let armed = true
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			const [target] = args as [string]
+			if (armed && target === typeDirPath) {
+				armed = false
+				throw Object.assign(new Error(`ENOTDIR: not a directory, lstat '${typeDirPath}'`), { code: 'ENOTDIR', syscall: 'lstat' })
+			}
+			return realFns.lstat(...args)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(1)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(true)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-FS-004')
+
+		await expect(fs.stat(typeDirPath)).rejects.toThrow()
+	})
+
+	// Control: the same call site failing with `EACCES` (mere observation noise
+	// -- not a proven structural fact) must still be reported as the existing,
+	// unchanged exit `2` `'incomplete'` class.
+	it('control: still exits 2 (incomplete, complete:false) when that same type-directory chain-component probe throws EACCES instead', async () => {
+		const typeDirPath = path.join(root, '.engineering/req')
+		let armed = true
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			const [target] = args as [string]
+			if (armed && target === typeDirPath) {
+				armed = false
+				throw Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
+			}
+			return realFns.lstat(...args)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
+
+		await expect(fs.stat(typeDirPath)).rejects.toThrow()
+	})
+
 	it('exits 2 (incomplete, not raced) when the temporary file cannot be written (unwritable canonical directory)', async () => {
 		// The canonical type directory exists (so `ensureDirectory` and the
 		// initial target-existence check both succeed cleanly) but is

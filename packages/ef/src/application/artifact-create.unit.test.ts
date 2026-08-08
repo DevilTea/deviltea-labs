@@ -2392,4 +2392,153 @@ Placeholder.
 				.toBe('incomplete')
 		})
 	})
+
+	// FINDING (twenty-third round): the twenty-second round's fix routed
+	// `targetExists`'s own pre-publication probes through
+	// `targetExistsOrChainRejected`, but explicitly left `verifyChainComponent`'s
+	// own `isSymlink`/`directoryIdentity` probes as a documented residual gap --
+	// they had the identical bare-call shape. Reproduction: the `.engineering`
+	// chain-component check passes (it is re-verified against the real,
+	// untouched directory), and only THEN -- strictly between that check and
+	// the type directory's own component probe -- is `.engineering` itself
+	// replaced by a regular file. The type directory's `isSymlink` probe then
+	// `lstat`s a path (`.engineering/req`) whose ANCESTOR is no longer a
+	// directory, a real, non-`ENOENT` `ENOTDIR` production's `tryLstat` does not
+	// normalize. Before this round, that exception escaped `verifyChainComponent`
+	// uncaught, all the way to `applyCreatePlan`'s generic top-level
+	// `isFsSystemError` catch, which cannot tell this PROVEN structural fact
+	// apart from a genuine `EACCES`/`EIO` observation failure -- reporting
+	// `applied: false, outcome: 'incomplete'` (exit `2`) for what is, in fact, a
+	// proven managed-directory-chain rejection (exit `1`, EF-FS-004).
+	describe('a verifyChainComponent probe failure whose error code itself proves an ancestor of the component was replaced is a domain rejection, never folded into incomplete (Finding, twenty-third round)', () => {
+		it('reports applied:false/rejected (never applied:false/incomplete) when `.engineering` is replaced by a real regular file strictly between the `.engineering` chain-component check and the type directory\'s own probe', async () => {
+			const plan = computePlanOrThrow()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			let mutated = false
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				directoryIdentity: async (target: string) => {
+					// Capture the REAL identity first (so `.engineering`'s own chain-
+					// component check still passes -- it is bound to
+					// `plan.engineeringIdentity`, and must match to reach the type
+					// directory's own probe at all), THEN perform the replacement, so
+					// the fault lands exactly between the two component checks, never
+					// inside the first one.
+					const real = await realDirectoryIdentity(target)
+					if (!mutated && target === engineeringPath) {
+						mutated = true
+						await fs.rm(engineeringPath, { recursive: true, force: true })
+						await fs.writeFile(engineeringPath, 'a regular file where .engineering should be')
+					}
+					return real
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The replacement file itself was never touched.
+			const content = await fs.readFile(engineeringPath, 'utf8')
+			expect(content)
+				.toBe('a regular file where .engineering should be')
+		})
+
+		it('control: still reports applied:false/incomplete when that same type directory probe throws EACCES instead (mere observation noise, not a proven structural fact)', async () => {
+			const plan = computePlanOrThrow()
+			const typeDirPath = path.join(tempDir, '.engineering/req')
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				isSymlink: async (target: string) => {
+					if (target === typeDirPath)
+						throw probeError
+					return defaultApplyCreatePlanDeps.isSymlink(target)
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		// Post-temp-write variant: the identical structural fault, injected at
+		// the managed-chain re-check that runs AFTER the temporary file has
+		// already been written (`runPublicationSteps`'s own re-check, immediately
+		// before the "allocation still valid" check). This exercises a DIFFERENT
+		// hazard than the pre-write variant above: by this point a temp-file
+		// lease is held open, and every rejection path from here on must still
+		// release it EXACTLY ONCE (13-cli-contract.md's own "released exactly
+		// once" guarantee -- Finding 2, sixteenth/eighteenth rounds) and must
+		// never let the ownership-proven cleanup attempt destructively touch the
+		// foreign replacement now occupying `.engineering` (it is not this
+		// invocation's own file, and `deleteOwnedTempFile`'s ownership proof must
+		// correctly refuse to act on it).
+		it('post-temp-write variant: releases the lease exactly once and never destructively touches the foreign replacement, still reporting rejected (not incomplete)', async () => {
+			const plan = computePlanOrThrow()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			let tempWritten = false
+			let mutated = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyCreatePlanDeps,
+				writeTempFileComplete: async (tempPathArg: string, bytes: Uint8Array) => {
+					const real = await realWriteTempFileComplete(tempPathArg, bytes)
+					if (real.outcome !== 'written')
+						return real
+					tempWritten = true
+					return {
+						outcome: 'written' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				directoryIdentity: async (target: string) => {
+					const real = await realDirectoryIdentity(target)
+					// Only mutate once, and only strictly AFTER the temporary write has
+					// already completed -- exercising the post-write chain re-check,
+					// not the earlier pre-write ones this same override also observes.
+					if (tempWritten && !mutated && target === engineeringPath) {
+						mutated = true
+						await fs.rm(engineeringPath, { recursive: true, force: true })
+						await fs.writeFile(engineeringPath, 'a regular file where .engineering should be, post-write')
+					}
+					return real
+				},
+			}
+
+			const result = await applyCreatePlan(plan, tempDir, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('rejected')
+
+			// The lease was released exactly once, regardless of the mid-flight
+			// structural fault.
+			expect(releaseCallCount)
+				.toBe(1)
+
+			// The foreign replacement now occupying `.engineering` was never
+			// destructively touched by the ownership-proven cleanup attempt: its
+			// content is exactly what this test wrote, untouched.
+			const content = await fs.readFile(engineeringPath, 'utf8')
+			expect(content)
+				.toBe('a regular file where .engineering should be, post-write')
+		})
+	})
 })

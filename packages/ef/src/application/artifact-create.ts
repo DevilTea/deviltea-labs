@@ -685,16 +685,16 @@ export type ClassifiedTargetExistsResult
  * is not a domain fact at all and likewise still propagates, unchanged, to
  * the exit `3` class that catch reserves for it.
  *
- * Left deliberately unaddressed here (a residual gap for a future round to
- * pick up if it is ever actually reported, matching `application/init.ts`'s
- * own documented practice for an analogous residual note): `verifyChainComponent`'s
- * own `isSymlink`/`directoryIdentity` probes have the identical bare-call
- * shape, and would suffer the same misclassification if an ANCESTOR of a
- * checked chain component (rather than the component's own final path
- * segment) were replaced by a non-directory between checkpoints. This
- * round's reported finding is specifically about `targetExists`'s own
- * pre-publication call sites; the analogous gap in `verifyChainComponent` is
- * a separately-scoped concern.
+ * The residual gap this doc previously left unaddressed here --
+ * `verifyChainComponent`'s own `isSymlink`/`directoryIdentity` probes having
+ * the identical bare-call shape, and suffering the same misclassification if
+ * an ANCESTOR of a checked chain component (rather than the component's own
+ * final path segment) were replaced by a non-directory between checkpoints --
+ * is closed as of the twenty-third round: `verifyChainComponent` now
+ * classifies the identical `ENOTDIR`/`ELOOP` pair locally, into the same
+ * `{ ok: false }` chain-rejection outcome its own ordinary, non-throwing
+ * checks already report. See that function's own doc for the exact
+ * reasoning, which mirrors this one's.
  */
 async function targetExistsOrChainRejected(deps: ApplyCreatePlanDeps, plan: ArtifactCreatePlan, targetPath: string): Promise<ClassifiedTargetExistsResult> {
 	try {
@@ -731,14 +731,52 @@ export type VerifyManagedDirectoryChainResult
  * "not created yet" case `ensureDirectory` handles. `.engineering` itself
  * never receives that tolerance: it must already exist as exactly the
  * directory discovery observed.
+ *
+ * Finding (twenty-third round, closing `targetExistsOrChainRejected`'s own
+ * documented residual gap): `deps.isSymlink(componentPath)` and
+ * `deps.directoryIdentity(componentPath)` were previously called bare, with no
+ * surrounding `try`/`catch`. Production's `tryLstat` (`platform/fs-facts.ts`)
+ * normalizes only `ENOENT`; a genuine `ENOTDIR` (an ANCESTOR of
+ * `componentPath` -- not `componentPath`'s own final path segment -- was
+ * itself replaced by a non-directory since the previous checkpoint) or
+ * `ELOOP` (a symlink was swapped in along that ancestor path) still throws.
+ * That escape is exactly as certain a proof of a broken managed-directory
+ * chain as this function's own ordinary, non-throwing `{ ok: false }` for a
+ * directly observed symlink or identity mismatch -- but reaching every caller
+ * (pre-write, post-write, and pre-publication chain re-verification alike,
+ * since ALL of them run through this one shared function) as an uncaught
+ * exception instead let it escape `verifyManagedDirectoryChain` entirely, all
+ * the way to `applyCreatePlan`'s generic top-level `isFsSystemError` catch --
+ * which cannot tell this PROVEN structural fact apart from a genuine
+ * `EACCES`/`EIO` observation failure, and so folded both alike into
+ * `applied: false, outcome: 'incomplete'` (13-cli-contract.md exit `2`),
+ * silently downgrading a proven race/rejection (exit `1`, `outcome:
+ * 'rejected'`, EF-FS-004) into a merely "execution failed, retry" report.
+ * Classified here, in the ONE shared probe every call site already goes
+ * through, rather than repeated ad hoc at each caller: `ENOTDIR`/`ELOOP` are
+ * folded into the SAME `{ ok: false }` a direct symlink/identity mismatch
+ * already reports, so every caller's existing `!chainCheck.ok` handling
+ * covers this case for free. Every OTHER genuine `fs` errno error
+ * (`EACCES`/`EIO`/`EPERM`, ...) proves nothing about the chain's actual state
+ * and still propagates unchanged, to be classified by whichever outer
+ * boundary already contains it, exactly as before this round; a genuine
+ * non-fs-system error (a programmer/invariant defect) is not a domain fact at
+ * all and likewise still propagates.
  */
 async function verifyChainComponent(deps: ApplyCreatePlanDeps, componentPath: string, previousIdentity: FileIdentity | undefined): Promise<{ ok: true, identity: FileIdentity | undefined } | { ok: false }> {
-	if (await deps.isSymlink(componentPath))
-		return { ok: false }
-	const identity = await deps.directoryIdentity(componentPath)
-	if (previousIdentity !== undefined && (identity === undefined || !sameFileIdentity(identity, previousIdentity)))
-		return { ok: false }
-	return { ok: true, identity }
+	try {
+		if (await deps.isSymlink(componentPath))
+			return { ok: false }
+		const identity = await deps.directoryIdentity(componentPath)
+		if (previousIdentity !== undefined && (identity === undefined || !sameFileIdentity(identity, previousIdentity)))
+			return { ok: false }
+		return { ok: true, identity }
+	}
+	catch (error) {
+		if (isFsSystemError(error) && (error.code === 'ENOTDIR' || error.code === 'ELOOP'))
+			return { ok: false }
+		throw error
+	}
 }
 
 /**
@@ -1258,12 +1296,21 @@ function foldLeaseRelease(plan: ArtifactCreatePlan, natural: ApplyCreatePlanResu
  * code pair locally, into the same `'rejected'` domain fact
  * `verifyManagedDirectoryChain` itself already reports for the identical
  * condition, before either pre-publication `targetExists` call site can ever
- * let it escape this far. This function's own "not a proven domain fact one
- * way or the other" reasoning above still holds for everything that DOES
- * still reach it: every genuine `EACCES`/`EIO`/`EPERM` observation failure,
- * and any `ENOTDIR`/`ELOOP` from a call site this round did not touch (e.g.
- * `verifyChainComponent`'s own bare probes -- see
- * `targetExistsOrChainRejected`'s own residual-scope note).
+ * let it escape this far.
+ *
+ * Finding (twenty-third round, closing the residual gap the round above left
+ * open): the identical `ENOTDIR`/`ELOOP` escaping `verifyChainComponent`'s
+ * own `isSymlink`/`directoryIdentity` probes -- reached from EVERY
+ * `verifyManagedDirectoryChain` call site, pre-write, post-write, and
+ * pre-publication alike, not merely `targetExists`'s -- is likewise no longer
+ * reachable here: `verifyChainComponent` (see its own doc) now classifies
+ * that same code pair locally too, into its own `{ ok: false }` chain
+ * rejection.
+ *
+ * This function's own "not a proven domain fact one way or the other"
+ * reasoning above still holds for everything that DOES still reach it: every
+ * genuine `EACCES`/`EIO`/`EPERM` observation failure from any probe this
+ * module calls.
  */
 function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
 	if (!(error instanceof Error))
