@@ -124,12 +124,14 @@ not mechanically over-decompose. Also propose, per accepted entry:
 
 ## Step 4 - initialize EF
 
-Follow `references/project-init.md` exactly (`--dry-run` plan -> human
-confirmation -> identical command with `--yes`), using the confirmed
+Reuse only the `ef init` procedure from `references/project-init.md`: its
+preconditions to confirm with the human, and its `--dry-run` plan -> human
+confirmation -> identical command with `--yes` sequence, using the confirmed
 integration ref and the human-accepted PROJECT content from the inventory.
-Do **not** stop after `init` and publish an init-only tree: the bootstrap
-commit in Step 7 must carry the complete accepted initial state, not just
-the skeleton.
+After `init` reports `applied: true`, do not restart any workflow from the
+top: return directly here, to Step 5 below. Do **not** stop after `init` and
+publish an init-only tree: the bootstrap commit in Step 7 must carry the
+complete accepted initial state, not just the skeleton.
 
 ## Step 5 - create the accepted initial Artifacts
 
@@ -176,9 +178,15 @@ until the complete initial graph is valid.
 ## Step 7 - one complete candidate bootstrap commit
 
 Have the human (or their ordinary Git tooling) create exactly one commit
-containing the complete candidate `.engineering/` tree. This Skill never
-publishes, commits to, or moves any branch ref - the transaction boundary of
-`13-cli-contract.md` stays outside it.
+containing the complete candidate `.engineering/` tree. Place it correctly:
+if the confirmed integration ref resolved at Step 0, the candidate's first
+parent must be exactly that ref's captured tip commit - if the tip has since
+moved, rebuild the candidate on the fresh tip rather than stacking on the
+stale one. If the ref did not resolve, the candidate must be a root commit,
+or its first-parent history before the candidate must contain no
+`.engineering/ef.yaml` path. This Skill never publishes, commits to, or
+moves any branch ref - the transaction boundary of `13-cli-contract.md`
+stays outside it.
 
 ## Step 8 - bootstrap-validate the exact commit
 
@@ -187,8 +195,13 @@ ef validate --scope bootstrap --proposed <full-commit-oid> --format json --no-in
 ```
 
 Report `complete`, `valid`, `counts`, `exit_code`, and every diagnostic to
-the human. Fix findings in the working tree, recommit, and revalidate the
-new commit OID - never report a failed bootstrap validation as done.
+the human. On findings, fix the working tree, then amend, replace, or
+rebuild the single candidate bootstrap commit - never append a child commit
+on top of the failed candidate, since that moves the first parent off the
+captured ref tip (or reintroduces `.engineering/ef.yaml` into first-parent
+history) and destroys bootstrap eligibility. Re-run the same command against
+the new full commit OID - never report a failed bootstrap validation as
+done.
 
 ## Step 9 - integration ends the bootstrap exception
 

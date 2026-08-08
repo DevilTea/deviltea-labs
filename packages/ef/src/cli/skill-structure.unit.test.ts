@@ -11,10 +11,13 @@
  *    never load.
  * 2. Mutation examples show the plan first: in `author-engineering-files`,
  *    any documented `ef init` / `ef artifact create` invocation carrying
- *    `--yes` must be preceded, earlier in the same file, by a matching
- *    invocation carrying `--dry-run`. This pins the Skill's non-negotiable
- *    dry-run -> human confirmation -> `--yes` rule structurally instead of
- *    as prose.
+ *    `--yes` must be preceded, earlier in the same file, by the identical
+ *    invocation carrying `--dry-run` instead — same tokens, in the same
+ *    order, once `--dry-run`/`--yes` are stripped from both. Matching only on
+ *    the command family (`init` vs `artifact create`) would let an unrelated
+ *    earlier `--dry-run` example authorize any later `--yes` example; this
+ *    pins the Skill's non-negotiable dry-run -> human confirmation -> re-run
+ *    the same command with `--yes` rule structurally instead of as prose.
  * 3. Brownfield bootstrap constraints: the existing-project bootstrap
  *    reference must never demonstrate creating a CHG (bootstrap state
  *    contains no CHG by contract), must validate the working tree with
@@ -150,42 +153,69 @@ describe('every shipped reference is reachable and every referenced path exists'
 	})
 })
 
+/** `init` or `artifact create` — the two mutation commands that take `--yes`. */
+function isMutationStatement(tokens: string[]): boolean {
+	return tokens[1] === 'init' || (tokens[1] === 'artifact' && tokens[2] === 'create')
+}
+
+/** A statement's authorization identity: every token except `--dry-run` and `--yes`, in order. */
+function normalizedInvocationKey(tokens: string[]): string {
+	return tokens.filter(token => token !== '--dry-run' && token !== '--yes')
+		.join(' ')
+}
+
+/**
+ * Given mutation statements in document order, returns the token lists of every
+ * `--yes` statement that lacks an earlier, identically-normalized `--dry-run`
+ * statement. Exported so the pairing rule itself — not just its effect on the
+ * shipped references — has a direct, synthetic test.
+ */
+export function findUnauthorizedYesStatements(statements: string[][]): string[][] {
+	const seenDryRunKeys = new Set<string>()
+	const violations: string[][] = []
+
+	for (const tokens of statements) {
+		if (!isMutationStatement(tokens))
+			continue
+		const key = normalizedInvocationKey(tokens)
+		if (tokens.includes('--dry-run')) {
+			seenDryRunKeys.add(key)
+			continue
+		}
+		if (tokens.includes('--yes') && !seenDryRunKeys.has(key))
+			violations.push(tokens)
+	}
+
+	return violations
+}
+
 describe('author-engineering-files mutation examples plan before applying', () => {
 	const authoringDir = path.join(skillsDir, 'author-engineering-files')
 	const markdownFiles = listMarkdownFiles(authoringDir)
 
-	/** `init` or `artifact create` — the two mutation commands the Skill documents. */
-	function mutationKey(tokens: string[]): string | null {
-		if (tokens[1] === 'init')
-			return 'init'
-		if (tokens[1] === 'artifact' && tokens[2] === 'create')
-			return 'artifact create'
-		return null
-	}
-
 	it.each(markdownFiles.map(file => path.relative(authoringDir, file)))('%s', (relativeFile) => {
 		const text = fs.readFileSync(path.join(authoringDir, relativeFile), 'utf8')
 		const statements = extractStatements(text)
-		const dryRunOffsets = new Map<string, number>()
+			.map(statement => statement.tokens)
+		const violations = findUnauthorizedYesStatements(statements)
+		expect(
+			violations,
+			`${relativeFile}: found '--yes' example(s) with no preceding identical '--dry-run' plan: ${JSON.stringify(violations)}`,
+		)
+			.toEqual([])
+	})
 
-		for (const { offset, tokens } of statements) {
-			const key = mutationKey(tokens)
-			if (key === null)
-				continue
-			if (tokens.includes('--dry-run')) {
-				if (!dryRunOffsets.has(key))
-					dryRunOffsets.set(key, offset)
-				continue
-			}
-			if (tokens.includes('--yes')) {
-				const planOffset = dryRunOffsets.get(key)
-				expect(
-					planOffset !== undefined && planOffset <= offset,
-					`${relativeFile}: 'ef ${key} ... --yes' appears without a preceding '--dry-run' example of the same command`,
-				)
-					.toBe(true)
-			}
-		}
+	it('pairs on the full normalized invocation, not just the command family', () => {
+		const dryRun = ['ef', 'init', '--title', '"<text>"', '--dry-run']
+		const identicalYes = ['ef', 'init', '--title', '"<text>"', '--yes']
+		const differentYes = ['ef', 'init', '--title', '"<other>"', '--yes']
+
+		expect(findUnauthorizedYesStatements([dryRun, identicalYes]))
+			.toEqual([])
+		expect(findUnauthorizedYesStatements([dryRun, differentYes]))
+			.toEqual([differentYes])
+		expect(findUnauthorizedYesStatements([identicalYes, dryRun]))
+			.toEqual([identicalYes])
 	})
 
 	it('exercises at least one dry-run/--yes pair (guards the extractor itself)', () => {

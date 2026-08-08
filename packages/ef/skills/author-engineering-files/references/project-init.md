@@ -12,9 +12,11 @@ refuses to overwrite or merge with an existing `.engineering` path and exits
 `1` as a domain rejection.
 
 For an established (brownfield) codebase adopting EF for the first time,
-this file covers only the `ef init` step: enter through
-`references/existing-project-bootstrap.md`, which sequences repository
-archaeology and the human-confirmed initial knowledge inventory around it.
+this file covers only the `ef init` step: Step 4 of
+`references/existing-project-bootstrap.md` delegates here for that step
+only, then resumes at its own Step 5. That file sequences repository
+archaeology and the human-confirmed initial knowledge inventory around the
+`ef init` step covered here.
 
 ## Preconditions to confirm with the human first
 
@@ -94,8 +96,9 @@ it never updates any branch ref itself.
 
 If this is brownfield adoption and initial PRD/REQ/ADR/POL knowledge still
 needs capturing, do not commit or bootstrap-validate the init-only tree yet:
-continue through `references/existing-project-bootstrap.md` and produce one
-complete candidate initial EF state first.
+return to Step 5 of `references/existing-project-bootstrap.md` (do not
+re-enter that workflow from the top, and do not run `ef init` again) and
+produce one complete candidate initial EF state first.
 
 Otherwise (greenfield, nothing further to capture), tell the human the next
 steps are theirs to perform through ordinary Git and CI, matching
