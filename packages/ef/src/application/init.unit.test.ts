@@ -1640,8 +1640,23 @@ describe('applyInitPlan', () => {
 	// implementation defect) for what is, in fact, an ordinary
 	// execution/permission failure (13-cli-contract.md exit `2`'s own class).
 	describe('escaped-exception lease finalization and error classification (Finding A, eighteenth round)', () => {
-		it('releases the already-tracked marker lease exactly once and reports applied:false/incomplete (never a rejection) when a non-ENOENT identity probe throws after the marker lease is held', async () => {
+		// Finding A (twenty-second round) changed what this exact reproduction
+		// demonstrates: `deps.directoryIdentity(plan.targetRoot)`'s `EACCES` no
+		// longer escapes `verifyClaimIntact` as an exception at all --
+		// `classifyIdentityProbeError` (see its own doc) now classifies it inline
+		// as `'unavailable'`, so this checkpoint reports "not intact" and
+		// `abort` runs its own ownership-proven cleanup -- exactly like any
+		// other non-`'intact'` pre-completion checkpoint, unchanged since before
+		// this round. The message is therefore the generic claim-lost message,
+		// not the raw probe error text (which no exception ever carried past
+		// `verifyClaimIntact` to begin with). The marker lease is still
+		// released exactly once, via `applyInitPlan`'s own structured
+		// finalization, regardless of whether `applyInitPlanCore` returns
+		// normally (as it now does here) or throws (the "control" test below,
+		// still a genuine escaped exception, covers that half).
+		it('reports applied:false/incomplete (never a rejection) and runs abort\'s own ownership-proven cleanup when a non-ENOENT identity probe fires for plan.targetRoot after the marker lease is held', async () => {
 			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
 			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
 			let markerWritten = false
 			let probeThrown = false
@@ -1686,12 +1701,17 @@ describe('applyInitPlan', () => {
 			expect(result.applied === false && result.outcome)
 				.toBe('incomplete')
 			expect(result.applied === false && result.message)
-				.toContain(probeError.message)
+				.toContain('no longer denotes the directory this invocation claimed')
 			// Structured finalization: the marker's lease -- the only one
-			// tracked by the time the probe threw -- was released exactly once,
-			// never skipped by the escaping exception.
+			// tracked by the time the probe fired -- was released exactly once.
 			expect(releaseCallCount)
 				.toBe(1)
+
+			// `abort`'s own ownership-proven cleanup actually ran (never blocked
+			// by the classified-away probe) and undid everything created so far:
+			// the marker, `.tmp`, and `.engineering` itself -- nothing else had
+			// been created yet at this checkpoint.
+			await expect(fs.stat(engineeringPath)).rejects.toThrow()
 		})
 
 		it('control: still propagates a genuine programmer/invariant error (e.g. a TypeError) as a rejection, but only after releasing every tracked lease exactly once', async () => {
@@ -1746,8 +1766,22 @@ describe('applyInitPlan', () => {
 	// fails against that prior implementation and passes only once the final
 	// post-marker-removal observation is caught locally and folded into the
 	// existing `cleanup-failed` variant instead.
+	//
+	// Finding A (twenty-second round) changed HOW this reproduction reaches
+	// `cleanup-failed`: `deps.directoryIdentity(plan.targetRoot)`'s `EIO` no
+	// longer escapes `verifyClaimIntact` as an exception at all --
+	// `classifyIdentityProbeError` (see its own doc) now classifies it inline
+	// as `'unavailable'`, so this checkpoint reaches the SAME `cleanup-failed`
+	// outcome via the `claimStatus === 'unavailable'` branch (introduced by the
+	// twentieth round for `readDirectory`'s analogous observation failure)
+	// rather than via this describe block's own "still somehow throws" `catch`.
+	// The message is therefore the generic claim-lost message, not the raw
+	// probe error text (which no exception ever carried past
+	// `verifyClaimIntact` to begin with) -- every other assertion below
+	// (`applied`, `outcome`, physical on-disk state, lease release count) is
+	// unchanged.
 	describe('publication-phase witness: an exception from the final post-marker-removal claim re-check is contained, never misreported as unapplied (Finding 1, nineteenth round)', () => {
-		it('reports applied:true/cleanup-failed (never applied:false/incomplete) when directoryIdentity(targetRoot) throws immediately after the marker was successfully removed, with the marker absent, every planned byte on disk, and every tracked lease released exactly once', async () => {
+		it('reports applied:true/cleanup-failed (never applied:false/incomplete) when directoryIdentity(targetRoot) fires immediately after the marker was successfully removed, with the marker absent, every planned byte on disk, and every tracked lease released exactly once', async () => {
 			const plan = await computeValidPlan()
 			const engineeringPath = path.join(tempDir, '.engineering')
 			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
@@ -1814,7 +1848,7 @@ describe('applyInitPlan', () => {
 			expect(result.applied === true && result.outcome)
 				.toBe('cleanup-failed')
 			expect(result.applied === true && result.outcome === 'cleanup-failed' && result.message)
-				.toContain(probeError.message)
+				.toContain('no longer denotes the directory this invocation claimed')
 
 			// Publication genuinely, physically completed -- the marker is gone
 			// and every planned byte is on disk, exactly as a plain success would
@@ -2180,6 +2214,127 @@ describe('applyInitPlan', () => {
 					if (markerUnlinked && targetPath === engineeringPath)
 						throw probeError
 					return defaultApplyInitPlanDeps.readDirectory(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('cleanup-failed')
+
+			await expect(fs.stat(markerPath)).rejects.toThrow()
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
+
+			expect(releaseCallCount)
+				.toBe(1 + plan.files.length)
+		})
+	})
+
+	// FINDING A (twenty-second round): before this round, `entryOwnershipStatus`'s
+	// directory branch called `deps.directoryIdentity(entry.path)` with no
+	// surrounding `try`/`catch` at all -- unlike `readDirectory`'s catch just
+	// above (twenty-first round), which already classifies a structurally
+	// proven `ENOTDIR`/`ELOOP` as `'mismatch'` rather than folding it in with
+	// mere observation noise. A real-shaped `ENOTDIR` escaping THIS call
+	// instead propagated out of `verifyClaimIntact` entirely, uncaught, and was
+	// caught only by the local `try`/`catch` around the FINAL,
+	// post-marker-removal `verifyClaimIntact()` call -- which folds ANY
+	// exception into `applied: true, outcome: 'cleanup-failed'`, exactly the
+	// same misreport the twenty-first round's fix already closed for
+	// `readDirectory`. This regression fails against that prior implementation
+	// (which reports `applied: true, outcome: 'cleanup-failed'`) and passes
+	// only once `entryOwnershipStatus` classifies the escaping error via
+	// `classifyIdentityProbeError` instead of letting it propagate.
+	describe('a directoryIdentity(entry.path) failure for a tracked directory whose error code itself proves it is gone/not-a-directory is a proven mismatch, never folded into cleanup-failed (Finding A, twenty-second round)', () => {
+		it('reports applied:false/incomplete (never applied:true/cleanup-failed) when directoryIdentity(entry.path) throws a real-shaped ENOTDIR for a tracked directory immediately after the marker was successfully unlinked', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			const trackedDirPath = path.join(tempDir, plan.directories[0]!)
+			const probeError = Object.assign(new Error('ENOTDIR: not a directory, lstat'), { code: 'ENOTDIR', syscall: 'lstat' })
+			let markerUnlinked = false
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+				// Throws only once the marker has genuinely, physically been
+				// removed -- every earlier checkpoint (before publication
+				// completed) still observes faithfully and must not be disturbed.
+				directoryIdentity: async (target: string) => {
+					if (markerUnlinked && target === trackedDirPath)
+						throw probeError
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+		})
+
+		it('control: still reports applied:true/cleanup-failed when directoryIdentity(entry.path) throws EACCES for a tracked directory (mere observation noise, not a proven mismatch) immediately after the marker was successfully unlinked, with every tracked lease released exactly once', async () => {
+			const plan = await computeValidPlan()
+			const engineeringPath = path.join(tempDir, '.engineering')
+			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
+			const trackedDirPath = path.join(tempDir, plan.directories[0]!)
+			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
+			let markerUnlinked = false
+			let releaseCallCount = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				writeInitMarker: async (markerPathArg: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPathArg, nonce)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				createExclusive: async (targetPath: string, bytes: Uint8Array) => {
+					const real = await defaultApplyInitPlanDeps.createExclusive(targetPath, bytes)
+					if (real.outcome !== 'created')
+						return real
+					return {
+						outcome: 'created' as const,
+						lease: {
+							...real.lease,
+							release: async () => {
+								releaseCallCount++
+								return real.lease.release()
+							},
+						},
+					}
+				},
+				unlink: async (targetPath: string) => {
+					await defaultApplyInitPlanDeps.unlink(targetPath)
+					if (targetPath === markerPath)
+						markerUnlinked = true
+				},
+				directoryIdentity: async (target: string) => {
+					if (markerUnlinked && target === trackedDirPath)
+						throw probeError
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
 				},
 			}
 

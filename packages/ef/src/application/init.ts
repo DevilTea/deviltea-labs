@@ -840,23 +840,30 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	 * failure, never a structural proof of absence -- `'unavailable'` remains
 	 * correct for every case that reaches it.
 	 *
-	 * The DIRECTORY branch's `deps.directoryIdentity(entry.path)` call is
-	 * NOT wrapped in a `try`/`catch` at all, so an `ENOTDIR`/`EACCES`/`EIO`
-	 * escaping it (unlike the always-non-throwing `tryLstat`-derived
-	 * `undefined` for a plain `ENOENT`) propagates out of `verifyClaimIntact`
-	 * uncaught -- identical, deliberate, already-reviewed behavior to this
-	 * same function's own `plan.targetRoot` identity check two lines above
-	 * `readDirectory`'s call, both contained by `applyInitPlanCore`'s
-	 * surrounding `try`/`catch` (see that catch's own doc) rather than typed
-	 * here. Splitting THAT escape into a typed `'mismatch'` too would be a
-	 * second, separately-scoped change -- it is not this round's reported P1,
-	 * which is specifically `readDirectory`'s own blanket catch -- so it is
-	 * left as is here; noted for a future round to pick up if it is ever
-	 * actually reported.
+	 * The DIRECTORY branch's `deps.directoryIdentity(entry.path)` call, and the
+	 * FILE branch's `deps.regularFileIdentity(entry.path)` call below, are each
+	 * wrapped in their own `try`/`catch` (Finding A, twenty-second round,
+	 * correcting the twenty-first round's own note that left this un-typed): an
+	 * `ENOTDIR`/`ELOOP` escaping either (unlike the always-non-throwing
+	 * `tryLstat`-derived `undefined` for a plain `ENOENT`) is now classified via
+	 * `classifyIdentityProbeError` -- the same proven-structural-loss reasoning
+	 * `isProvenDirectoryGone` already applies to `readDirectory`'s catch --
+	 * rather than left to propagate out of `verifyClaimIntact` uncaught. See
+	 * `classifyIdentityProbeError`'s own doc for exactly why an uncaught escape
+	 * here was a genuine misreport, not merely a stylistic gap. This function's
+	 * own typed `'mismatch' | 'unavailable'` result already covers the
+	 * distinction that classifier exposes, so no further change is needed here
+	 * beyond containing the throw.
 	 */
 	async function entryOwnershipStatus(entry: CreatedEntry): Promise<'mismatch' | 'proven' | 'unavailable'> {
 		if (entry.kind === 'directory') {
-			const current = await deps.directoryIdentity(entry.path)
+			let current: FileIdentity | undefined
+			try {
+				current = await deps.directoryIdentity(entry.path)
+			}
+			catch (error) {
+				return classifyIdentityProbeError(error)
+			}
 			if (current === undefined)
 				return 'mismatch'
 			return sameFileIdentity(current, entry.identity) ? 'proven' : 'mismatch'
@@ -866,7 +873,13 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 			return 'unavailable'
 		if (live.status === 'unlinked')
 			return 'mismatch'
-		const current = await deps.regularFileIdentity(entry.path)
+		let current: FileIdentity | undefined
+		try {
+			current = await deps.regularFileIdentity(entry.path)
+		}
+		catch (error) {
+			return classifyIdentityProbeError(error)
+		}
 		if (current === undefined)
 			return 'mismatch'
 		return sameFileIdentity(current, live.identity) ? 'proven' : 'mismatch'
@@ -1015,7 +1028,21 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	 * what neither check can catch.
 	 */
 	async function verifyClaimIntact(): Promise<ClaimIntactResult> {
-		const currentRoot = await deps.directoryIdentity(plan.targetRoot)
+		// Finding A (twenty-second round): this call was previously bare, with no
+		// surrounding `try`/`catch` -- an `ENOTDIR`/`ELOOP` escaping it (unlike the
+		// always-non-throwing `tryLstat`-derived `undefined` for a plain `ENOENT`)
+		// propagated out of `verifyClaimIntact` uncaught, identical to the same
+		// gap `entryOwnershipStatus`'s own directory/file branches had (see
+		// `classifyIdentityProbeError`'s own doc for why that escape was a
+		// genuine misreport, not merely a stylistic gap). Classified the same way
+		// here for the same reason.
+		let currentRoot: FileIdentity | undefined
+		try {
+			currentRoot = await deps.directoryIdentity(plan.targetRoot)
+		}
+		catch (error) {
+			return classifyIdentityProbeError(error)
+		}
 		if (currentRoot === undefined || !sameFileIdentity(currentRoot, targetRootIdentity!))
 			return 'mismatch'
 
@@ -1370,10 +1397,21 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	// exception here already was; `'mismatch'` keeps the existing
 	// `applied: false, outcome: 'incomplete'` semantics below, unchanged from
 	// before this round. A `verifyClaimIntact()` call that still somehow
-	// throws (e.g. `deps.directoryIdentity(plan.targetRoot)`'s own escaping
-	// `lstat` failure, never internally caught) is, as before, contained
-	// locally right here rather than reaching the generic pre-completion
-	// classifier that assumes nothing was yet materialized.
+	// throws is, as before, contained locally right here rather than reaching
+	// the generic pre-completion classifier that assumes nothing was yet
+	// materialized -- but as of Finding A (twenty-second round),
+	// `deps.directoryIdentity(plan.targetRoot)`'s own `ENOTDIR`/`ELOOP`/`EACCES`/`EIO`
+	// no longer reach here as an exception at all: `classifyIdentityProbeError`
+	// (see its own doc) now classifies them inline, as `'mismatch'` or
+	// `'unavailable'` respectively, so only a genuine non-fs-system defect
+	// (a programmer/invariant error `classifyIdentityProbeError` itself
+	// rethrows) can still reach this `catch` from that call.
+	//
+	// A `claimStatus === 'unavailable'` therefore now handles what a
+	// `directoryIdentity(plan.targetRoot)` `EACCES`/`EIO` used to reach ONLY by
+	// escaping all the way to this `catch` -- see that branch immediately
+	// below, unchanged in its own handling since the twentieth round
+	// introduced it for `readDirectory`'s analogous observation failure.
 	let claimStatus: ClaimIntactResult
 	try {
 		claimStatus = await verifyClaimIntact()
@@ -1494,6 +1532,58 @@ function isFsSystemError(error: unknown): error is NodeJS.ErrnoException {
  */
 function isProvenDirectoryGone(error: unknown): boolean {
 	return isFsSystemError(error) && (error.code === 'ENOENT' || error.code === 'ENOTDIR' || error.code === 'ELOOP')
+}
+
+/**
+ * Classify an exception escaping a `directoryIdentity`/`regularFileIdentity`
+ * pathname probe that `entryOwnershipStatus` and `verifyClaimIntact`'s own
+ * `plan.targetRoot` re-check make, into the `'mismatch' | 'unavailable'` half
+ * of `ClaimIntactResult` those two callers need -- rather than letting it
+ * escape as an uncaught exception (Finding A, twenty-second round).
+ *
+ * Before this round, `entryOwnershipStatus`'s directory branch and
+ * `verifyClaimIntact`'s own `plan.targetRoot` identity check each called
+ * `deps.directoryIdentity`/`deps.regularFileIdentity` bare, with no
+ * surrounding `try`/`catch` at all -- unlike `readDirectory`'s call two lines
+ * below `verifyClaimIntact`'s `plan.targetRoot` check, which this same
+ * classifier's own `isProvenDirectoryGone` half already protects (see that
+ * function's own doc, twenty-first round). Production's `tryLstat` (see
+ * `platform/fs-facts.ts`) normalizes only `ENOENT`; a genuine `ENOTDIR`
+ * (a tracked directory's path, or `plan.targetRoot` itself, has a component
+ * that is no longer a directory -- e.g. swapped for a regular file) or
+ * `ELOOP` (a symlink was swapped in at that exact path) still throws. Both are
+ * exactly as certain a PROVEN structural loss as the readdir-observed
+ * name-set mismatch `readDirectory`'s own catch already reports as
+ * `'mismatch'` -- but reaching this from an uncaught exception instead let it
+ * escape `verifyClaimIntact` entirely: at any PRE-completion checkpoint, that
+ * skipped `abort`'s own ownership-proven cleanup attempt (the exception
+ * propagated straight past the `if ((await verifyClaimIntact()) !== 'intact')
+ * return abort(...)` call before `abort` could ever run) and was instead
+ * caught only by `applyInitPlan`'s generic top-level `isFsSystemError` filter,
+ * which cannot distinguish this proven case from ordinary observation noise
+ * either; at the ONE post-marker-removal checkpoint (`applyInitPlanCore`'s
+ * own local `try`/`catch` around its final `verifyClaimIntact()` call), the
+ * SAME structural proof was folded into `applied: true, outcome:
+ * 'cleanup-failed'` -- silently upgrading a lost claim into a reported
+ * success, exactly the misreport `isProvenDirectoryGone`'s own twenty-first-
+ * round fix already closed for `readDirectory`'s bare, non-throwing catch.
+ *
+ * `isProvenDirectoryGone` classifies the proven-structural half; every OTHER
+ * genuine `fs` errno error (`EACCES`/`EIO`/`EPERM`, ...) proves nothing about
+ * the claim's actual state -- `'unavailable'`, matching `readDirectory`'s own
+ * noise handling exactly. A genuine non-fs-system error (a programmer/
+ * invariant defect) is not a claim-intact fact at all and must still
+ * propagate unchanged, to whichever outer boundary already contains a genuine
+ * defect (`applyInitPlan`'s own top-level `try`/`catch`, or the local
+ * `try`/`catch` around the final post-marker-removal `verifyClaimIntact()`
+ * call, both unchanged by this round).
+ */
+function classifyIdentityProbeError(error: unknown): 'mismatch' | 'unavailable' {
+	if (isProvenDirectoryGone(error))
+		return 'mismatch'
+	if (isFsSystemError(error))
+		return 'unavailable'
+	throw error
 }
 
 /**

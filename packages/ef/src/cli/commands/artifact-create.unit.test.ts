@@ -492,6 +492,78 @@ describe('runArtifactCreateCommand', () => {
 		}
 	})
 
+	// FINDING B (P1, twenty-second round): the very first `targetExists`
+	// pre-publication probe (`isRegularFile`/`isDirectory`/`isSymlink`, in that
+	// order) `lstat`s `plan.path` directly -- if the canonical type directory
+	// was replaced by a regular file since the plan was computed, that `lstat`
+	// itself fails `ENOTDIR` (a path component is no longer a directory), a
+	// real, non-`ENOENT` error production's `tryLstat` does not normalize. This
+	// is exactly as certain a proof of a broken managed-directory chain as the
+	// symlinked-type-directory regression immediately above -- `applyCreatePlan`
+	// must map it to the SAME `'rejected'` domain outcome (exit `1`,
+	// `complete: true`, `EF-FS-004`), never exit `2`'s generic `'incomplete'`
+	// class, which an uncaught exception from this probe previously fell into
+	// via the top-level `isFsSystemError` catch. Reproduced here through the
+	// CLI's real, non-injected `applyCreatePlan` wiring by forcing the real
+	// `lstat` primitive to fail exactly once, for `plan.path` itself, with a
+	// real-shaped `ENOTDIR`.
+	it('exits 1 (EF-FS-004, complete:true) -- never exit 2 -- when the first targetExists probe throws a real-shaped ENOTDIR (canonical type directory replaced by a regular file)', async () => {
+		const targetPath = path.join(root, '.engineering/req/REQ-001.md')
+		let armed = true
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			const [target] = args as [string]
+			if (armed && target === targetPath) {
+				armed = false
+				throw Object.assign(new Error(`ENOTDIR: not a directory, lstat '${targetPath}'`), { code: 'ENOTDIR', syscall: 'lstat' })
+			}
+			return realFns.lstat(...args)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(1)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(true)
+		expect(json.applied)
+			.toBe(false)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-FS-004')
+
+		await expect(fs.stat(targetPath)).rejects.toThrow()
+	})
+
+	// Control: the same call site failing with `EACCES` (mere observation
+	// noise -- not a proven structural fact) must still be reported as the
+	// existing, unchanged exit `2` `'incomplete'` class -- this round's fix
+	// classifies only the structurally proven `ENOTDIR`/`ELOOP` codes, never
+	// every fs errno alike.
+	it('control: still exits 2 (incomplete, complete:false) when that same first targetExists probe throws EACCES instead', async () => {
+		const targetPath = path.join(root, '.engineering/req/REQ-001.md')
+		let armed = true
+		lstatMock.mockImplementation(async (...args: Parameters<typeof realFns.lstat>) => {
+			const [target] = args as [string]
+			if (armed && target === targetPath) {
+				armed = false
+				throw Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
+			}
+			return realFns.lstat(...args)
+		})
+
+		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(2)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(false)
+
+		await expect(fs.stat(targetPath)).rejects.toThrow()
+	})
+
 	it('exits 2 (incomplete, not raced) when the temporary file cannot be written (unwritable canonical directory)', async () => {
 		// The canonical type directory exists (so `ensureDirectory` and the
 		// initial target-existence check both succeed cleanly) but is
