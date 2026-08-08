@@ -27,6 +27,10 @@ in the Agent workflow; `ef` stays the deterministic primitive and validator.
   guess or default it. Bootstrap validation (Step 8) will prove no prior
   `.engineering/ef.yaml` exists in that ref's history at validation time; if
   EF history already exists there, bootstrap is the wrong workflow entirely.
+- Resumption: if a prior session already ran `ef init` (local
+  `.engineering/` exists) but the candidate has never been integrated, this
+  workflow resumes at the appropriate later step (Step 5-8) instead of
+  starting over; never rerun `ef init` in that case.
 
 ## Step 1 - bounded, read-only repository archaeology
 
@@ -118,8 +122,10 @@ entry:
 If the human additionally accepts PROJECT relations (PROJECT's only allowed
 outgoing relation type is `references` - see the type table in
 `references/draft-authoring.md`) or PROJECT-owned Resources, these do not go
-through the loop above: `ef init` has no flags for relations or Resources,
-so Step 4 materializes them by direct edit instead.
+through the loop above: `ef init` has no flags for relations or Resources.
+Step 4 materializes PROJECT-owned Resources by direct edit; PROJECT
+`references` relations are deferred to Step 5, after the ID allocator
+issues their targets' IDs.
 
 ### Initial status boundary
 
@@ -143,18 +149,23 @@ After `init` reports `applied: true`, do not restart any workflow from the
 top: return directly here, to Step 5 below. Do **not** stop after `init` and
 publish an init-only tree: the bootstrap commit in Step 7 must carry the
 complete accepted initial state, not just the skeleton. If the accepted
-inventory includes PROJECT relations or Resources, edit the generated
-`.engineering/PROJECT.md` (and place any Resource files under
-`.engineering/resources/PROJECT/`) directly now, under the normal schema
-rules in `references/draft-authoring.md` - the bootstrap exception permits
-direct PROJECT edits only before the first authoritative integration.
+inventory includes PROJECT-owned Resources, place the Resource files under
+`.engineering/resources/PROJECT/` and edit the generated
+`.engineering/PROJECT.md` directly now, under the normal schema rules in
+`references/draft-authoring.md` - the bootstrap exception permits direct
+PROJECT edits only before the first authoritative integration. PROJECT's
+owner ID (`PROJECT`) is already known, so its Resources need no allocated
+ID. Defer any accepted PROJECT `references` relations to Step 5's relation
+application phase instead: their targets are PRD/REQ/ADR/POL Artifacts
+whose IDs do not exist until the Step 5 allocator issues them.
 
 ## Step 5 - create the accepted initial Artifacts
 
-For each accepted PRD/REQ/ADR/POL inventory entry, create the file through
-the CLI, then fill it by direct edits (there is no edit or activation
-command). Here `<type>` is one of `prd`, `req`, `adr`, `pol` - never `chg`
-during bootstrap, and PROJECT is never created this way:
+Allocate every Artifact ID before any relation references it; apply
+relations only after all IDs exist. For each accepted PRD/REQ/ADR/POL
+inventory entry, create the file through the CLI first. Here `<type>` is
+one of `prd`, `req`, `adr`, `pol` - never `chg` during bootstrap, and
+PROJECT is never created this way:
 
 ```bash
 ef artifact create <type> \
@@ -172,14 +183,24 @@ ef artifact create <type> \
   --yes
 ```
 
-1. The command always writes a `status: draft` skeleton. Fill frontmatter
-   and body with ordinary file edits per `references/draft-authoring.md`.
-2. For entries the human accepted as initial **active** truth, edit the file
-   directly into a valid active state (status plus complete required
-   sections). The bootstrap contract explicitly permits this before the
-   first authoritative integration; it is **not** a precedent for bypassing
-   CHG afterwards.
-3. Add the accepted relations and Resources.
+1. The command always writes a `status: draft` skeleton; `--dry-run`
+   reserves no ID, and there is no explicit-ID creation path. Repeat this
+   create step for every accepted entry, recording each actually allocated
+   ID from its applied `--yes` result - never guess or pre-assign a future
+   ID.
+2. Once every accepted entry has a file and a recorded ID, fill frontmatter
+   and body with ordinary file edits per `references/draft-authoring.md`
+   (there is no edit or activation command). For entries the human accepted
+   as initial **active** truth, edit the file directly into a valid active
+   state (status plus complete required sections). The bootstrap contract
+   explicitly permits this before the first authoritative integration; it
+   is **not** a precedent for bypassing CHG afterwards. Add the accepted
+   Resources.
+3. With every ID now known, apply the accepted cross-Artifact relations by
+   direct edit - the PROJECT `references` relations deferred from Step 4
+   (edit `.engineering/PROJECT.md`) and every other accepted relation (edit
+   the owning Artifact file) - using exactly the recorded IDs, never a
+   guessed or future one.
 
 Never create a CHG, `superseded`, or `retired` Artifact anywhere in the
 bootstrap state.
@@ -200,17 +221,32 @@ containing the complete candidate `.engineering/` tree.
 `ef validate --scope bootstrap` resolves the configured integration ref
 fresh when it runs, so place the candidate against the ref's state as
 observed immediately before building it, not against any earlier
-observation: if the ref resolves at
-that moment, the candidate's first parent must be exactly its current tip
-commit; if it does not resolve, the candidate must be a root commit, or its
-first-parent history before the candidate must contain no
-`.engineering/ef.yaml` path. Any change to the ref's state between building
-the candidate and validating or integrating it - an unresolved ref becoming
-resolved, a resolved tip moving, or otherwise - makes the candidate stale:
-rebuild or amend the single candidate against the fresh state and revalidate
-its new full OID; never stack another commit on top. This Skill never
-publishes, commits to, or moves any branch ref - the transaction boundary of
-`13-cli-contract.md` stays outside it.
+observation: if the ref resolves at that moment, the candidate's first
+parent must be exactly its current tip commit; if it does not resolve, the
+candidate must be a root commit, or its first-parent history before the
+candidate must contain no `.engineering/ef.yaml` path.
+
+Any change to the ref's state between building the candidate and
+validating or integrating it - an unresolved ref becoming resolved, a
+resolved tip moving, or otherwise - requires re-inspecting the fresh state
+before acting further:
+
+- If the fresh first-parent history is still EF-free, the candidate is
+  merely stale: rebuild or amend the single candidate against the fresh
+  state and bootstrap-validate its new full OID; never stack another
+  commit on top.
+- If the fresh history now contains an EF state (an `EF-VAL-009`-class
+  history finding), abort brownfield bootstrap entirely: report to the
+  human that authoritative EF history now exists, and reconcile the
+  intended content through the established-EF workflow instead (context
+  discovery via `references/context-discovery.md`, CHG-backed transitions
+  via `references/chg-planning.md`). Never keep re-parenting the candidate
+  to chase the bootstrap exception.
+- If the ref or its history cannot be inspected, the operation is
+  incomplete - never assume eligibility.
+
+This Skill never publishes, commits to, or moves any branch ref - the
+transaction boundary of `13-cli-contract.md` stays outside it.
 
 ## Step 8 - bootstrap-validate the exact commit
 
@@ -225,9 +261,12 @@ on top of the failed candidate, since that moves the first parent off the
 ref's tip at validation time (or reintroduces `.engineering/ef.yaml` into
 first-parent history) and destroys bootstrap eligibility. Because each run
 resolves the integration ref fresh, re-check the ref's current state before
-rebuilding - per Step 7, any change since the candidate was built makes it
-stale - and re-run the same command against the new full commit OID; never
-report a failed bootstrap validation as done.
+rebuilding: per Step 7, if the fresh history is still EF-free the candidate
+is merely stale, so rebuild it against the fresh state and re-run the same
+command against the new full commit OID; if the fresh history now contains
+an EF state (an `EF-VAL-009`-class finding), stop and follow Step 7's abort
+path instead of rebuilding again. Never report a failed bootstrap
+validation as done.
 
 ## Step 9 - integration ends the bootstrap exception
 

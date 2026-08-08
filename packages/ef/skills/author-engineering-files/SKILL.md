@@ -30,11 +30,15 @@ its shape or assume a result without executing the command.
    authoritative EF state is integrated, EF queries answer EF questions -
    never keep using repository archaeology as a substitute.
 2. **Drafts are not canonical truth.** A `status: draft` Artifact may be
-   created and freely edited with no CHG. Any change to *active* content -
-   frontmatter, body, tags, relations, Resources, `ef.yaml`, `.gitignore` -
-   requires a CHG-backed Git transition, including a one-word typo fix. There
-   is no CLI edit, lifecycle, or CHG-completion command: you author these
-   changes directly as files. See `references/chg-planning.md`.
+   created and freely edited with no CHG. Once the first authoritative EF
+   state is integrated, any change to *active* content - frontmatter, body,
+   tags, relations, Resources, `ef.yaml`, `.gitignore` - requires a
+   CHG-backed Git transition, including a one-word typo fix. There is no CLI
+   edit, lifecycle, or CHG-completion command: you author these changes
+   directly as files. See `references/chg-planning.md`. Single exception:
+   during first-time bootstrap, before any authoritative EF integration,
+   accepted initial content may be edited directly with no CHG - see
+   `references/existing-project-bootstrap.md`.
 3. **Never invent terminology or engineering decisions.** Propose candidate
    terms, requirements, decisions, or policy language and ask the human to
    accept, edit, or reject them. Do not write a PROJECT Terminology row, an
@@ -60,7 +64,14 @@ its shape or assume a result without executing the command.
 
 ```text
 1. Is there an existing .engineering/ project?
-   yes -> continue
+   yes -> has the first authoritative EF integration already happened (the
+          ref named in `.engineering/ef.yaml` resolves and its history
+          contains an EF state)?
+          yes -> continue
+          no, or ambiguous -> resume
+                 references/existing-project-bootstrap.md at the
+                 appropriate step; never rerun `ef init` (ask the human
+                 when the evidence is unclear)
    no  -> is this an established codebase (existing behavior, docs, tests,
           Git history) rather than a fresh/greenfield setup?
           no (greenfield)   -> references/project-init.md (ef init)
