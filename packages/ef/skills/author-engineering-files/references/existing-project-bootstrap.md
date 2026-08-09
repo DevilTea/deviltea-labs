@@ -35,8 +35,10 @@ in the Agent workflow; `ef` stays the deterministic primitive and validator.
   partial `.engineering/` - e.g. `ef.yaml` absent or an init marker left
   behind - is EF-VAL-012 / incomplete initialization; stop and surface it
   instead of resuming) plus a proven EF-free or unresolved configured ref
-  history. If that evidence cannot be inspected, stop as incomplete rather
-  than resume.
+  history. If that proof instead shows the ref now holds authoritative EF
+  history, the bootstrap was preempted: do not resume - follow Step 7's
+  abort/handoff path instead. If that evidence cannot be inspected, stop
+  as incomplete rather than resume.
 
 ## Step 1 - bounded, read-only repository archaeology
 
@@ -264,15 +266,17 @@ before acting further:
   state and bootstrap-validate its new full OID; never stack another
   commit on top.
 - If the fresh history now contains an EF state (an `EF-VAL-009`-class
-  history finding), abort brownfield bootstrap entirely: report to the
-  human that authoritative EF history now exists. Before any EF context
-  query or CHG planning, have the human (or their ordinary Git tooling)
-  first preserve this actor's unintegrated candidate work separately
-  (e.g. on its own branch), then materialize a working tree based on the
-  actual current authoritative `integration_ref` state - this Skill still
-  never checks out, resets, or publishes anything itself, but the handoff
-  must be explicit. Only once the working tree reflects the authoritative
-  EF state, reconcile whatever of the preserved intent is still wanted
+  history finding) - whether discovered here or already true when a
+  resumed session enters at Step 0, or via the top-level routing in
+  SKILL.md - abort brownfield bootstrap entirely: report to the human that
+  authoritative EF history now exists. Before any EF context query or CHG
+  planning, have the human (or their ordinary Git tooling) first preserve
+  this actor's unintegrated candidate work separately (e.g. on its own
+  branch), then materialize a working tree based on the actual current
+  authoritative `integration_ref` state - this Skill still never checks
+  out, resets, or publishes anything itself, but the handoff must be
+  explicit. Only once the working tree reflects the authoritative EF
+  state, reconcile whatever of the preserved intent is still wanted
   through the established-EF workflow: context discovery via
   `references/context-discovery.md`, then CHG-backed transitions via
   `references/chg-planning.md`. Never keep re-parenting the candidate to

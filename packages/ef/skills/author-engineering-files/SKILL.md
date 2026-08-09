@@ -71,8 +71,18 @@ its shape or assume a result without executing the command.
           it to the human as EF-VAL-012 / incomplete initialization (see
           project-init.md's guardrail); do not repair, do not enter
           either workflow
-          valid completed local EF project + proven authoritative EF
-          history on the configured ref -> continue (normal workflow)
+          proven authoritative EF history on the configured ref, and local
+          project state proven to be based on that history (an ordinary
+          established-EF working state, not a never-integrated bootstrap
+          candidate) -> continue (normal workflow)
+          authoritative EF history proven on the configured ref, but the
+          local tree is a stale never-integrated bootstrap candidate, or
+          its provenance relative to that history is ambiguous -> fail
+          closed; follow the preemption handoff in
+          references/existing-project-bootstrap.md Step 7: preserve the
+          unintegrated intent separately, materialize a working tree based
+          on the actual current `integration_ref` state, then run context
+          discovery / CHG planning
           valid completed local EF project + proven EF-free configured
           ref history (or the ref does not resolve) -> resume
           references/existing-project-bootstrap.md at the appropriate
