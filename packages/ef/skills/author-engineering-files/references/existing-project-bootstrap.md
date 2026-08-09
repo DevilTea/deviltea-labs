@@ -30,7 +30,13 @@ in the Agent workflow; `ef` stays the deterministic primitive and validator.
 - Resumption: if a prior session already ran `ef init` (local
   `.engineering/` exists) but the candidate has never been integrated, this
   workflow resumes at the appropriate later step (Step 5-8) instead of
-  starting over; never rerun `ef init` in that case.
+  starting over; never rerun `ef init` in that case. Resumption requires
+  the same proof as elsewhere: a valid completed local EF project (a
+  partial `.engineering/` - e.g. `ef.yaml` absent or an init marker left
+  behind - is EF-VAL-012 / incomplete initialization; stop and surface it
+  instead of resuming) plus a proven EF-free or unresolved configured ref
+  history. If that evidence cannot be inspected, stop as incomplete rather
+  than resume.
 
 ## Step 1 - bounded, read-only repository archaeology
 
@@ -161,6 +167,28 @@ whose IDs do not exist until the Step 5 allocator issues them.
 
 ## Step 5 - create the accepted initial Artifacts
 
+### Resumption preflight (required before any new mutation)
+
+On a resumed session, before creating anything: inventory the existing
+local candidate state with read-only queries, for example:
+
+- `ef query list --format json --no-input`
+- `ef query lookup <id> --projection summary --format json --no-input`
+  for a specific entry
+
+Then re-establish, with the human, the mapping from accepted inventory
+entries to already-allocated Artifact IDs/files.
+
+- Preserve every already-created provisional file/ID; create a skeleton
+  only for an accepted entry proven not yet materialized.
+- If the mapping is ambiguous - it cannot be proven whether an entry was
+  already created - ask the human; never match by title, and never
+  allocate another ID for a possibly-existing concept.
+- This preflight also determines how far the flow already progressed
+  (bodies filled? relations applied? snapshot validated? candidate commit
+  built?), so the resumed session continues from the right step below
+  instead of replaying earlier mutations.
+
 Allocate every Artifact ID before any relation references it; apply
 relations only after all IDs exist. For each accepted PRD/REQ/ADR/POL
 inventory entry, create the file through the CLI first. Here `<type>` is
@@ -237,11 +265,18 @@ before acting further:
   commit on top.
 - If the fresh history now contains an EF state (an `EF-VAL-009`-class
   history finding), abort brownfield bootstrap entirely: report to the
-  human that authoritative EF history now exists, and reconcile the
-  intended content through the established-EF workflow instead (context
-  discovery via `references/context-discovery.md`, CHG-backed transitions
-  via `references/chg-planning.md`). Never keep re-parenting the candidate
-  to chase the bootstrap exception.
+  human that authoritative EF history now exists. Before any EF context
+  query or CHG planning, have the human (or their ordinary Git tooling)
+  first preserve this actor's unintegrated candidate work separately
+  (e.g. on its own branch), then materialize a working tree based on the
+  actual current authoritative `integration_ref` state - this Skill still
+  never checks out, resets, or publishes anything itself, but the handoff
+  must be explicit. Only once the working tree reflects the authoritative
+  EF state, reconcile whatever of the preserved intent is still wanted
+  through the established-EF workflow: context discovery via
+  `references/context-discovery.md`, then CHG-backed transitions via
+  `references/chg-planning.md`. Never keep re-parenting the candidate to
+  chase the bootstrap exception.
 - If the ref or its history cannot be inspected, the operation is
   incomplete - never assume eligibility.
 

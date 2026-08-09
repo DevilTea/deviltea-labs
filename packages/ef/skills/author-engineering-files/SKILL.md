@@ -64,14 +64,21 @@ its shape or assume a result without executing the command.
 
 ```text
 1. Is there an existing .engineering/ project?
-   yes -> has the first authoritative EF integration already happened (the
-          ref named in `.engineering/ef.yaml` resolves and its history
-          contains an EF state)?
-          yes -> continue
-          no, or ambiguous -> resume
-                 references/existing-project-bootstrap.md at the
-                 appropriate step; never rerun `ef init` (ask the human
-                 when the evidence is unclear)
+   yes -> route by proof, never by assumption (never grant the bootstrap
+          exception on ambiguity):
+          incomplete initialization claim (partial `.engineering/`, e.g.
+          `ef.yaml` absent or an init marker left behind) -> stop; surface
+          it to the human as EF-VAL-012 / incomplete initialization (see
+          project-init.md's guardrail); do not repair, do not enter
+          either workflow
+          valid completed local EF project + proven authoritative EF
+          history on the configured ref -> continue (normal workflow)
+          valid completed local EF project + proven EF-free configured
+          ref history (or the ref does not resolve) -> resume
+          references/existing-project-bootstrap.md at the appropriate
+          step; never rerun `ef init`
+          ref/history unavailable, or evidence otherwise ambiguous ->
+          stop as incomplete; ask the human for the missing evidence
    no  -> is this an established codebase (existing behavior, docs, tests,
           Git history) rather than a fresh/greenfield setup?
           no (greenfield)   -> references/project-init.md (ef init)
