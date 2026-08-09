@@ -18,6 +18,10 @@ pnpm check
 
 `pnpm test:unit` runs Vitest tests owned by the root configuration, including colocated `packages/**/src/**/*.unit.test.ts` files. `pnpm test` additionally runs package consumer/contract tests that pack or install artifacts. Use a package's own script when iterating on just that package; keep its smoke or contract command separate from fast unit tests.
 
+## Releasing
+
+Releases are driven locally: `pnpm release <package> <release>` bumps the package and opens its release pull request with auto-merge enabled, and `pnpm release:tag <package>` pushes the annotated tag after that pull request merges. Only the tag push triggers publishing, which happens exclusively in `publish.yml` via npm Trusted Publishing. Both commands push to `origin` and the second one publishes to npm, so never run them without an explicit instruction to release. See [docs/migration/release-cutover.md](docs/migration/release-cutover.md).
+
 ## Testing policy
 
 - Write Vitest unit tests as `*.unit.test.ts` next to runtime source where practical. JSON-only configuration packages such as `packages/tsconfig` are validated instead by positive and negative compiler consumer contracts and do not participate in Vitest coverage.

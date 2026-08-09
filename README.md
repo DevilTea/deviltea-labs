@@ -28,6 +28,20 @@ pnpm check
 See [`docs/migration/source-map.md`](docs/migration/source-map.md) for the
 preserved source-history mapping.
 
+## Releasing
+
+Releases are driven locally and published from GitHub Actions with npm Trusted
+Publishing. Requires an authenticated [GitHub CLI](https://cli.github.com).
+
+```sh
+pnpm release <package> <patch|minor|major|prerelease|version>  # bump and open the release PR (auto-merge)
+# wait for the pull request to merge, then:
+pnpm release:tag <package>                                     # push the tag and publish
+```
+
+See [`docs/migration/release-cutover.md`](docs/migration/release-cutover.md)
+for the full procedure.
+
 ## Compatibility
 
 - Node.js 22.14+ and 24.x are supported LTS lines.

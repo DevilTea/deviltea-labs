@@ -40,8 +40,7 @@
 		"start": "tsx src/index.ts",
 		"test": "vitest",
 		"test:cov": "vitest --coverage",
-		"typecheck": "tsc --noEmit --project tsconfig.test.json",
-		"prepare": "simple-git-hooks"
+		"typecheck": "tsc --noEmit --project tsconfig.test.json"
 	},
 	"peerDependencies": {
 		"vue": ">=3.0.0",
@@ -54,9 +53,7 @@
 		"@vitest/coverage-v8": "catalog:",
 		"bumpp": "catalog:",
 		"eslint": "catalog:",
-		"lint-staged": "catalog:",
 		"rimraf": "catalog:",
-		"simple-git-hooks": "catalog:",
 		"tsdown": "catalog:",
 		"tsx": "catalog:",
 		"typescript": "catalog:",
@@ -64,12 +61,6 @@
 		"vitest": "catalog:",
 		"vue": "catalog:",
 		"vue-router": "catalog:"
-	},
-	"simple-git-hooks": {
-		"pre-commit": "pnpm lint-staged"
-	},
-	"lint-staged": {
-		"*": "eslint --fix"
 	},
 	"publishConfig": {
 		"access": "public"
