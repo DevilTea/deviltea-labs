@@ -17,7 +17,7 @@
 import type { DiagnosticCode } from '../domain/diagnostic-codes'
 import type { Diagnostic } from '../domain/diagnostics'
 import type { GitRepository } from '../git/repository'
-import type { ValidationPolicy, ValidationSummary } from './snapshot-validation'
+import type { SnapshotArtifactRecord, ValidationPolicy, ValidationSummary } from './snapshot-validation'
 import { severityOf } from '../domain/diagnostic-codes'
 import { aggregateDiagnostics } from '../domain/diagnostics'
 import { loadSnapshotFromCommit } from './snapshot'
@@ -226,7 +226,44 @@ export async function validateBootstrap(input: ValidateBootstrapInput): Promise<
 	// identical missing-file condition would double-report one defect under
 	// two codes; it has been removed in favor of `EF-FS-009` alone.
 
-	for (const record of validation.byId.values()) {
+	diagnostics.push(...evaluateBootstrapStateRules(validation.byId))
+
+	return {
+		...summarizeValidation({
+			scope: 'bootstrap',
+			diagnostics,
+			complete: true,
+			policy,
+			refs: { proposedOid: resolvedProposedOid, integrationRef, expectedRefOid },
+		}),
+		diagnostics: aggregateDiagnostics(diagnostics),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// evaluateBootstrapStateRules: pure bootstrap-only state-rule core
+// ---------------------------------------------------------------------------
+
+/**
+ * The bootstrap-only state rules (09-validation.md "Bootstrap exception"): no
+ * CHG Artifact and no terminal (superseded or retired) knowledge Artifact may
+ * be present before the first EF state. Pure: it consumes an already-validated
+ * snapshot's `byId` index and returns diagnostics -- no I/O, no ref
+ * resolution, no materialization.
+ *
+ * `validateBootstrap` above is a thin orchestrator that establishes the
+ * bootstrap history condition and then delegates this rule set to this
+ * function. `range-validation.ts` reuses this SAME core at every BOOTSTRAP
+ * boundary its own first-parent walk finds (absent -> present), exactly like
+ * `transition-validation.ts`'s `evaluateTransitionBoundary` is reused by both
+ * `validateTransition` and `query-history.ts`: a range's bootstrap boundary
+ * must enforce the REAL bootstrap-only state rules, not a hand-maintained
+ * duplicate of them.
+ */
+export function evaluateBootstrapStateRules(byId: ReadonlyMap<string, SnapshotArtifactRecord>): Diagnostic[] {
+	const diagnostics: Diagnostic[] = []
+
+	for (const record of byId.values()) {
 		if (record.type === 'change') {
 			diagnostics.push(makeDiagnostic(
 				'EF-VAL-010',
@@ -244,16 +281,7 @@ export async function validateBootstrap(input: ValidateBootstrapInput): Promise<
 		}
 	}
 
-	return {
-		...summarizeValidation({
-			scope: 'bootstrap',
-			diagnostics,
-			complete: true,
-			policy,
-			refs: { proposedOid: resolvedProposedOid, integrationRef, expectedRefOid },
-		}),
-		diagnostics: aggregateDiagnostics(diagnostics),
-	}
+	return diagnostics
 }
 
 // ---------------------------------------------------------------------------

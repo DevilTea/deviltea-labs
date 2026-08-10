@@ -18,13 +18,17 @@
  * discovery finds real `.engineering` content even though that content is not
  * yet authoritative.
  *
- * `integration_ref` for transition/bootstrap scope is read directly from the
- * relevant trusted commit's own materialized configuration (`peekConfigAt`),
- * not from the current working tree's configuration -- the working tree's
- * config may be unrelated (CI need not have `.engineering/ef.yaml` checked
- * out matching the baseline) and 09-validation.md's "operation-start captured
- * ... local-ref state" is defined against the trusted commit's own fixed
- * ref, resolved fresh at the moment validation begins.
+ * `integration_ref` for transition/bootstrap/range scope is read directly
+ * from the relevant trusted commit's own materialized configuration
+ * (`peekConfigAt`), not from the current working tree's configuration -- the
+ * working tree's config may be unrelated (CI need not have
+ * `.engineering/ef.yaml` checked out matching the baseline) and
+ * 09-validation.md's "operation-start captured ... local-ref state" is
+ * defined against the trusted commit's own fixed ref, resolved fresh at the
+ * moment validation begins. For range scope the ref is selected from the
+ * trusted range baseline's configuration when it is EF-bearing, and from the
+ * proposed commit's configuration otherwise (09-validation.md "Ref
+ * selection, capture, and staleness").
  */
 
 import type { OperationStartRefState } from '../../application/bootstrap-validation'
@@ -36,6 +40,7 @@ import type { Config } from '../../repository/config'
 import type { CommandOutcome } from '../command-outcome'
 import type { LoadWorkingTreeContextResult } from '../working-tree-context'
 import { validateBootstrap } from '../../application/bootstrap-validation'
+import { validateRange } from '../../application/range-validation'
 import { summarizeValidation } from '../../application/snapshot-validation'
 import { validateTransition } from '../../application/transition-validation'
 import { severityOf } from '../../domain/diagnostic-codes'
@@ -48,7 +53,7 @@ import { resolveCommitBoundProject, resolveProject } from '../project-context'
 import { loadWorkingTreeContext } from '../working-tree-context'
 import { createWorkspaceDeps } from '../workspace-deps'
 
-export type ValidateScope = 'snapshot' | 'transition' | 'bootstrap'
+export type ValidateScope = 'snapshot' | 'transition' | 'bootstrap' | 'range'
 
 export interface ValidateCommandOptions {
 	scope: ValidateScope
@@ -199,7 +204,7 @@ function workingTreeContextFailureCode(failure: Exclude<LoadWorkingTreeContextRe
 export async function runValidateCommand(options: ValidateCommandOptions, deps: ValidateCommandDeps): Promise<CommandOutcome> {
 	// ---- Scope/option applicability (13-cli-contract.md "Validation Command") ----
 
-	if (options.scope !== 'transition' && options.baseline !== undefined)
+	if (options.scope !== 'transition' && options.scope !== 'range' && options.baseline !== undefined)
 		return earlyFailure(options, 'EF-VAL-001', `'--baseline' is invalid for '${options.scope}' scope.`)
 	if (options.scope === 'transition' && options.baseline === undefined)
 		return earlyFailure(options, 'EF-VAL-002', '\'--baseline\' is required for transition scope.')
@@ -246,10 +251,10 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 		return outcomeFor(options.format, options.noColor, options.workspace, summary, diagnostics)
 	}
 
-	// ---- Transition/bootstrap project resolution (11-filesystem-and-config.md
+	// ---- Transition/bootstrap/range project resolution (11-filesystem-and-config.md
 	// ---- "Project Discovery" commit-bound exception) ------------------------
 	//
-	// Neither scope loads a working-tree snapshot at all: authoritative
+	// None of these scopes loads a working-tree snapshot at all: authoritative
 	// configuration comes from the relevant trusted commit(s) via
 	// `peekConfigAt` below, never from this working tree, so
 	// `loadWorkingTreeContext`'s snapshot-loading/association-recheck
@@ -259,10 +264,10 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	let git: GitRepository
 
 	if (options.project !== undefined) {
-		// Commit-bound transition/bootstrap validation may target a working
-		// tree whose checked-out state does not (yet) contain the candidate
-		// configuration -- e.g. bootstrapping from a pre-EF checkout. An
-		// explicit `--project` only needs to be the exact Git worktree root;
+		// Commit-bound transition/bootstrap/range validation may target a
+		// working tree whose checked-out state does not (yet) contain the
+		// candidate configuration -- e.g. bootstrapping from a pre-EF checkout.
+		// An explicit `--project` only needs to be the exact Git worktree root;
 		// authoritative configuration comes from the supplied commit(s)
 		// below (`peekConfigAt`), never from this working tree.
 		const resolved = await resolveCommitBoundProject({ cwd: deps.cwd, explicitProject: options.project }, deps.executor)
@@ -335,6 +340,112 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 
 		const summary = summarizeValidation({
 			scope: 'transition',
+			diagnostics,
+			complete,
+			policy: policyFrom(options),
+			refs: {
+				baselineOid: result.baselineOid,
+				proposedOid: result.proposedOid,
+				integrationRef: result.integrationRef,
+				expectedRefOid: result.expectedRefOid,
+			},
+		})
+		return outcomeFor(options.format, options.noColor, options.workspace, summary, diagnostics)
+	}
+
+	// ---- range (09-validation.md "Range scope") --------------------------------
+
+	if (options.scope === 'range') {
+		// `--baseline` is optional for range scope: resolve it only when
+		// supplied. A malformed/missing/non-commit value is intentionally left
+		// for `validateRange` itself to report (`EF-VAL-002`) -- this peek is
+		// only used to pick which commit's configuration establishes the
+		// authoritative ref to capture, exactly mirroring the transition
+		// branch's own `operationStartRefOid` derivation above.
+		let resolvedBaselineOid: string | null = null
+		if (options.baseline !== undefined) {
+			const baselineResolved = await git.resolveCommit(options.baseline)
+			if (baselineResolved.kind === 'resolved')
+				resolvedBaselineOid = baselineResolved.oid
+		}
+
+		// Ref selection: the trusted range baseline's configuration first, the
+		// proposed commit's configuration as the fallback -- exactly as
+		// bootstrap scope trusts the proposed configuration
+		// (09-validation.md "Ref selection, capture, and staleness"). Both
+		// `untrusted` and `error` peeks are surfaced as `EF-VAL-006` and are
+		// NEVER folded into `absent`, at either position.
+		let integrationRef: string | undefined
+		if (resolvedBaselineOid !== null) {
+			const baselinePeek = await peekConfigAt(git, resolvedBaselineOid)
+			if (baselinePeek.kind === 'error')
+				return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading the trusted range baseline's configuration: ${baselinePeek.message}`)
+			if (baselinePeek.kind === 'untrusted') {
+				return earlyFailure(options, 'EF-VAL-006', `The trusted range baseline's '.engineering/ef.yaml' is not a regular file (Git mode '${baselinePeek.mode}') and cannot be used to establish operation-start ref state.`)
+			}
+			if (baselinePeek.kind === 'found')
+				integrationRef = baselinePeek.config.repository.integrationRef
+			// `absent`: the trusted range baseline is pre-EF; fall through to
+			// the proposed commit's configuration below.
+		}
+
+		if (integrationRef === undefined) {
+			const proposedResolvedForRef = await git.resolveCommit(options.proposed!)
+			if (proposedResolvedForRef.kind === 'resolved') {
+				const proposedPeek = await peekConfigAt(git, proposedResolvedForRef.oid)
+				if (proposedPeek.kind === 'error')
+					return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading the proposed commit's configuration: ${proposedPeek.message}`)
+				if (proposedPeek.kind === 'untrusted') {
+					return earlyFailure(options, 'EF-VAL-006', `The proposed commit's '.engineering/ef.yaml' is not a regular file (Git mode '${proposedPeek.mode}') and cannot be used to establish operation-start ref state.`)
+				}
+				if (proposedPeek.kind === 'found')
+					integrationRef = proposedPeek.config.repository.integrationRef
+				// `absent`: neither commit yields a config; the range may be
+				// entirely EF-inert, or `--proposed` itself is invalid --
+				// `validateRange` reports whichever applies.
+			}
+			// Unresolved proposed OID: left for `validateRange` to report
+			// (`EF-VAL-011`); no ref can be selected here either way.
+		}
+
+		let operationStartRef: string | undefined
+		let operationStartRefState: OperationStartRefState = { resolved: false }
+		if (integrationRef !== undefined) {
+			operationStartRef = integrationRef
+			operationStartRefState = await resolveRefStateOrUnresolved(git, integrationRef)
+		}
+
+		const result = await validateRange({
+			git,
+			baselineOid: options.baseline ?? null,
+			proposedOid: options.proposed!,
+			operationStartRef,
+			operationStartRefState,
+			policy: policyFrom(options),
+		})
+
+		let diagnostics = result.diagnostics
+		let complete = result.complete
+
+		if (options.workspace && result.proposedOid) {
+			const proposedPeek = await peekConfigAt(git, result.proposedOid)
+			if (proposedPeek.kind === 'error' || proposedPeek.kind === 'untrusted') {
+				const detail = proposedPeek.kind === 'error'
+					? proposedPeek.message
+					: `'.engineering/ef.yaml' is not a regular file (Git mode '${proposedPeek.mode}')`
+				diagnostics = [...diagnostics, { code: 'EF-VAL-006', severity: severityOf('EF-VAL-006'), message: `Git is unavailable while reading the proposed commit's configuration for workspace validation: ${detail}`, related: [] }]
+				complete = false
+			}
+			else {
+				const linked = proposedPeek.kind === 'found' ? proposedPeek.config.linkedRepositories : []
+				const workspaceResult = await applyWorkspaceChecks(root, deps.executor, linked)
+				diagnostics = [...diagnostics, ...workspaceResult.diagnostics]
+				complete = complete && workspaceResult.complete
+			}
+		}
+
+		const summary = summarizeValidation({
+			scope: 'range',
 			diagnostics,
 			complete,
 			policy: policyFrom(options),

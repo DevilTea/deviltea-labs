@@ -27,6 +27,12 @@ function renderDiagnosticLine(diagnostic: JsonDiagnostic, useColor: boolean): st
 	const parts = [color(useColor, severityColor, `[${diagnostic.severity}]`), diagnostic.code, diagnostic.message]
 	if (location)
 		parts.push(`(${location})`)
+	// Range scope's `commit_oid` attributes a finding to one commit of the
+	// validated sequence; a short marker lets a human tell which commit a
+	// range finding belongs to. Presentational only -- not a machine contract
+	// (13-cli-contract.md "Human Output").
+	if (diagnostic.commit_oid)
+		parts.push(`@${diagnostic.commit_oid}`)
 	return parts.join(' ')
 }
 

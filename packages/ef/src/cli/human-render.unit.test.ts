@@ -87,6 +87,32 @@ describe('renderValidationHuman', () => {
 		expect(diagnosticLine)
 			.toBe('[error] EF-VAL-001 No path here.')
 	})
+
+	it('mentions the range scope and shows the commit attribution for a range-scope diagnostic', () => {
+		const rangeResult: ValidationResultJson = {
+			...base,
+			scope: 'range',
+			valid: false,
+			counts: { error: 1, warning: 0, info: 0 },
+			exit_code: 1,
+			diagnostics: [{ code: 'EF-VAL-013', severity: 'error', message: 'Commit removes the authoritative EF state.', commit_oid: 'abc123', related: [] }],
+		}
+		const text = renderValidationHuman(rangeResult, false)
+		expect(text)
+			.toContain('range')
+		expect(text)
+			.toContain('abc123')
+	})
+
+	it('does not append a commit attribution marker when commit_oid is absent', () => {
+		const withoutCommitOid: ValidationResultJson = {
+			...base,
+			diagnostics: [{ code: 'EF-ID-004', severity: 'error', message: 'Artifact ID duplicated.', related: [] }],
+		}
+		const text = renderValidationHuman(withoutCommitOid, false)
+		expect(text)
+			.not.toContain('@')
+	})
 })
 
 describe('renderMutationHuman', () => {

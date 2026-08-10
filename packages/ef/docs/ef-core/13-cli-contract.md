@@ -185,7 +185,7 @@ provided because issued authoritative files are never physically deleted.
 ## Validation Command
 
 ```text
-ef validate [--scope snapshot|transition|bootstrap]
+ef validate [--scope snapshot|transition|bootstrap|range]
 ```
 
 The default scope is `snapshot`.
@@ -200,26 +200,44 @@ Options are:
 --workspace
 ```
 
-`--baseline` is valid only for transition scope and accepts only a full commit
-OID for the project repository's object format. It is required for transition
-scope and invalid for snapshot or bootstrap scope. The validator materializes
-that commit, reads its fixed
-`integration_ref`, verifies that the ref resolved to the same OID when the
-operation began, and rejects a differing proposed `integration_ref`. An
-arbitrary historical revision is not a trusted baseline. Omitting the option in
-transition scope exits `2` without falling back to snapshot validation.
+`--baseline` is valid only for transition and range scope and accepts only a
+full commit OID for the project repository's object format. It is required for
+transition scope, optional for range scope, and invalid for snapshot or
+bootstrap scope. For transition scope the validator materializes that commit,
+reads its fixed `integration_ref`, verifies that the ref resolved to the same
+OID when the operation began, and rejects a differing proposed
+`integration_ref`. An arbitrary historical revision is not a trusted baseline.
+Omitting the option in transition scope exits `2` without falling back to
+snapshot validation.
 
-`--proposed` is required for transition and bootstrap scope and invalid for
-snapshot scope. It accepts only a full commit OID for the project repository's
-object format. The validator materializes exactly that commit; it does not use
-the working tree, index, or `HEAD` as an implicit substitute. In transition
-scope its first parent MUST equal `--baseline`. In bootstrap scope its
-parentage and integration-ref history MUST satisfy [Filesystem and Configuration](11-filesystem-and-config.md). A missing,
-unresolvable, or inapplicable proposed commit makes validation incomplete and
-exits `2`.
+For range scope, `--baseline` names the captured pre-integration tip of the
+authoritative `integration_ref`. It need not contain EF state. Omitting it in
+range scope is an explicit assertion that `integration_ref` was proven
+unresolved when the operation began, such as for a push that creates the
+branch; validation requires that assertion to be true and otherwise exits `2`.
+Core v1 defines no all-zeros OID sentinel for ref absence: a supplied all-zeros
+value resolves to no commit and is an unusable baseline. The validator still
+requires the captured operation-start ref OID to equal `--baseline`, so an
+already-advanced ref is reported as a stale baseline and exits `2`.
+
+`--proposed` is required for transition, bootstrap, and range scope and invalid
+for snapshot scope. It accepts only a full commit OID for the project
+repository's object format. The validator materializes exactly that commit; it
+does not use the working tree, index, or `HEAD` as an implicit substitute. In
+transition scope its first parent MUST equal `--baseline`. In bootstrap scope
+its parentage and integration-ref history MUST satisfy [Filesystem and Configuration](11-filesystem-and-config.md). In
+range scope `--baseline`, when supplied, MUST be a member of its first-parent
+chain, and the validated commit sequence is the first-parent commits after that
+baseline through the proposed commit inclusive. A missing, unresolvable, or
+inapplicable proposed commit makes validation incomplete and exits `2`.
+
+Core v1 defines no `--before` or `--after` option and no alias for `--baseline`
+or `--proposed`. Range endpoints use exactly these two existing options.
 
 `--workspace` adds [Filesystem and Configuration](11-filesystem-and-config.md) workspace checks to the requested core validation
-scope. It does not redefine snapshot, transition, bootstrap, or strict mode.
+scope. It does not redefine snapshot, transition, bootstrap, range, or strict
+mode. For transition and range scope it uses the `--proposed` commit's
+configuration.
 
 The command validates the complete requested state. It does not provide a
 changed-files-only mode or silently fall back from transition to snapshot.
@@ -252,21 +270,36 @@ Machine-readable validation produces exactly:
 }
 ```
 
-All keys are required. `scope` is `snapshot`, `transition`, or `bootstrap`.
+All keys are required. `scope` is `snapshot`, `transition`, `bootstrap`, or
+`range`.
 `baseline_oid` contains the supplied full OID when it passed lexical validation;
 it is null when no usable OID was supplied and for snapshot or bootstrap. A
-complete transition requires a non-null value. Diagnostic objects follow [Validation and Integrity](09-validation.md). `proposed_oid` contains the supplied full proposed OID when it passed lexical
+complete transition requires a non-null value. On a complete range result, null
+means the caller supplied no baseline OID and validation proved the ref was
+unresolved at operation start. Diagnostic objects follow [Validation and Integrity](09-validation.md). `proposed_oid` contains the supplied full proposed OID when it passed lexical
 validation; it is null for snapshot or when no usable OID was supplied.
-Complete transition and bootstrap results require it to be non-null.
+Complete transition, bootstrap, and range results require it to be non-null.
 `integration_ref` contains the applicable authoritative full local branch ref,
-or null when no valid applicable configuration could be loaded.
+or null when no valid applicable configuration could be loaded; for a complete
+range result that evaluated no EF state boundary it is null.
 `expected_ref_oid` contains the operation-start OID captured from that ref for
-transition or bootstrap, and is null for an unresolved bootstrap ref or for
-snapshot scope. A complete transition requires
-`expected_ref_oid == baseline_oid`. On an incomplete result, null may instead
-mean that ref state could not be established; `complete` disambiguates it.
+transition, bootstrap, or range, and is null for an unresolved bootstrap or
+range ref or for snapshot scope. A complete transition requires
+`expected_ref_oid == baseline_oid`, and a complete range requires the same
+equality with both values possibly null. On an incomplete result, null may
+instead mean that ref state could not be established; `complete` disambiguates
+it.
 `exit_code` exactly matches process exit status. Strict mode implies
 warnings-as-errors but both booleans remain explicit.
+
+The envelope schema is not versioned up for range scope. `scope` gains the value
+`range`, which a consumer can observe only in response to its own
+`--scope range` invocation, and no top-level key is added or removed. Diagnostic
+objects MAY carry the optional `commit_oid` key defined by [Validation and Integrity](09-validation.md); it appears
+only in range scope and is omitted rather than null otherwise. The validated
+commit sequence is intentionally not exposed as an envelope key: a consumer
+derives it with `git rev-list --first-parent <baseline>..<proposed>` or from the
+`commit_oid` values on the returned diagnostics.
 
 ## Query Commands
 
@@ -662,7 +695,24 @@ trusted valid baseline
 Intermediate feature-branch or working-tree states may be incomplete. No
 incomplete state may enter authoritative integration history. One validation
 from a baseline to a final tree does not validate intermediate commits in a
-multi-commit fast-forward.
+multi-commit fast-forward; range scope is the Core primitive that validates
+them, evaluating every authoritative boundary in the candidate's first-parent
+sequence.
+
+A validated range is published by exactly one atomic conditional ref update
+whose expected old value is the validated `baseline_oid`, or ref absence when no
+baseline OID was supplied, and whose new value is the validated `proposed_oid`:
+
+```text
+trusted range baseline (or proven ref absence)
+  -> explicit proposed commit and the first-parent commits after the baseline
+  -> range validation of every boundary in that sequence
+  -> one atomic conditional publication from the baseline to that commit
+```
+
+Per-commit ref updates are neither required nor permitted, and no conforming
+consumer is ever required to mutate a ref to emulate the operation-start ref
+state of an intermediate commit.
 
 The proposed commit is created or made available without updating the
 authoritative `integration_ref`; creating it on a feature/candidate ref is not
@@ -724,6 +774,23 @@ ef validate \
   --format json \
   --no-input
 ```
+
+When the candidate may add more than one new first-parent commit, CI SHOULD
+instead run:
+
+```text
+ef validate \
+  --scope range \
+  --baseline <full-commit-oid> \
+  --proposed <full-commit-oid> \
+  --strict \
+  --format json \
+  --no-input
+```
+
+`--baseline` is the pinned pre-integration tip of the target branch and is
+omitted for a push that creates the branch, where that ref was proven unresolved
+at operation start.
 
 CI validation is read-only, deterministic, network-free, and independent of
 TTY state. It validates the complete proposed commit tree, does not require caches,

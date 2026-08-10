@@ -137,6 +137,8 @@ export const DIAGNOSTIC_CODES = {
 	'EF-VAL-010': 'error',
 	'EF-VAL-011': 'error',
 	'EF-VAL-012': 'error',
+	'EF-VAL-013': 'error',
+	'EF-VAL-014': 'info',
 } as const satisfies Record<string, Severity>
 
 export type DiagnosticCode = keyof typeof DIAGNOSTIC_CODES

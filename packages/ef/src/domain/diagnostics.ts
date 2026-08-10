@@ -33,6 +33,16 @@ export interface Diagnostic {
 	location?: SourceLocation
 	field?: string
 	section?: string
+	/**
+	 * Full commit OID attributing this finding to one commit of a validated
+	 * range (09-validation.md "Range scope", "Diagnostic object"). Present only
+	 * in range scope, and only for a finding evaluated at one commit's EF state
+	 * or at one commit's incoming boundary -- a boundary finding attaches to
+	 * that boundary's later (AFTER) commit. A range-level finding that belongs
+	 * to no single commit (ancestry, captured-ref-state, shallow-history, or
+	 * EF-inert-range) omits it, as does every other scope.
+	 */
+	commitOid?: string
 	related: RelatedLocation[]
 }
 
@@ -59,8 +69,11 @@ function compareLocationFields(a: { path?: string, artifactId?: string, location
 }
 
 /**
- * Sort diagnostics by severity, path, line, column, code, then field/section.
- * Parallel execution must not affect this final order.
+ * Sort diagnostics by severity, path, line, column, code, field/section, then
+ * (range scope only) `commitOid` as a final, purely deterministic tiebreaker
+ * (09-validation.md "Deterministic ordering": "`commitOid` is the final
+ * tiebreaker rather than a grouping key, so no output that omits it is
+ * reordered."). Parallel execution must not affect this final order.
  */
 export function sortDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
 	return [...diagnostics].sort((a, b) =>
@@ -70,7 +83,8 @@ export function sortDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[
 		|| compareOptional(a.location?.column, b.location?.column, (x, y) => x - y)
 		|| compareBytewise(a.code, b.code)
 		|| compareOptional(a.field, b.field, compareBytewise)
-		|| compareOptional(a.section, b.section, compareBytewise))
+		|| compareOptional(a.section, b.section, compareBytewise)
+		|| compareOptional(a.commitOid, b.commitOid, compareBytewise))
 }
 
 /** Sort related locations by path, line, column, artifact ID, field, section. */
@@ -83,14 +97,20 @@ function locationIdentity(l: { path?: string, artifactId?: string, location?: So
 }
 
 /**
- * Deduplicate by code plus complete structured primary and related locations,
- * excluding human message text (09-validation).
+ * Deduplicate by code, `commitOid`, and complete structured primary and
+ * related locations, excluding human message text (09-validation.md
+ * "Diagnostic Contract": "`commit_oid` participates in that identity because
+ * two genuinely distinct defects evaluated at two different boundaries of one
+ * validated range can share a code and a path; without commit attribution
+ * they would silently collapse into one finding."). Outside range scope every
+ * diagnostic's `commitOid` is `undefined`, so this identity is unchanged from
+ * before that field existed.
  */
 export function dedupeDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
 	const seen = new Set<string>()
 	const out: Diagnostic[] = []
 	for (const d of diagnostics) {
-		const identity = JSON.stringify([d.code, locationIdentity(d), sortRelated(d.related)
+		const identity = JSON.stringify([d.code, d.commitOid ?? null, locationIdentity(d), sortRelated(d.related)
 			.map(locationIdentity)])
 		if (seen.has(identity))
 			continue

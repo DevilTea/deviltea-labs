@@ -24,6 +24,8 @@ function wrapGitRepository(real: GitRepository, overrides: Partial<GitRepository
 		listFirstParentHistory: (...args) => real.listFirstParentHistory(...args),
 		pathExistsInFirstParentHistory: (...args) => real.pathExistsInFirstParentHistory(...args),
 		diffTrees: (...args) => real.diffTrees(...args),
+		listFirstParentRange: (...args) => real.listFirstParentRange(...args),
+		readPathEntry: (...args) => real.readPathEntry(...args),
 		...overrides,
 	}
 }

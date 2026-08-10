@@ -342,11 +342,13 @@ resolution are review activities, not canonical EF entities.
 
 ## Validation
 
-EF has two core validation scopes:
+EF has three core validation scopes:
 
 - `snapshot` validates one complete current project state;
 - `transition` compares a trusted valid baseline commit with one explicit
-  proposed commit.
+  proposed commit;
+- `range` validates every authoritative boundary between a captured
+  pre-integration ref tip and one explicit proposed commit.
 
 Bootstrap validation handles creation of the initial EF project state.
 Workspace validation is an additive check for declared linked repositories.
@@ -358,6 +360,14 @@ exactly-once coverage. Transition validation requires an externally supplied
 full baseline commit OID and full proposed commit OID. The baseline's
 configuration identifies the fixed local integration branch, and publication
 uses an atomic compare-and-swap from the baseline to that proposed commit.
+
+Range validation extends that requirement to a candidate that adds more than one
+new first-parent commit. Every adjacent authoritative boundary in the
+candidate's first-parent sequence is independently validated, a commit that does
+not change `.engineering` is an identity boundary rather than a skipped commit,
+and publication of the validated range is still one atomic compare-and-swap,
+from the range baseline to the range tip. No ref is mutated per intermediate
+commit.
 
 Bootstrap is the sole no-baseline exception. It is valid only when the proposed
 integration branch's existing first-parent history contains no
@@ -435,9 +445,9 @@ engineering atomicity is enforced at Git transition integration.
 6. Prepare a draft CHG for changes to active truth.
 7. Edit every affected Artifact and selected Resource in one proposed tree.
 8. Complete CHG rationale, sources, effects, changes, and verification.
-9. Create the single proposed integration commit without updating the authoritative integration ref.
-10. Run strict transition validation with explicit full baseline and proposed commit OIDs.
-11. Atomically publish the validated commit to the integration ref.
+9. Create the proposed commit or commit sequence without updating the authoritative integration ref.
+10. Run strict transition or range validation with explicit full baseline and proposed commit OIDs.
+11. Atomically publish the validated commit or validated range tip to the integration ref.
 12. Query current truth, impact, trace, and history from authoritative files.
 ```
 

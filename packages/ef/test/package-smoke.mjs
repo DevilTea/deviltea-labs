@@ -279,6 +279,15 @@ function main() {
 		runSetup(git, ['config', 'user.email', 'ef-smoke@example.com'], { cwd: projectDirectory })
 		runSetup(git, ['config', 'user.name', 'EF Smoke Test'], { cwd: projectDirectory })
 
+		// A pre-EF commit on `main` (the configured `integration_ref`), kept as
+		// the trusted range baseline below. The bootstrap and follow-up EF
+		// commits are made on a separate branch so `main` stays at this OID --
+		// exactly the real-world shape range scope validates: a multi-commit
+		// push landing before its integration ref is fast-forwarded to it.
+		runSetup(git, ['commit', '--allow-empty', '-m', 'pre-EF baseline'], { cwd: projectDirectory })
+		const preEfOid = runSetup(git, ['rev-parse', 'HEAD'], { cwd: projectDirectory }).stdout.trim()
+		runSetup(git, ['checkout', '-b', 'incoming'], { cwd: projectDirectory })
+
 		// ---- (c) ef init --------------------------------------------------------
 
 		{
@@ -310,6 +319,11 @@ function main() {
 			assert('init: .engineering/ef.yaml exists', existsSync(join(projectDirectory, '.engineering', 'ef.yaml')), describeCliResult(result))
 		}
 
+		// The bootstrap commit: the first commit whose `.engineering` tree entry
+		// is present, used below as one endpoint of the validated range.
+		runSetup(git, ['add', '-A'], { cwd: projectDirectory })
+		runSetup(git, ['commit', '-m', 'bootstrap EF state'], { cwd: projectDirectory })
+
 		// ---- (d) ef artifact create req ------------------------------------------
 
 		{
@@ -333,6 +347,13 @@ function main() {
 			assert('artifact create req: .engineering/req/REQ-001.md exists', existsSync(join(projectDirectory, '.engineering', 'req', 'REQ-001.md')), describeCliResult(result))
 		}
 
+		// The second EF-bearing commit: a transition boundary (REQ-001 added)
+		// after the bootstrap boundary, giving the range below two real
+		// first-parent boundaries to walk over actual Git objects.
+		runSetup(git, ['add', '-A'], { cwd: projectDirectory })
+		runSetup(git, ['commit', '-m', 'add REQ-001'], { cwd: projectDirectory })
+		const secondEfOid = runSetup(git, ['rev-parse', 'HEAD'], { cwd: projectDirectory }).stdout.trim()
+
 		// ---- (e) ef validate --scope snapshot ------------------------------------
 
 		{
@@ -342,6 +363,38 @@ function main() {
 			assertEqual('validate snapshot: exit code', result.status, 0, describeCliResult(result))
 			assert('validate snapshot: parses as JSON', parsed !== undefined, describeCliResult(result))
 			assertEqual('validate snapshot: valid', parsed?.valid, true, describeCliResult(result))
+		}
+
+		// ---- (e2) ef validate --scope range --------------------------------------
+		//
+		// Real Git objects over a real multi-commit first-parent range (a
+		// BOOTSTRAP boundary followed by an ordinary TRANSITION boundary),
+		// validated in one call from the pre-EF baseline through the tip -- the
+		// case a fake Git executor in the unit tests cannot exercise.
+
+		{
+			const result = runCli([
+				'validate',
+				'--scope',
+				'range',
+				'--baseline',
+				preEfOid,
+				'--proposed',
+				secondEfOid,
+				'--format',
+				'json',
+			], { cwd: projectDirectory })
+			const parsed = parseJsonOrUndefined(result.stdout)
+
+			assertEqual('validate range: exit code', result.status, 0, describeCliResult(result))
+			assert('validate range: parses as JSON', parsed !== undefined, describeCliResult(result))
+			assertEqual('validate range: scope', parsed?.scope, 'range', describeCliResult(result))
+			assertEqual('validate range: complete', parsed?.complete, true, describeCliResult(result))
+			assertEqual('validate range: valid', parsed?.valid, true, describeCliResult(result))
+			assertEqual('validate range: baseline_oid', parsed?.baseline_oid, preEfOid, describeCliResult(result))
+			assertEqual('validate range: proposed_oid', parsed?.proposed_oid, secondEfOid, describeCliResult(result))
+			assertEqual('validate range: integration_ref', parsed?.integration_ref, 'refs/heads/main', describeCliResult(result))
+			assertEqual('validate range: expected_ref_oid', parsed?.expected_ref_oid, preEfOid, describeCliResult(result))
 		}
 
 		// ---- (f) ef resource read failure (byte-level) ---------------------------

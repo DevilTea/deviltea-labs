@@ -387,6 +387,58 @@ export type PathHistoryResult
 		| GitUnavailable
 
 // ---------------------------------------------------------------------------
+// listFirstParentRange
+// ---------------------------------------------------------------------------
+
+export type FirstParentRangeResult
+	= | {
+		kind: 'resolved'
+		/** Oldest-first, exclusive of `beforeOid`, inclusive of `afterOid`; empty when `beforeOid === afterOid`. */
+		oids: readonly string[]
+	}
+		/**
+		 * `beforeOid` was proven NOT a member of `afterOid`'s repeated-first-parent
+		 * chain: `afterOid`'s first-parent walk reached a true root commit
+		 * without ever visiting `beforeOid`. Also reported when `afterOid` is
+		 * itself an ancestor of `beforeOid` (a rewind) or when the two commits
+		 * have entirely unrelated first-parent histories -- both walk to a true
+		 * root without finding the other.
+		 */
+	| { kind: 'not-an-ancestor' }
+		/**
+		 * The walk could not be carried far enough to decide membership: a
+		 * shallow boundary (or an unreadable object) was reached before either
+		 * finding `beforeOid` or reaching a true root. Distinct from
+		 * `not-an-ancestor` -- non-membership MUST NOT be concluded from history
+		 * that was never actually read (09-validation.md "Range scope":
+		 * "Non-membership MUST NOT be concluded from history the validator could
+		 * not read").
+		 */
+	| { kind: 'truncated' }
+		/** `rev-list` could not resolve `afterOid` at all, or a required follow-up read failed unexpectedly. */
+	| { kind: 'unresolved' }
+	| GitUnavailable
+
+// ---------------------------------------------------------------------------
+// readPathEntry
+// ---------------------------------------------------------------------------
+
+export type PathEntryResult
+	= | { kind: 'resolved', entry: GitTreeEntry }
+		| { kind: 'absent' }
+		/** `cat-file -t` proved `commitOid` does not exist. */
+		| { kind: 'missing' }
+		/**
+		 * `cat-file -t` already proved `commitOid` exists; the follow-up
+		 * `ls-tree` then ran but exited unexpectedly. This is an execution/read
+		 * error on an object already known to exist, never proof the path is
+		 * absent -- a caller MUST treat this as incomplete, never fold it into
+		 * `absent`.
+		 */
+		| { kind: 'error', message: string }
+		| GitUnavailable
+
+// ---------------------------------------------------------------------------
 // diffTrees
 // ---------------------------------------------------------------------------
 
@@ -498,6 +550,15 @@ export interface GitRepository {
 	listFirstParentHistory: (commitish: string) => Promise<HistoryResult>
 	pathExistsInFirstParentHistory: (startOid: string, path: string) => Promise<PathHistoryResult>
 	diffTrees: (beforeOid: string, afterOid: string) => Promise<DiffTreesResult>
+	/**
+	 * Determine the first-parent commit sequence strictly after `beforeOid`
+	 * through `afterOid` inclusive (09-validation.md "Range scope": "Validated
+	 * commit sequence"). `beforeOid` and `afterOid` MUST already be
+	 * repository-normalized (lowercase) full OIDs, e.g. from `resolveCommit`.
+	 */
+	listFirstParentRange: (beforeOid: string | null, afterOid: string) => Promise<FirstParentRangeResult>
+	/** Read exactly the tree entry at `path` in `commitOid`'s tree, non-recursively (09-validation.md "EF state identity"). */
+	readPathEntry: (commitOid: string, path: string) => Promise<PathEntryResult>
 }
 
 class GitRepositoryImpl implements GitRepository {
@@ -830,6 +891,95 @@ class GitRepositoryImpl implements GitRepository {
 		if (outcome.result.exitCode !== 0)
 			return { kind: 'invalid-object' }
 		return { kind: 'resolved', entries: parseNameStatusZ(outcome.result.stdout) }
+	}
+
+	/**
+	 * A single `rev-list --first-parent <afterOid>` (newest-first) read,
+	 * scanned for `beforeOid`, rather than the `<before>..<after>` revision-range
+	 * form: that exclusion syntax interacts with `--first-parent` in a way that
+	 * can silently drop commits reachable from `beforeOid` only through a
+	 * non-first parent, which would shorten the validated sequence without any
+	 * observable failure. This also deliberately does not reuse
+	 * {@link listFirstParentHistory}, which discards its walked OIDs entirely
+	 * once it detects a shallow boundary -- that would report `truncated` for
+	 * every range in a shallow CI clone whose validated sequence is completely
+	 * present, defeating the primary use case (a shallow `fetch-depth`-limited
+	 * checkout validating an ordinary, shallow-fetch-sized push).
+	 *
+	 * When `beforeOid` is not found in the walked chain (or is `null`, meaning
+	 * the caller asserts the chain must reach a true root), the oldest visible
+	 * commit is re-inspected with `cat-file -p`exactly like
+	 * {@link listFirstParentHistory}'s own shallow-boundary check: a `parent`
+	 * header proves a hidden ancestor beyond the walk (`truncated`); its
+	 * absence proves the chain legitimately ended at a true root
+	 * (`not-an-ancestor`, or a `resolved` full chain when `beforeOid` is
+	 * `null`).
+	 */
+	async listFirstParentRange(beforeOid: string | null, afterOid: string): Promise<FirstParentRangeResult> {
+		const outcome = await this.executor.execIn(this.root, ['rev-list', '--first-parent', afterOid])
+		if (!outcome.ok)
+			return toGitUnavailable(outcome.failure)
+		if (outcome.result.exitCode !== 0)
+			return { kind: 'unresolved' }
+		const oids = outcome.result.stdout.toString('utf8')
+			.split('\n')
+			.map(s => s.trim())
+			.filter(s => s.length > 0)
+
+		if (beforeOid !== null) {
+			const index = oids.indexOf(beforeOid)
+			if (index !== -1) {
+				return { kind: 'resolved', oids: oids.slice(0, index)
+					.reverse() }
+			}
+		}
+
+		const oldestVisibleOid = oids[oids.length - 1]
+		if (oldestVisibleOid === undefined) {
+			// `rev-list` succeeded but produced no commits at all -- should not
+			// happen for a real, already-resolved commit, but nothing was walked
+			// to re-inspect for a hidden boundary either way.
+			return beforeOid === null ? { kind: 'resolved', oids: [] } : { kind: 'not-an-ancestor' }
+		}
+
+		const boundaryOutcome = await this.executor.execIn(this.root, ['cat-file', '-p', oldestVisibleOid])
+		if (!boundaryOutcome.ok)
+			return toGitUnavailable(boundaryOutcome.failure)
+		if (boundaryOutcome.result.exitCode !== 0) {
+			// `oldestVisibleOid` was just produced by a successful `rev-list`
+			// walk, so it names a real, existing commit; `cat-file` failing on it
+			// now is an unexpected execution/read error, not proof of a shallow
+			// boundary or a true root.
+			return { kind: 'unresolved' }
+		}
+		const text = boundaryOutcome.result.stdout.toString('utf8')
+		const headerEnd = text.indexOf('\n\n')
+		const header = headerEnd === -1 ? text : text.slice(0, headerEnd)
+		const hasHiddenParent = header.split('\n')
+			.some(line => line.startsWith('parent '))
+
+		if (hasHiddenParent)
+			return { kind: 'truncated' }
+		return beforeOid === null ? { kind: 'resolved', oids: [...oids].reverse() } : { kind: 'not-an-ancestor' }
+	}
+
+	async readPathEntry(commitOid: string, path: string): Promise<PathEntryResult> {
+		// `missing` is established ONLY by this existence probe, mirroring
+		// `readTree`'s own convention.
+		const typeOutcome = await this.executor.execIn(this.root, ['cat-file', '-t', commitOid])
+		if (!typeOutcome.ok)
+			return toGitUnavailable(typeOutcome.failure)
+		if (typeOutcome.result.exitCode !== 0)
+			return { kind: 'missing' }
+
+		const outcome = await this.executor.execIn(this.root, ['ls-tree', '-z', commitOid, '--', path])
+		if (!outcome.ok)
+			return toGitUnavailable(outcome.failure)
+		if (outcome.result.exitCode !== 0) {
+			return { kind: 'error', message: `git ls-tree failed for '${commitOid}' path '${path}' after cat-file -t proved the commit exists (exit status ${outcome.result.exitCode ?? 'null'}).` }
+		}
+		const entry = parseLsTreeZ(outcome.result.stdout)[0]
+		return entry ? { kind: 'resolved', entry } : { kind: 'absent' }
 	}
 }
 

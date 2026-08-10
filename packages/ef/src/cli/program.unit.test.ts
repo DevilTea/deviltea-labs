@@ -443,6 +443,38 @@ Text.
 			.toBe(0)
 	})
 
+	it('ef help validate mentions the range scope', async () => {
+		const outcome = await runCli(['help', 'validate'], { cwd: root }, ctx())
+		expect(outcome.stdout)
+			.toContain('range')
+	})
+
+	it('accepts --scope range and dispatches past Commander (fails later on a missing --proposed, inside the envelope)', async () => {
+		const outcome = await runCli(['validate', '--scope', 'range', '--format', 'json'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(2)
+		// A pre-envelope Commander failure produces empty stdout; dispatching
+		// into the command handler instead produces the JSON envelope.
+		expect(outcome.stdout.length)
+			.toBeGreaterThan(0)
+		expect(JSON.parse(outcome.stdout as string).schema)
+			.toBe('ef/validation-result@1')
+	})
+
+	it('rejects unknown --before/--after options for range scope: empty stdout, exit 2', async () => {
+		const before = await runCli(['validate', '--scope', 'range', '--before', 'a'.repeat(40)], { cwd: root }, ctx())
+		expect(before.exitCode)
+			.toBe(2)
+		expect(before.stdout)
+			.toBe('')
+
+		const after = await runCli(['validate', '--scope', 'range', '--after', 'a'.repeat(40)], { cwd: root }, ctx())
+		expect(after.exitCode)
+			.toBe(2)
+		expect(after.stdout)
+			.toBe('')
+	})
+
 	it('ef version --format human prints the version for people, exit 0', async () => {
 		const outcome = await runCli(['version'], { cwd: root }, ctx())
 		expect(outcome.exitCode)

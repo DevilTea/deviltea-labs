@@ -24,7 +24,7 @@ import { diagnosticsToJson } from './diagnostics-json'
 export interface ValidationResultJson {
 	schema: 'ef/validation-result@1'
 	kind: 'validation'
-	scope: 'snapshot' | 'transition' | 'bootstrap'
+	scope: 'snapshot' | 'transition' | 'bootstrap' | 'range'
 	baseline_oid: string | null
 	proposed_oid: string | null
 	integration_ref: string | null

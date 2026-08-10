@@ -1018,6 +1018,302 @@ describe('gitRepository', () => {
 	})
 
 	// -------------------------------------------------------------------------
+	// listFirstParentRange
+	// -------------------------------------------------------------------------
+
+	describe('listFirstParentRange', () => {
+		it('returns the oldest-first sequence strictly after before through after inclusive', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			const c1 = commitAll(dir, 'c1')
+			writeTrackedFile(dir, 'b.txt', 'b\n')
+			const c2 = commitAll(dir, 'c2')
+			writeTrackedFile(dir, 'c.txt', 'c\n')
+			const c3 = commitAll(dir, 'c3')
+
+			const result = await repo(dir)
+				.listFirstParentRange(c1, c3)
+			expect(result)
+				.toEqual({ kind: 'resolved', oids: [c2, c3] })
+		})
+
+		it('returns an empty sequence when before equals after', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			const c1 = commitAll(dir, 'c1')
+
+			const result = await repo(dir)
+				.listFirstParentRange(c1, c1)
+			expect(result)
+				.toEqual({ kind: 'resolved', oids: [] })
+		})
+
+		it('reaches a true root and returns the complete chain when before is null', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			const c1 = commitAll(dir, 'c1')
+			writeTrackedFile(dir, 'b.txt', 'b\n')
+			const c2 = commitAll(dir, 'c2')
+
+			const result = await repo(dir)
+				.listFirstParentRange(null, c2)
+			expect(result)
+				.toEqual({ kind: 'resolved', oids: [c1, c2] })
+		})
+
+		it('includes a merge commit on the first-parent chain but excludes commits reachable only through its non-first parent', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			const main1 = commitAll(dir, 'main1')
+			git(dir, ['checkout', '-q', '-b', 'feature'])
+			writeTrackedFile(dir, 'feature.txt', 'feature\n')
+			const feature1 = commitAll(dir, 'feature1')
+			git(dir, ['checkout', '-q', 'main'])
+			git(dir, ['merge', '-q', '--no-ff', '-m', 'merge feature', 'feature'])
+			const mergeOid = git(dir, ['rev-parse', 'HEAD'])
+				.trim()
+			writeTrackedFile(dir, 'c.txt', 'c\n')
+			const main2 = commitAll(dir, 'main2')
+
+			const result = await repo(dir)
+				.listFirstParentRange(main1, main2)
+			expect(result)
+				.toEqual({ kind: 'resolved', oids: [mergeOid, main2] })
+			expect(result.kind === 'resolved' && result.oids.includes(feature1))
+				.toBe(false)
+		})
+
+		it('reports not-an-ancestor when before is reachable only through a non-first parent', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			commitAll(dir, 'main1')
+			git(dir, ['checkout', '-q', '-b', 'feature'])
+			writeTrackedFile(dir, 'feature.txt', 'feature\n')
+			const feature1 = commitAll(dir, 'feature1')
+			git(dir, ['checkout', '-q', 'main'])
+			git(dir, ['merge', '-q', '--no-ff', '-m', 'merge feature', 'feature'])
+			const head = git(dir, ['rev-parse', 'HEAD'])
+				.trim()
+
+			const result = await repo(dir)
+				.listFirstParentRange(feature1, head)
+			expect(result)
+				.toEqual({ kind: 'not-an-ancestor' })
+		})
+
+		it('reports not-an-ancestor for a rewind (after is an ancestor of before)', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			const c1 = commitAll(dir, 'c1')
+			writeTrackedFile(dir, 'b.txt', 'b\n')
+			const c2 = commitAll(dir, 'c2')
+
+			const result = await repo(dir)
+				.listFirstParentRange(c2, c1)
+			expect(result)
+				.toEqual({ kind: 'not-an-ancestor' })
+		})
+
+		it('reports not-an-ancestor for two unrelated root histories', async () => {
+			const dirA = initRepo()
+			writeTrackedFile(dirA, 'a.txt', 'a\n')
+			const a1 = commitAll(dirA, 'a1')
+
+			const dirB = initRepo()
+			writeTrackedFile(dirB, 'b.txt', 'b\n')
+			const b1 = commitAll(dirB, 'b1')
+
+			const result = await repo(dirA)
+				.listFirstParentRange(b1, a1)
+			expect(result)
+				.toEqual({ kind: 'not-an-ancestor' })
+		})
+
+		it('reports truncated when before lies beyond a shallow clone boundary', async () => {
+			const source = initRepo()
+			writeTrackedFile(source, 'a.txt', 'a\n')
+			const before = commitAll(source, 'first')
+			writeTrackedFile(source, 'b.txt', 'b\n')
+			commitAll(source, 'second')
+			writeTrackedFile(source, 'c.txt', 'c\n')
+			const after = commitAll(source, 'third')
+
+			const shallowDir = mkdtempSync(join(tmpdir(), 'ef-git-range-shallow-'))
+			rmSync(shallowDir, { recursive: true, force: true })
+			execFileSync('git', ['clone', '-q', '--depth', '1', `file://${source}`, shallowDir], { stdio: 'pipe' })
+			disableBackgroundMaintenance(shallowDir)
+			tempDirs.push(shallowDir)
+
+			const result = await repo(shallowDir)
+				.listFirstParentRange(before, after)
+			expect(result)
+				.toEqual({ kind: 'truncated' })
+		})
+
+		it('validates normally in a shallow clone whose entire range is visible', async () => {
+			const source = initRepo()
+			writeTrackedFile(source, 'a.txt', 'a\n')
+			commitAll(source, 'first')
+			writeTrackedFile(source, 'b.txt', 'b\n')
+			const before = commitAll(source, 'second')
+			writeTrackedFile(source, 'c.txt', 'c\n')
+			const after = commitAll(source, 'third')
+
+			const shallowDir = mkdtempSync(join(tmpdir(), 'ef-git-range-shallow-visible-'))
+			rmSync(shallowDir, { recursive: true, force: true })
+			execFileSync('git', ['clone', '-q', '--depth', '2', `file://${source}`, shallowDir], { stdio: 'pipe' })
+			disableBackgroundMaintenance(shallowDir)
+			tempDirs.push(shallowDir)
+
+			const result = await repo(shallowDir)
+				.listFirstParentRange(before, after)
+			expect(result)
+				.toEqual({ kind: 'resolved', oids: [after] })
+		})
+
+		it('reports truncated when before is null and a shallow boundary is reached before a true root', async () => {
+			const source = initRepo()
+			writeTrackedFile(source, 'a.txt', 'a\n')
+			commitAll(source, 'first')
+			writeTrackedFile(source, 'b.txt', 'b\n')
+			const after = commitAll(source, 'second')
+
+			const shallowDir = mkdtempSync(join(tmpdir(), 'ef-git-range-shallow-null-'))
+			rmSync(shallowDir, { recursive: true, force: true })
+			execFileSync('git', ['clone', '-q', '--depth', '1', `file://${source}`, shallowDir], { stdio: 'pipe' })
+			disableBackgroundMaintenance(shallowDir)
+			tempDirs.push(shallowDir)
+
+			const result = await repo(shallowDir)
+				.listFirstParentRange(null, after)
+			expect(result)
+				.toEqual({ kind: 'truncated' })
+		})
+
+		it('reports unresolved when after does not resolve', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			commitAll(dir, 'first')
+			const result = await repo(dir)
+				.listFirstParentRange(null, 'refs/heads/does-not-exist')
+			expect(result)
+				.toEqual({ kind: 'unresolved' })
+		})
+
+		it('propagates git-unavailable from the rev-list call', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([unavailableOutcome('no git')]))
+				.listFirstParentRange(null, 'a'.repeat(40))
+			expect(result)
+				.toEqual({ kind: 'git-unavailable', message: 'no git' })
+		})
+
+		it('propagates git-unavailable from the boundary cat-file re-inspection', async () => {
+			const after = 'a'.repeat(40)
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome(after), abortedOutcome()]))
+				.listFirstParentRange(null, after)
+			expect(result)
+				.toEqual({ kind: 'git-unavailable', message: 'git command was aborted' })
+		})
+
+		it('reports unresolved when the boundary cat-file re-inspection fails after a successful walk', async () => {
+			const after = 'a'.repeat(40)
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome(after), okOutcome('', 128)]))
+				.listFirstParentRange(null, after)
+			expect(result)
+				.toEqual({ kind: 'unresolved' })
+		})
+	})
+
+	// -------------------------------------------------------------------------
+	// readPathEntry
+	// -------------------------------------------------------------------------
+
+	describe('readPathEntry', () => {
+		it('resolves the .engineering directory entry', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, '.engineering/ef.yaml', 'schema: ef/config@1\n')
+			writeTrackedFile(dir, 'other.txt', 'x\n')
+			const head = commitAll(dir, 'bootstrap')
+
+			const result = await repo(dir)
+				.readPathEntry(head, '.engineering')
+			expect(result.kind)
+				.toBe('resolved')
+			if (result.kind !== 'resolved')
+				return
+			expect(result.entry.type)
+				.toBe('tree')
+			expect(result.entry.path)
+				.toBe('.engineering')
+		})
+
+		it('reports the identical triple (mode, type, oid) for two commits that do not touch .engineering', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, '.engineering/ef.yaml', 'schema: ef/config@1\n')
+			const c1 = commitAll(dir, 'bootstrap')
+			writeTrackedFile(dir, 'unrelated.txt', 'x\n')
+			const c2 = commitAll(dir, 'unrelated change')
+
+			const repository = repo(dir)
+			const first = await repository.readPathEntry(c1, '.engineering')
+			const second = await repository.readPathEntry(c2, '.engineering')
+			expect(first.kind)
+				.toBe('resolved')
+			expect(second.kind)
+				.toBe('resolved')
+			if (first.kind !== 'resolved' || second.kind !== 'resolved')
+				return
+			expect(second.entry)
+				.toEqual(first.entry)
+		})
+
+		it('reports absent when the path does not exist in the commit tree', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			const head = commitAll(dir, 'first')
+
+			const result = await repo(dir)
+				.readPathEntry(head, '.engineering')
+			expect(result)
+				.toEqual({ kind: 'absent' })
+		})
+
+		it('reports missing for a commit that does not exist', async () => {
+			const dir = initRepo()
+			writeTrackedFile(dir, 'a.txt', 'a\n')
+			commitAll(dir, 'first')
+
+			const result = await repo(dir)
+				.readPathEntry('a'.repeat(40), '.engineering')
+			expect(result)
+				.toEqual({ kind: 'missing' })
+		})
+
+		it('propagates git-unavailable from the existence check', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([unavailableOutcome('no git')]))
+				.readPathEntry('a'.repeat(40), '.engineering')
+			expect(result)
+				.toEqual({ kind: 'git-unavailable', message: 'no git' })
+		})
+
+		it('propagates git-unavailable from the ls-tree call', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('commit'), unavailableOutcome('no git')]))
+				.readPathEntry('a'.repeat(40), '.engineering')
+			expect(result)
+				.toEqual({ kind: 'git-unavailable', message: 'no git' })
+		})
+
+		it('reports error (not absent) when the existence check succeeds but ls-tree fails', async () => {
+			const result = await createGitRepository('/r', scriptedExecutor([okOutcome('commit'), okOutcome('', 128)]))
+				.readPathEntry('a'.repeat(40), '.engineering')
+			expect(result.kind)
+				.toBe('error')
+			expect(result.kind === 'error' && result.message)
+				.toContain('ls-tree')
+		})
+	})
+
+	// -------------------------------------------------------------------------
 	// checkCapabilities
 	// -------------------------------------------------------------------------
 

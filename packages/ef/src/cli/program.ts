@@ -88,7 +88,7 @@ function FORMAT_OPTION() {
 const HELP_TOPICS: Record<string, string> = {
 	'init': 'ef init: initialize EF in an existing Git worktree root.',
 	'artifact create': 'ef artifact create <type>: create a new draft Artifact (prd|req|adr|pol|chg).',
-	'validate': 'ef validate [--scope snapshot|transition|bootstrap]: validate the EF project state.',
+	'validate': 'ef validate [--scope snapshot|transition|bootstrap|range]: validate the EF project state.',
 	'query': 'ef query <lookup|list|search|relations|trace|impact|history|resolve-current>: read-only queries.',
 	'resource read': 'ef resource read <owner-id> <location>: read one explicitly selected local Resource.',
 	'version': 'ef version: print the implementation version.',
@@ -284,7 +284,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 		.option('--no-color')
 		.option('--no-input')
 		.addOption(new Option('--scope <scope>')
-			.choices(['snapshot', 'transition', 'bootstrap'])
+			.choices(['snapshot', 'transition', 'bootstrap', 'range'])
 			.default('snapshot'))
 		.option('--baseline <oid>')
 		.option('--proposed <oid>')

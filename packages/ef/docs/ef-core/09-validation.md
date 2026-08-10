@@ -35,6 +35,21 @@ supersession atomicity, and transaction completion.
 
 Authoritative project integration MUST use transition validation.
 
+### Range validation
+
+Range validation compares a trusted range baseline with one explicit proposed
+commit over the first-parent commit sequence between them. It evaluates every
+authoritative EF state boundary that publishing that whole sequence would
+create, using bootstrap semantics for the boundary that first introduces EF
+state and transition semantics for every later boundary.
+
+Range validation satisfies the transition-validation requirement for a candidate
+that adds more than one new first-parent commit: every adjacent authoritative
+boundary in the sequence is independently transition-validated instead of being
+collapsed into one baseline-to-final-tree comparison. Transition validation
+remains the exact single-boundary primitive and is semantically equivalent to
+range validation over a sequence of length one.
+
 ### Validation finding
 
 A validation finding is a deterministic diagnostic about repository content or
@@ -75,14 +90,33 @@ that the baseline-fixed `integration_ref` resolves to the same OID when the
 operation begins. Selection and materialization are defined by the filesystem,
 configuration, and CLI specifications.
 
+### Trusted range baseline
+
+A trusted range baseline is the captured pre-integration tip of the
+authoritative `integration_ref` used as the exclusive start of a validated
+range. The integration operation MUST supply its full commit OID externally, or
+MUST omit that OID to assert that `integration_ref` was proven unresolved when
+the operation began. Proposed repository content does not select or override it.
+
+Unlike an ordinary trusted baseline, a trusted range baseline MAY contain no EF
+state, and it is never itself validated as a proposed state. When it does
+contain EF state, that state MUST be a complete valid authoritative state, and
+its configuration is the trusted source of the authoritative `integration_ref`.
+
+A trusted range baseline MUST be a member of the proposed commit's first-parent
+chain, and the authoritative `integration_ref` MUST have resolved to exactly
+that OID, or to nothing when the OID was omitted, when the operation began.
+
 ### Trusted proposed commit
 
 A trusted proposed commit is the complete candidate authoritative EF state. The
 integration operation supplies its full commit OID externally. For transition
 scope, the proposed commit MUST use the trusted baseline as its first parent.
-For bootstrap scope, its parentage follows the bootstrap rules. Validation
-materializes the commit and validates its complete tree; it does not infer the
-candidate from the working tree, index, or `HEAD`.
+For bootstrap scope, its parentage follows the bootstrap rules. For range scope,
+the trusted range baseline MUST be a member of its first-parent chain when a
+baseline OID was supplied, and its first-parent chain MUST reach a root commit
+otherwise. Validation materializes the commit and validates its complete tree;
+it does not infer the candidate from the working tree, index, or `HEAD`.
 
 ## Validation Scopes
 
@@ -164,6 +198,214 @@ bootstrap commit MUST likewise contain no `.engineering/ef.yaml` path. General
 transition validation does not invent a synthetic ordinary baseline or permit
 the bootstrap exception after that state exists.
 
+### Range scope
+
+Range validation validates one candidate integration range before publication.
+Its inputs are a trusted range baseline, an explicit proposed commit, and the
+operation-start state of the authoritative `integration_ref`. Every other fact
+MUST be derived deterministically from Git objects.
+
+#### Validated commit sequence
+
+When a trusted range baseline OID is supplied, it MUST be a member of the
+sequence formed by starting at the proposed commit and repeatedly taking its
+first parent. The validated commit sequence is the first-parent commits strictly
+after the trusted range baseline through the proposed commit inclusive,
+evaluated oldest-first.
+
+The walk is first-parent-only and that restriction is mandatory. A commit
+reachable from the proposed commit only through a non-first parent is authoring
+history: it is never part of the validated sequence, never validated, and never
+an authoritative EF state. Non-first-parent ancestry never satisfies the
+membership requirement.
+
+The trusted range baseline is never validated as a proposed state. When the
+baseline OID equals the proposed OID, the validated sequence is empty; that is a
+legal complete valid result.
+
+A baseline proven not to be a first-parent ancestor of the proposed commit,
+including a proposed commit that is itself an ancestor of the baseline, is
+`EF-VAL-011` and exits `2`. When the first-parent chain cannot be walked far
+enough to decide membership because of a shallow boundary or an unreadable
+object, the result is `EF-VAL-007` and exits `2`. Non-membership MUST NOT be
+concluded from history the validator could not read. When no baseline OID is
+supplied, the first-parent chain MUST reach a root commit; a shallow boundary
+instead of a root commit is `EF-VAL-007`.
+
+#### EF state identity and boundary classification
+
+A commit's EF state is identified by the mode, object type, and object ID of its
+`.engineering` tree entry, and is absent when the commit's tree has no such
+entry. Two commits with equal triples have the same EF state.
+
+Walking the validated sequence oldest-first from the baseline EF state, every
+commit's incoming boundary has exactly one classification:
+
+| Previous EF state | Commit EF state | Boundary |
+|---|---|---|
+| any | equal triple | identity |
+| absent | present | bootstrap |
+| present | present and distinct | transition |
+| present | absent | EF-state removal |
+
+An identity boundary is trivially valid. The validator MUST NOT materialize it,
+snapshot-validate it, or emit any diagnostic for it. A commit that does not
+change `.engineering` is therefore an identity transition rather than a skipped
+commit, which makes the classification total and prevents an EF-state removal
+from passing through as an ignored commit.
+
+A bootstrap boundary is validated with bootstrap semantics: complete snapshot
+validation of that commit's tree, the bootstrap state rules and `EF-VAL-010`,
+and the bootstrap history condition established against that commit's first
+parent. An `.engineering/ef.yaml` path found in that first-parent history is
+`EF-VAL-009` and exits `1`; a shallow or unresolvable required history is
+`EF-VAL-007` and exits `2`; a commit with no first parent satisfies the
+condition vacuously and requires no probe. That commit's configuration fixes the
+authoritative `integration_ref` for the whole range. The bootstrap exception is
+available at most once per range and never after an EF state exists.
+
+A transition boundary is validated as one ordinary authoritative transition from
+the immediately preceding distinct EF state to this commit's EF state: complete
+snapshot validation of the new state, preservation of the fixed
+`integration_ref`, and every additional check listed for transition scope. No
+synthetic baseline is invented.
+
+An EF-state removal boundary is `EF-VAL-013`, attributed to that commit, and
+stops the walk. The result is complete and invalid and exits `1`: deliberate
+removal of authoritative state is a proven domain violation rather than
+execution incompleteness.
+
+Because the evaluated boundaries are exactly the boundaries of the first-parent
+EF-bearing commit sequence, a range that validates as complete and valid cannot
+later be reported as untrusted authoritative history by a first-parent history
+query over the same published commits.
+
+#### Transaction coverage inside a range
+
+Every evaluated boundary is one complete engineering transaction in its own
+right. One logical transaction MUST NOT be split across two EF-touching commits
+in the same range: the earlier boundary changes a CHG-required target with no
+covering completed CHG and is invalid at that boundary even when a later commit
+in the same range supplies the CHG. Authors either squash the transaction into
+one commit or make every EF-touching commit independently transaction-valid.
+
+A merge commit on the first-parent chain is validated exactly like any other
+commit. Its non-first parents are never walked, so a merge that introduces EF
+changes through a non-first parent is evaluated as one boundary aggregating all
+of those authoring commits, and that aggregate MUST itself be one valid
+transaction.
+
+#### Ref selection, capture, and staleness
+
+The authoritative `integration_ref` is read only from a trusted commit tree:
+
+- from the trusted range baseline's configuration when that baseline contains a
+  decodable EF state; otherwise
+- from the proposed commit's configuration, exactly as bootstrap scope trusts
+  the proposed configuration.
+
+When the value is taken from the proposed configuration, the bootstrap boundary
+inside the range MUST declare that same ref. Every EF state in the range MUST
+declare it. Any deviation is `EF-VAL-002` and exits `2`.
+
+Operation-start ref state is an explicit validation input. The integration
+operation captures the state of the authoritative ref once before validation and
+supplies a proven OID, proven absence, or a probe failure. The validator MUST
+NOT resolve or re-resolve that ref itself. The captured ref name MUST equal the
+authoritative `integration_ref`; a mismatch is `EF-VAL-002`.
+
+A complete range result requires the captured operation-start OID to equal the
+trusted range baseline OID: either both are present and equal, or both are
+absent. Any other combination is `EF-VAL-002` and exits `2`. A failed ref probe
+is `EF-VAL-006`, exits `2`, and MUST NOT be folded into proven absence.
+
+Running range validation after `integration_ref` has already advanced to the
+proposed commit is therefore stale by construction and reports `EF-VAL-002` with
+exit `2`.
+
+#### Read-only derivation
+
+Range validation performs no ref mutation, no branch checkout, and no
+authoritative working-tree materialization. The validator MUST NOT require the
+caller to advance `integration_ref`, or any other ref, per intermediate commit
+to emulate the historical ref state that commit would have had. Every boundary
+MUST be derived deterministically from Git objects plus the one captured
+operation-start ref state.
+
+#### Walk termination
+
+Range validation reports the findings of the first state or boundary that
+produces an error-severity diagnostic and then stops. Later states and
+boundaries are blocked dependent checks and produce no diagnostics: feeding an
+already-invalid state into a later boundary comparison would emit the
+speculative aliases the cascading rules prohibit.
+
+Warning-severity findings never stop the walk, including under strict or
+warnings-as-errors policy, because policy changes outcome rather than diagnostic
+meaning.
+
+A blocked dependent check is not an unavailable Core capability, so an
+error-severity finding inside the range keeps the run complete and exits `1`. An
+invalid trusted range baseline is different: it is an untrusted baseline rather
+than proposed content, and reports `EF-VAL-002` with `complete: false` and exit
+`2`.
+
+#### Ranges with no EF state
+
+When neither the trusted range baseline nor any commit in the validated sequence
+has an `.engineering` entry, including when the validated sequence is empty, no
+EF state boundary exists to validate. The result is complete and valid, exits
+`0`, and carries exactly one `EF-VAL-014` info diagnostic. `integration_ref` and
+`expected_ref_oid` are null and no ref state check is performed because no EF
+publication occurs. A range whose baseline EF state is present is never this
+case, so an EF-inert result cannot be used to bypass validation.
+
+#### Shallow and incomplete history
+
+Range validation needs first-parent history only between the two endpoints, so a
+shallow clone that fully contains the validated sequence validates normally.
+History older than the trusted range baseline is not required, except for a
+bootstrap boundary, whose pre-bootstrap `.engineering/ef.yaml` absence probe
+requires complete first-parent history before the bootstrap commit. A
+bootstrap-bearing range in a shallow clone is therefore `EF-VAL-007` and exits
+`2`, exactly as it already is for bootstrap scope. Shallowness is never used to
+conclude non-membership or absence.
+
+#### Object format
+
+Every supplied OID MUST be a full OID for the project repository's own object
+format. A wrong-length or non-hexadecimal value is a lexical failure:
+`EF-VAL-002` for the trusted range baseline and `EF-VAL-011` for the proposed
+commit. OID comparisons in the range walk use repository-normalized values, so a
+supplied uppercase-hexadecimal OID still matches its commit.
+
+#### Publication
+
+Exactly one atomic conditional ref update publishes a complete valid range. Its
+expected old value is the validated trusted range baseline OID, or ref absence
+when no baseline OID was supplied, and its new value is the validated proposed
+OID. Per-commit ref updates are neither required nor permitted, and a separate
+check followed by an unconditional update is not conforming. When the range
+contains a bootstrap boundary, the bootstrap history condition MUST be
+re-checked immediately before the update. A failed compare-and-swap makes the
+result stale, and the range MUST be revalidated from the actual boundary.
+
+Once published, every EF-bearing first-parent commit in the range is an
+authoritative EF state and every adjacent distinct pair is an authoritative
+integration transition. That is exactly why each of them MUST be validated
+before publication.
+
+#### Distinction from history auditing
+
+Range validation is a pre-publication operation over a captured boundary: the
+trusted range baseline is the operation-start OID of `integration_ref` and the
+proposed commit is not yet published. It proves the range and authorizes
+nothing; a separate integration operation consumes the result.
+
+History auditing evaluates already-published state reachable from the
+authoritative ref, has no expected-ref-state obligation, and cannot make
+anything authoritative. Core v1 defines no post-publication audit scope.
+
 ## Validation Pipeline
 
 Validation uses this logical phase order:
@@ -189,7 +431,7 @@ final deterministic output MUST be preserved.
 
 Discovery determines the EF project root, project repository, linked repository
 association, Artifact files, the managed Resource root, configuration, requested
-scope, policy, and transition baseline.
+scope, policy, and the transition or range baseline.
 
 Failure to obtain context required by the requested scope makes the run
 incomplete. Filesystem discovery rules are defined later.
@@ -251,10 +493,10 @@ markers.
 
 ### 9. Transition integrity
 
-This phase runs only in transition scope. It compares the trusted baseline and
-proposed result to validate identity, lifecycle, immutable content, deletion,
-CHG effects, Resource mutation, exactly-once coverage, supersession, and
-atomicity.
+This phase runs in transition scope, and in range scope once per evaluated
+non-identity boundary. It compares the trusted baseline and proposed result to
+validate identity, lifecycle, immutable content, deletion, CHG effects, Resource
+mutation, exactly-once coverage, supersession, and atomicity.
 
 ### 10. Validation hooks
 
@@ -358,7 +600,16 @@ Fields are:
 | `location` | line and column object | No |
 | `field` | structured field path string | No |
 | `section` | Markdown heading string | No |
+| `commit_oid` | full commit OID string | No |
 | `related` | array of related-location objects | Yes, may be `[]` |
+
+`commit_oid` attributes a finding to one commit of a validated commit sequence.
+It is present only in range scope, and only for a finding evaluated at one
+commit's EF state or at one commit's incoming boundary; a boundary finding
+attaches to that boundary's later commit, which is the commit that introduced
+the violation. A range-level finding that belongs to no single commit, such as
+an ancestry, captured-ref-state, shallow-history, or EF-inert-range finding,
+omits it. Every other scope omits it.
 
 Line and column numbers are one-based. A column is the one-based Unicode scalar
 value index within the original source line; a tab or combining scalar counts as
@@ -461,16 +712,23 @@ can overlap:
 | A CHG effect targets any CHG | `EF-CHG-017`, not a general relation compatibility diagnostic |
 | A changed CHG-required target has no effect | `EF-CHG-005` |
 | An effect exists but its remaining before/after classification is wrong | `EF-CHG-003` |
+| A commit in a validated integration range removes the authoritative EF state | `EF-VAL-013`; the missing-configuration finding and per-Artifact deletion findings for that commit are suppressed |
+| A range state or boundary reports an error | That state's or boundary's findings; later states and boundaries are blocked dependent checks and produce no diagnostics |
 
 Supersession atomicity and CHG completion do not use umbrella diagnostics. The
 validator emits the specific violated lifecycle, relation, supersession,
 Resource, body, or CHG rule from the tables above. Multiple such diagnostics
 remain valid only when each describes a separately actionable defect.
 
-After primary ownership is applied, diagnostics are deduplicated by `code` and
-the complete structured primary and related locations, excluding human message
-text. Two findings with that same identity produce one diagnostic. Message text
-does not create a second machine finding.
+After primary ownership is applied, diagnostics are deduplicated by `code`,
+`commit_oid`, and the complete structured primary and related locations,
+excluding human message text. Two findings with that same identity produce one
+diagnostic. Message text does not create a second machine finding.
+
+`commit_oid` participates in that identity because two genuinely distinct
+defects evaluated at two different boundaries of one validated range can share a
+code and a path; without commit attribution they would silently collapse into
+one finding.
 
 ### Deterministic ordering
 
@@ -480,12 +738,18 @@ Diagnostics are sorted by:
 2. project-relative path in bytewise order;
 3. line;
 4. column;
-5. diagnostic code; and
-6. field or section path.
+5. diagnostic code;
+6. field or section path; and
+7. `commit_oid` in bytewise order.
 
-Diagnostics without a path or source location sort after diagnostics that have
-the corresponding value. For a multi-file finding, the bytewise smallest path
-is the primary location and the others are related locations.
+Diagnostics without a path, source location, or `commit_oid` sort after
+diagnostics that have the corresponding value. For a multi-file finding, the
+bytewise smallest path is the primary location and the others are related
+locations.
+
+`commit_oid` is the final tiebreaker rather than a grouping key, so no output
+that omits it is reordered. Human output MAY group findings by commit; that
+grouping is presentation and is not a machine contract.
 
 Parallel execution MUST NOT affect output order.
 
@@ -538,6 +802,10 @@ strict snapshot
 
 strict transition
   = complete warning-free before-and-after validation
+
+strict range
+  = complete warning-free validation of every evaluated boundary
+    in the validated commit sequence
 ```
 
 If required context or a Core validator capability is unavailable, strict
@@ -591,7 +859,9 @@ environment uses exit `2`.
 
 An invalid baseline makes transition comparison incomplete. Baseline findings
 are reported, dependent transition checks are blocked, and transition scope
-returns exit `2`.
+returns exit `2`. An invalid trusted range baseline is treated the same way. An
+error-severity finding at a state or boundary inside a validated range is
+proposed content rather than an untrusted baseline and therefore uses exit `1`.
 
 #### Exit `3`
 
@@ -621,6 +891,21 @@ strict: true
 baseline: pinned pre-integration first-parent commit
 proposed: exact candidate commit whose first parent is baseline
 ```
+
+When the candidate may add more than one new first-parent commit, CI SHOULD
+instead use range scope with the same pinned pre-integration tip:
+
+```text
+scope: range
+strict: true
+baseline: pinned pre-integration ref tip, omitted when the ref was
+          proven unresolved at operation start
+proposed: exact candidate commit whose first-parent chain contains baseline
+```
+
+CI SHOULD use transition scope when the candidate is exactly one boundary and
+range scope otherwise. Both scopes require the pinned operation-start ref tip;
+neither derives it from the candidate.
 
 CI validation is read-only, non-interactive, deterministic, and network-free.
 It validates the complete explicit proposed commit tree rather than treating
@@ -667,24 +952,36 @@ Machine-readable validation output includes summary semantics equivalent to:
 
 Rules:
 
-- `scope` is `snapshot`, `transition`, or explicit bootstrap validation.
+- `scope` is `snapshot`, `transition`, `range`, or explicit bootstrap
+  validation.
 - `baseline_oid` is the supplied full commit OID when it passed lexical
   validation; it is null when no usable OID was supplied and for snapshot or
-  bootstrap scope. A complete transition requires a non-null value.
+  bootstrap scope. A complete transition requires a non-null value. On a
+  complete range result, null means that the caller supplied no baseline OID and
+  validation proved that `integration_ref` was unresolved at operation start;
+  `complete` distinguishes that from a range whose baseline could not be
+  established.
 - `proposed_oid` is the supplied full proposed commit OID when it passed
   lexical validation; it is null for snapshot scope or when no usable OID was
-  supplied. Complete transition and bootstrap validation require a non-null
-  value.
+  supplied. Complete transition, bootstrap, and range validation require a
+  non-null value.
 - `integration_ref` is the authoritative full local branch ref selected from
   the trusted baseline configuration for transition, the proposed
-  configuration for bootstrap, or the current configuration for snapshot. It
-  is null when no applicable valid configuration could be loaded.
+  configuration for bootstrap, or the current configuration for snapshot. For
+  range it is selected from the trusted range baseline's configuration when
+  that baseline contains a decodable EF state, and from the proposed
+  configuration otherwise. It is null when no applicable valid configuration
+  could be loaded, and null on a complete range result that evaluated no EF
+  state boundary.
 - `expected_ref_oid` is the operation-start OID captured from `integration_ref`
-  for transition and bootstrap, or null when that ref was unresolved. A
-  complete transition requires it to equal `baseline_oid`. It is always null
-  for snapshot scope. On an incomplete result, null can also mean that the ref
-  state could not be established; `complete` distinguishes that case from a
-  complete bootstrap whose expected ref state is absence.
+  for transition, bootstrap, and range, or null when that ref was unresolved. A
+  complete transition requires it to equal `baseline_oid`. A complete range
+  requires it to equal `baseline_oid` as well, with both values null when the
+  range is EF-inert or when the caller asserted and validation proved that the
+  ref was unresolved. It is always null for snapshot scope. On an incomplete
+  result, null can also mean that the ref state could not be established;
+  `complete` distinguishes that case from a complete bootstrap or range whose
+  expected ref state is absence.
 - `complete` is false when exit is `2` or `3`.
 - `valid` reflects the selected finding policy.
 - `valid` MUST be false when `complete` is false.
@@ -769,6 +1066,37 @@ The same outcome applies when either the required baseline or proposed commit
 is missing or cannot be materialized. Validation does not silently fall back to
 snapshot success.
 
+### Bootstrap inside a validated range
+
+```text
+scope: range
+baseline: pre-EF ref tip
+sequence: C1 (code only), C2 (bootstrap), C3 (transition)
+boundaries: identity at C1, bootstrap at C2, transition at C3
+complete: true
+valid: true
+exit: 0
+```
+
+`integration_ref` comes from the bootstrap commit's configuration,
+`expected_ref_oid` equals `baseline_oid`, and one atomic conditional update from
+that baseline to C3 publishes the whole range.
+
+### Failing intermediate range boundary
+
+```text
+scope: range
+sequence: C1, C2, C3
+boundaries: transition at C2 reports EF-CHG-005
+complete: true
+valid: false
+exit: 1
+```
+
+The finding carries `commit_oid` for C2. C3 is a blocked dependent check and
+produces no diagnostics, and the run remains complete because blocking on an
+error is not an unavailable capability.
+
 ### Parse failure without cascades
 
 When `REQ-031.md` frontmatter cannot parse, validation reports the parse
@@ -793,6 +1121,8 @@ orchestration additionally defines:
 | `EF-VAL-010` | error | Proposed bootstrap contains a terminal knowledge Artifact or CHG | `1` |
 | `EF-VAL-011` | error | Proposed OID is missing or lexically invalid, does not resolve to a commit, cannot be materialized, or has inapplicable parentage | `2` |
 | `EF-VAL-012` | error | An incomplete working-tree initialization claim exists | `2` |
+| `EF-VAL-013` | error | A commit in the validated integration range removes the authoritative EF state | `1` |
+| `EF-VAL-014` | info | Validated integration range contains no EF state boundary | unchanged |
 
 Execution-class diagnostics can have error severity while mapping to exit `2`
 or `3`; exit class distinguishes incomplete or internal execution from completed
@@ -810,4 +1140,6 @@ repository invalidity.
   and non-interactive options are defined in [CLI Contract](13-cli-contract.md).
 - Full historical Git-DAG auditing, baseline-debt suppression, network
   availability checks, LLM semantic review, and automatic source repair are not
-  part of deterministic EF Core v1 validation.
+  part of deterministic EF Core v1 validation. Range validation is a
+  pre-publication proof over a captured boundary and is not a post-publication
+  audit scope; post-publication history auditing remains deferred.
