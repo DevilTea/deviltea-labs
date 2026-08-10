@@ -1151,4 +1151,213 @@ describe('validateRange', () => {
 		expect(historyResult.kind)
 			.toBe('complete')
 	})
+
+	// -------------------------------------------------------------------------
+	// 32. Bootstrap history condition: every FirstParentResult variant
+	// (regression for the fail-open finding: `root-commit` MUST be the only
+	// variant treated as vacuous success; `missing` and `not-a-commit` must
+	// never fall through into that same vacuous-success path and be mistaken
+	// for a complete bootstrap proof)
+	// -------------------------------------------------------------------------
+
+	describe('bootstrap history condition: every FirstParentResult variant', () => {
+		async function setupPreEfBaselineAndBootstrap(): Promise<{ baseline: string, bootstrapOid: string }> {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap')
+			return { baseline, bootstrapOid }
+		}
+
+		it('root-commit: the ONLY vacuous-success variant -- no probe, valid bootstrap, exit 0', async () => {
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'root bootstrap')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: null,
+				proposedOid: bootstrapOid,
+				operationStartRefState: { resolved: false },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(0)
+			expect(result.valid)
+				.toBe(true)
+			expect(codesOf(result.diagnostics))
+				.toEqual([])
+		})
+
+		it('resolved, no prior EF state in first-parent history: satisfied -- valid bootstrap, exit 0', async () => {
+			const { baseline, bootstrapOid } = await setupPreEfBaselineAndBootstrap()
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: bootstrapOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(0)
+			expect(result.valid)
+				.toBe(true)
+			expect(codesOf(result.diagnostics))
+				.toEqual([])
+		})
+
+		it('resolved, prior EF state found in first-parent history: violated -- EF-VAL-009, complete and invalid, exit 1', async () => {
+			await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML)
+			commitAll(tempDir, 'stray historical EF state')
+			await removeFile(tempDir, '.engineering')
+			const baseline = commitAll(tempDir, 'back to pre-EF')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'attempted bootstrap')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: bootstrapOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(1)
+			expect(result.complete)
+				.toBe(true)
+			expect(result.valid)
+				.toBe(false)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-009'])
+		})
+
+		it('error: incomplete -- EF-VAL-007 attributed to the boundary commit, never a proof of anything', async () => {
+			const { baseline, bootstrapOid } = await setupPreEfBaselineAndBootstrap()
+
+			const wrapped = wrapGitRepository(repo(), {
+				getFirstParent: async (oid: string) => {
+					if (oid === bootstrapOid)
+						return { kind: 'error', message: 'simulated parentage read failure' }
+					return repo()
+						.getFirstParent(oid)
+				},
+			})
+
+			const result = await validateRange({
+				git: wrapped,
+				baselineOid: baseline,
+				proposedOid: bootstrapOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.complete)
+				.toBe(false)
+			expect(result.exitCode)
+				.toBe(2)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-007'])
+			expect(result.diagnostics[0]!.commitOid)
+				.toBe(bootstrapOid)
+		})
+
+		it('missing: incomplete -- EF-VAL-007, NEVER treated as vacuous success (the fail-open regression)', async () => {
+			const { baseline, bootstrapOid } = await setupPreEfBaselineAndBootstrap()
+
+			const wrapped = wrapGitRepository(repo(), {
+				getFirstParent: async (oid: string) => {
+					if (oid === bootstrapOid)
+						return { kind: 'missing' }
+					return repo()
+						.getFirstParent(oid)
+				},
+			})
+
+			const result = await validateRange({
+				git: wrapped,
+				baselineOid: baseline,
+				proposedOid: bootstrapOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.complete)
+				.toBe(false)
+			expect(result.exitCode)
+				.toBe(2)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-007'])
+			expect(result.diagnostics[0]!.commitOid)
+				.toBe(bootstrapOid)
+			// Never a proof the bootstrap is valid: this must never present as a
+			// complete, valid result the way a `root-commit` vacuous success would.
+			expect(result.valid)
+				.toBe(false)
+		})
+
+		it('not-a-commit: incomplete -- EF-VAL-007, NEVER treated as vacuous success (the fail-open regression)', async () => {
+			const { baseline, bootstrapOid } = await setupPreEfBaselineAndBootstrap()
+
+			const wrapped = wrapGitRepository(repo(), {
+				getFirstParent: async (oid: string) => {
+					if (oid === bootstrapOid)
+						return { kind: 'not-a-commit' }
+					return repo()
+						.getFirstParent(oid)
+				},
+			})
+
+			const result = await validateRange({
+				git: wrapped,
+				baselineOid: baseline,
+				proposedOid: bootstrapOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.complete)
+				.toBe(false)
+			expect(result.exitCode)
+				.toBe(2)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-007'])
+			expect(result.diagnostics[0]!.commitOid)
+				.toBe(bootstrapOid)
+			expect(result.valid)
+				.toBe(false)
+		})
+
+		it('git-unavailable: incomplete -- EF-VAL-006, never carries commit_oid, never a proof of anything', async () => {
+			const { baseline, bootstrapOid } = await setupPreEfBaselineAndBootstrap()
+
+			const wrapped = wrapGitRepository(repo(), {
+				getFirstParent: async (oid: string) => {
+					if (oid === bootstrapOid)
+						return { kind: 'git-unavailable', message: 'simulated git unavailable' }
+					return repo()
+						.getFirstParent(oid)
+				},
+			})
+
+			const result = await validateRange({
+				git: wrapped,
+				baselineOid: baseline,
+				proposedOid: bootstrapOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.complete)
+				.toBe(false)
+			expect(result.exitCode)
+				.toBe(2)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-006'])
+			expect(result.diagnostics[0]!.commitOid)
+				.toBeUndefined()
+		})
+	})
 })
