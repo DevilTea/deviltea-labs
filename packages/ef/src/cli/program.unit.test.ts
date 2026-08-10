@@ -450,4 +450,134 @@ Text.
 		expect(outcome.stdout)
 			.toContain('9.9.9')
 	})
+
+	// ---- -h / --help (13-cli-contract.md "Version and Help") -------------------
+
+	it('ef -h and ef --help both produce exactly ef help\'s general text, exit 0', async () => {
+		const general = await runCli(['help'], { cwd: root }, ctx())
+		const short = await runCli(['-h'], { cwd: root }, ctx())
+		const long = await runCli(['--help'], { cwd: root }, ctx())
+
+		for (const outcome of [short, long]) {
+			expect(outcome.exitCode)
+				.toBe(0)
+			expect(outcome.stderr)
+				.toBe('')
+			expect(outcome.stdout)
+				.toBe(general.stdout)
+		}
+	})
+
+	it('ef init -h and ef init --help both produce exactly ef help init\'s text, exit 0', async () => {
+		const topic = await runCli(['help', 'init'], { cwd: root }, ctx())
+		const short = await runCli(['init', '-h'], { cwd: root }, ctx())
+		const long = await runCli(['init', '--help'], { cwd: root }, ctx())
+
+		for (const outcome of [short, long]) {
+			expect(outcome.exitCode)
+				.toBe(0)
+			expect(outcome.stdout)
+				.toBe(topic.stdout)
+		}
+	})
+
+	it('ef artifact create --help succeeds without the required <type> argument and matches ef help "artifact create"', async () => {
+		const topic = await runCli(['help', 'artifact', 'create'], { cwd: root }, ctx())
+		const outcome = await runCli(['artifact', 'create', '--help'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(outcome.stdout)
+			.toBe(topic.stdout)
+	})
+
+	it('ef artifact -h (group command, no leaf selected) falls back to the general help text', async () => {
+		const general = await runCli(['help'], { cwd: root }, ctx())
+		const outcome = await runCli(['artifact', '-h'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(outcome.stdout)
+			.toBe(general.stdout)
+	})
+
+	it('ef validate -h matches ef help validate\'s text, exit 0', async () => {
+		const topic = await runCli(['help', 'validate'], { cwd: root }, ctx())
+		const outcome = await runCli(['validate', '-h'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(outcome.stdout)
+			.toBe(topic.stdout)
+	})
+
+	it('ef query -h matches ef help query\'s text, exit 0', async () => {
+		const topic = await runCli(['help', 'query'], { cwd: root }, ctx())
+		const outcome = await runCli(['query', '-h'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(outcome.stdout)
+			.toBe(topic.stdout)
+	})
+
+	it('ef query lookup --help (no query-lookup-specific topic) falls back to the ef query topic text', async () => {
+		const topic = await runCli(['help', 'query'], { cwd: root }, ctx())
+		const outcome = await runCli(['query', 'lookup', '--help'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(outcome.stdout)
+			.toBe(topic.stdout)
+	})
+
+	it('ef resource read --help succeeds without either required argument and matches ef help "resource read"', async () => {
+		const topic = await runCli(['help', 'resource', 'read'], { cwd: root }, ctx())
+		const outcome = await runCli(['resource', 'read', '--help'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(outcome.stdout)
+			.toBe(topic.stdout)
+	})
+
+	it('ef version --help matches ef help version\'s text, exit 0', async () => {
+		const topic = await runCli(['help', 'version'], { cwd: root }, ctx())
+		const outcome = await runCli(['version', '--help'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(outcome.stdout)
+			.toBe(topic.stdout)
+	})
+
+	it('ef help --help matches ef help help\'s text, exit 0', async () => {
+		const topic = await runCli(['help', 'help'], { cwd: root }, ctx())
+		const outcome = await runCli(['help', '--help'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(0)
+		expect(outcome.stdout)
+			.toBe(topic.stdout)
+	})
+
+	it('--help wins over --format json regardless of flag order: human text, exit 0, no JSON envelope', async () => {
+		const trailing = await runCli(['validate', '--format', 'json', '--help'], { cwd: root }, ctx())
+		const leading = await runCli(['validate', '--help', '--format', 'json'], { cwd: root }, ctx())
+
+		for (const outcome of [trailing, leading]) {
+			expect(outcome.exitCode)
+				.toBe(0)
+			expect(() => JSON.parse(outcome.stdout as string))
+				.toThrow()
+		}
+	})
+
+	it('ef help <unknown-topic> is still an invocation failure (unaffected by -h/--help), exit 2', async () => {
+		const outcome = await runCli(['help', 'bogus'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(2)
+		expect(outcome.stdout)
+			.toBe('')
+	})
+
+	it('-h/--help does not weaken unknown-option enforcement on a refactored leaf command: exit 2', async () => {
+		const outcome = await runCli(['query', 'lookup', '--bogus-flag'], { cwd: root }, ctx())
+		expect(outcome.exitCode)
+			.toBe(2)
+		expect(outcome.stdout)
+			.toBe('')
+	})
 })
