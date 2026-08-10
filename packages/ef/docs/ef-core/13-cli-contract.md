@@ -230,7 +230,12 @@ through any other channel. A caller MUST ensure that ref name is materialized,
 or genuinely absent, in that same local repository before the command runs; a
 repository that holds only a detached candidate commit, without the
 authoritative ref name itself resolving or provably failing to resolve there,
-cannot satisfy either a supplied `--baseline` or an omitted one.
+cannot satisfy either a supplied `--baseline` or an omitted one. The command
+identifies that ref name from a trusted commit tree before probing it: the
+`--baseline` commit's configuration when that commit carries EF state, and
+otherwise the configuration of the oldest commit on the validated first-parent
+sequence that does — the range's bootstrap boundary. It never reads the
+`--proposed` commit's configuration to select the ref.
 
 `--proposed` is required for transition, bootstrap, and range scope and invalid
 for snapshot scope. It accepts only a full commit OID for the project
@@ -293,12 +298,15 @@ validation; it is null for snapshot or when no usable OID was supplied.
 Complete transition, bootstrap, and range results require it to be non-null.
 `integration_ref` contains the applicable authoritative full local branch ref,
 or null when no valid applicable configuration could be loaded; for a complete
-range result that evaluated no EF state boundary it is null.
+range result that evaluated no EF state boundary, or whose first EF state named
+no valid `integration_ref`, it is null.
 `expected_ref_oid` contains the operation-start OID captured from that ref for
 transition, bootstrap, or range, and is null for an unresolved bootstrap or
 range ref or for snapshot scope. A complete transition requires
-`expected_ref_oid == baseline_oid`, and a complete range requires the same
-equality with both values possibly null. On an incomplete result, null may
+`expected_ref_oid == baseline_oid`; a complete range whose `integration_ref` is
+non-null requires the same equality with both values possibly null, and a
+complete range whose `integration_ref` is null reports `expected_ref_oid` as
+null and makes no such comparison. On an incomplete result, null may
 instead mean that ref state could not be established; `complete` disambiguates
 it.
 `exit_code` exactly matches process exit status. Strict mode implies

@@ -32,6 +32,25 @@
  * and produce no diagnostics. Warning-severity findings never stop the walk,
  * including under strict or warnings-as-errors policy.
  *
+ * The authoritative `integration_ref` is fixed by the trusted range
+ * baseline's own configuration when the baseline's `.engineering` entry is
+ * present, and otherwise by the range's BOOTSTRAP boundary's own
+ * configuration -- the oldest commit in the validated sequence whose
+ * `.engineering` entry is present. This module never reads a commit LATER in
+ * the sequence than the boundary currently being evaluated to decide that
+ * boundary's own outcome: doing so (e.g. consulting the proposed commit to
+ * fix the ref) would let a later removal or a later malformed configuration
+ * preempt an earlier boundary's own findings, which is exactly the property
+ * that makes the oldest-first, first-error walk below total
+ * (09-validation.md "Ref selection, capture, and staleness", "Walk
+ * termination"). {@link findRangeIntegrationRefSource} is the ONE exported
+ * definition of this same rule, consumed by the CLI to locate the ref name
+ * before this module's own captured-ref-state probe; the two are independent
+ * reads of the same immutable Git objects, and a disagreement between them
+ * (only reachable through a failed or racing read) is caught by the
+ * captured-ref-NAME cross-check (`EF-VAL-002`) or by the missing-capture
+ * check (`EF-VAL-006`) below -- never silently accepted.
+ *
  * Every BOOTSTRAP boundary reuses `bootstrap-validation.ts`'s own pure
  * `evaluateBootstrapStateRules` core for the bootstrap-only state rules, the
  * same way it reuses `transition-validation.ts`'s pure
@@ -135,19 +154,6 @@ async function materialize(git: GitRepository, commitOid: string): Promise<Mater
 	return { ok: true, commit: { snapshot: loadResult.snapshot, validation, oidByPath } }
 }
 
-/** Memoizes {@link materialize} per commit OID so a commit consulted for both ref derivation and its own boundary (or consulted more than once for any other reason) is only ever read from Git once. */
-function materializeCache(git: GitRepository): (oid: string) => Promise<MaterializeResult> {
-	const cache = new Map<string, Promise<MaterializeResult>>()
-	return (oid: string) => {
-		let pending = cache.get(oid)
-		if (!pending) {
-			pending = materialize(git, oid)
-			cache.set(oid, pending)
-		}
-		return pending
-	}
-}
-
 function toBoundarySide(commit: MaterializedCommit): TransitionBoundarySide {
 	return { snapshot: commit.snapshot, validation: commit.validation, oidByPath: commit.oidByPath }
 }
@@ -173,6 +179,125 @@ function triplesEqual(a: EfTriple | null, b: EfTriple | null): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// EF-state observation (single source for the `readPathEntry` -> tri-state
+// mapping the baseline read and the walk's own per-commit read both need)
+// ---------------------------------------------------------------------------
+
+type EfStateObservation
+	= | { kind: 'present', entry: GitTreeEntry }
+		| { kind: 'absent' }
+		/** A Git read failure -- `git-unavailable`, `missing` (contradicts an already-resolved commit), or `error` -- never proof of absence. */
+		| { kind: 'blocked', message: string }
+
+/**
+ * Exhaustiveness guard mirroring {@link assertNeverFirstParent}: if a new
+ * `PathEntryResult` variant is ever added without updating
+ * {@link observeEfState}'s switch, `value` stops type-checking as `never` at
+ * the `default` branch and the module fails to compile.
+ */
+function assertNeverPathEntry(value: never): never {
+	throw new Error(`Unhandled PathEntryResult variant: ${JSON.stringify(value)}`)
+}
+
+/**
+ * Reads `commitOid`'s `.engineering` tree entry and maps `readPathEntry`'s
+ * five-variant result to the three-state {@link EfStateObservation} both the
+ * trusted range baseline read and the walk's own per-commit read need.
+ * `resolved`/`absent` are the only two variants a caller may treat as an
+ * actual observation; `git-unavailable`, `missing`, and `error` are all Git
+ * read failures on a path whose commit -- `commitOid` -- is otherwise already
+ * known or assumed to be a valid commit, so none may ever be folded into
+ * `absent` (the absolute Git trust rule this module and `peekConfigAt` both
+ * hold).
+ */
+async function observeEfState(git: GitRepository, commitOid: string, subject: string): Promise<EfStateObservation> {
+	const entry = await git.readPathEntry(commitOid, ENGINEERING_PATH)
+	switch (entry.kind) {
+		case 'resolved':
+			return { kind: 'present', entry: entry.entry }
+		case 'absent':
+			return { kind: 'absent' }
+		case 'git-unavailable':
+			return { kind: 'blocked', message: `Git is unavailable while reading ${subject}: ${entry.message}` }
+		case 'missing':
+			return { kind: 'blocked', message: `Git is unavailable while reading ${subject}: the commit could not be re-read after already being resolved` }
+		case 'error':
+			return { kind: 'blocked', message: `Git is unavailable while reading ${subject}: ${entry.message}` }
+		default:
+			return assertNeverPathEntry(entry)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Ref selection (09-validation.md "Ref selection, capture, and staleness")
+// ---------------------------------------------------------------------------
+
+export type RangeIntegrationRefSource
+	= | { kind: 'commit', role: 'baseline' | 'bootstrap', commitOid: string }
+		/** No commit in `[baselineOid, proposedOid]` names an authoritative ref: an EF-inert range, or `listFirstParentRange` could not resolve the sequence at all (left for `validateRange` itself to report). */
+		| { kind: 'none' }
+		| { kind: 'blocked', message: string }
+
+/**
+ * Locates the ONE commit whose configuration fixes the range's authoritative
+ * `integration_ref`, per 09-validation.md "Ref selection, capture, and
+ * staleness": the trusted range baseline's own configuration when the
+ * baseline's `.engineering` entry is present, and otherwise the range's
+ * bootstrap boundary -- the oldest commit in the validated first-parent
+ * sequence whose `.engineering` entry is present. The proposed commit is
+ * never consulted to select the ref.
+ *
+ * This is a Git-object-only read (tree entries along the first-parent
+ * sequence, nothing more) and is not itself validation: it materializes no
+ * commit, evaluates no rule, and emits no finding. It exists so a caller
+ * (the CLI) can learn the ref NAME before performing the single mutable ref
+ * probe, still exactly once, still before any boundary is evaluated by
+ * {@link validateRange} below -- which independently re-derives the same
+ * commit via its own walk, so a disagreement between the two (only reachable
+ * through a failed or racing read) is caught by `validateRange`'s own
+ * captured-ref-NAME cross-check (`EF-VAL-002`) or missing-capture check
+ * (`EF-VAL-006`), never silently accepted.
+ *
+ * A `listFirstParentRange` failure (`truncated`, `unresolved`,
+ * `not-an-ancestor`, `git-unavailable`) is reported as `{ kind: 'none' }`
+ * here -- `validateRange` alone owns reporting `EF-VAL-006`/`EF-VAL-007`/
+ * `EF-VAL-011` for that same observation, with the full baseline/proposed
+ * refs in its envelope.
+ */
+export async function findRangeIntegrationRefSource(
+	git: GitRepository,
+	baselineOid: string | null,
+	proposedOid: string,
+): Promise<RangeIntegrationRefSource> {
+	if (baselineOid !== null) {
+		const baselineObservation = await observeEfState(git, baselineOid, 'the trusted range baseline\'s EF state')
+		if (baselineObservation.kind === 'present')
+			return { kind: 'commit', role: 'baseline', commitOid: baselineOid }
+		if (baselineObservation.kind === 'blocked')
+			return { kind: 'blocked', message: baselineObservation.message }
+		// `absent`: the trusted range baseline is pre-EF; fall through to scan
+		// the validated sequence for the range's bootstrap boundary.
+	}
+
+	const rangeResult = await git.listFirstParentRange(baselineOid, proposedOid)
+	if (rangeResult.kind !== 'resolved')
+		return { kind: 'none' }
+
+	for (const oid of rangeResult.oids) {
+		const observation = await observeEfState(git, oid, `commit '${oid}''s EF state`)
+		if (observation.kind === 'present')
+			return { kind: 'commit', role: 'bootstrap', commitOid: oid }
+		if (observation.kind === 'blocked')
+			return { kind: 'blocked', message: observation.message }
+		// `absent`: continue scanning oldest-first; a later commit's removal of
+		// `.engineering` (if any) must never hide an earlier bootstrap boundary.
+	}
+
+	// The validated sequence has no EF-bearing commit at all: an EF-inert range.
+	return { kind: 'none' }
+}
+
+// ---------------------------------------------------------------------------
 // validateRange
 // ---------------------------------------------------------------------------
 
@@ -189,7 +314,17 @@ export interface ValidateRangeInput {
 	 * (09-validation.md "Ref selection, capture, and staleness").
 	 */
 	operationStartRef?: string
-	operationStartRefState: OperationStartRefState
+	/**
+	 * The captured operation-start state of the authoritative `integration_ref`.
+	 * `undefined` means the caller identified NO authoritative ref from a
+	 * trusted commit tree (via {@link findRangeIntegrationRefSource}) and
+	 * therefore made no probe at all -- this MUST NOT be read as proven ref
+	 * absence (that is `{ resolved: false }`, a distinct, proven fact). If the
+	 * walk below nevertheless fixes an authoritative ref while this is
+	 * `undefined`, the result is `EF-VAL-006` and incomplete
+	 * (09-validation.md "Ref selection, capture, and staleness").
+	 */
+	operationStartRefState?: OperationStartRefState
 	policy?: ValidationPolicy
 }
 
@@ -220,12 +355,23 @@ function completeResult(diagnostics: Diagnostic[], policy: ValidationPolicy, ref
  * an OID that differs, or a ref that unexpectedly did/did not resolve) is
  * `EF-VAL-002` (09-validation.md "A complete range result requires the
  * captured operation-start OID to equal the trusted range baseline OID").
+ *
+ * `state === undefined` is a THIRD, distinct case from either: the caller
+ * identified an authoritative ref (this function is only ever called once
+ * one is known) but made no capture of its operation-start state at all --
+ * never a probe result, and never foldable into `{ resolved: false }`'s
+ * proven absence. That is `EF-VAL-006` as well, since it is the same
+ * observable class as a failed probe (both incomplete, exit 2): the range
+ * has a ref that this operation was required to capture and did not.
  */
 function checkOperationStartRefState(
-	state: OperationStartRefState,
+	state: OperationStartRefState | undefined,
 	expectedOid: string | null,
 	integrationRef: string,
 ): { ok: true, expectedRefOid: string | null } | { ok: false, code: 'EF-VAL-002' | 'EF-VAL-006', message: string, expectedRefOid: string | null } {
+	if (state === undefined) {
+		return { ok: false, code: 'EF-VAL-006', message: `The operation-start state of the authoritative integration ref '${integrationRef}' was never captured before validation began; a missing capture is not proven absence.`, expectedRefOid: null }
+	}
 	if (state.resolved === 'error') {
 		return { ok: false, code: 'EF-VAL-006', message: `Git is unavailable while resolving the integration ref '${integrationRef}' at the start of the operation: ${state.message}`, expectedRefOid: null }
 	}
@@ -315,7 +461,6 @@ async function checkBootstrapHistoryCondition(
 export async function validateRange(input: ValidateRangeInput): Promise<RangeValidationResult> {
 	const { git, baselineOid, proposedOid, operationStartRef, operationStartRefState } = input
 	const policy = input.policy ?? DEFAULT_POLICY
-	const getCommit = materializeCache(git)
 
 	// ---- Resolve the explicit proposed commit --------------------------------
 
@@ -390,23 +535,17 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 	let expectedRefOid: string | null = null
 
 	if (resolvedBaselineOid !== null) {
-		const baselineEntry = await git.readPathEntry(resolvedBaselineOid, ENGINEERING_PATH)
-		if (baselineEntry.kind === 'git-unavailable') {
+		const baselineObservation = await observeEfState(git, resolvedBaselineOid, 'the trusted range baseline\'s EF state')
+		if (baselineObservation.kind === 'blocked') {
 			return incompleteResult([
-				makeDiagnostic('EF-VAL-006', `Git is unavailable while reading the trusted range baseline's EF state: ${baselineEntry.message}`),
-			], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid })
-		}
-		if (baselineEntry.kind === 'missing' || baselineEntry.kind === 'error') {
-			const detail = baselineEntry.kind === 'error' ? baselineEntry.message : 'the commit could not be re-read after already being resolved'
-			return incompleteResult([
-				makeDiagnostic('EF-VAL-006', `Git is unavailable while reading the trusted range baseline's EF state: ${detail}`),
+				makeDiagnostic('EF-VAL-006', baselineObservation.message),
 			], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid })
 		}
 
-		if (baselineEntry.kind === 'resolved') {
-			previousTriple = tripleOf(baselineEntry.entry)
+		if (baselineObservation.kind === 'present') {
+			previousTriple = tripleOf(baselineObservation.entry)
 
-			const baselineMaterialized = await getCommit(resolvedBaselineOid)
+			const baselineMaterialized = await materialize(git, resolvedBaselineOid)
 			if (!baselineMaterialized.ok) {
 				if (baselineMaterialized.reason === 'git-unavailable') {
 					return incompleteResult([
@@ -446,10 +585,10 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 			}
 			expectedRefOid = refCheck.expectedRefOid
 		}
-		// `baselineEntry.kind === 'absent'`: the trusted range baseline is
-		// pre-EF. `previousTriple` stays `null`; `authoritativeIntegrationRef`
-		// is derived lazily from the proposed commit's configuration the first
-		// time a bootstrap boundary is found below.
+		// `baselineObservation.kind === 'absent'`: the trusted range baseline is
+		// pre-EF. `previousTriple` stays `null`; `authoritativeIntegrationRef` is
+		// fixed lazily from the range's OWN bootstrap boundary's configuration
+		// the first time one is found below -- never from the proposed commit.
 	}
 
 	// ---- Walk the validated commit sequence, oldest-first --------------------
@@ -458,22 +597,15 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 	let sawPresentState = previousTriple !== null
 
 	for (const oid of oids) {
-		const entryResult = await git.readPathEntry(oid, ENGINEERING_PATH)
-		if (entryResult.kind === 'git-unavailable') {
+		const observation = await observeEfState(git, oid, `commit '${oid}''s EF state`)
+		if (observation.kind === 'blocked') {
 			return incompleteResult([
 				...accumulated,
-				makeDiagnostic('EF-VAL-006', `Git is unavailable while reading commit '${oid}''s EF state: ${entryResult.message}`),
-			], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef ?? null, expectedRefOid })
-		}
-		if (entryResult.kind === 'missing' || entryResult.kind === 'error') {
-			const detail = entryResult.kind === 'error' ? entryResult.message : 'the commit could not be re-read after already being resolved'
-			return incompleteResult([
-				...accumulated,
-				makeDiagnostic('EF-VAL-006', `Git is unavailable while reading commit '${oid}''s EF state: ${detail}`),
+				makeDiagnostic('EF-VAL-006', observation.message),
 			], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef ?? null, expectedRefOid })
 		}
 
-		const currentTriple = entryResult.kind === 'resolved' ? tripleOf(entryResult.entry) : null
+		const currentTriple = observation.kind === 'present' ? tripleOf(observation.entry) : null
 
 		if (triplesEqual(currentTriple, previousTriple)) {
 			previousTriple = currentTriple
@@ -491,7 +623,8 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 
 		if (previousTriple === null && currentTriple !== null) {
 			sawPresentState = true
-			const bootstrapMaterialized = await getCommit(oid)
+
+			const bootstrapMaterialized = await materialize(git, oid)
 			if (!bootstrapMaterialized.ok) {
 				const code = bootstrapMaterialized.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-011'
 				return incompleteResult([
@@ -500,28 +633,39 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 				], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef ?? null, expectedRefOid })
 			}
 
+			// `bootstrapConfig` is read up front, before deciding whether the ref
+			// still needs fixing: THIS boundary -- never the proposed commit -- is
+			// the one authoritative source when the trusted range baseline did not
+			// already fix the ref (09-validation.md "Ref selection, capture, and
+			// staleness"). Reading the proposed commit's configuration here would
+			// be a look-ahead letting a later removal or a later malformed
+			// configuration preempt this boundary's own findings, breaking
+			// oldest-first walk termination (09-validation.md "Walk termination").
+			const bootstrapConfig = bootstrapMaterialized.commit.snapshot.config.config
+
 			if (authoritativeIntegrationRef === undefined) {
-				// The trusted range baseline was pre-EF (or omitted): the
-				// authoritative ref is derived from the proposed commit's
-				// configuration, exactly as bootstrap scope trusts the proposed
-				// configuration (09-validation.md "Ref selection, capture, and
-				// staleness").
-				const proposedMaterialized = await getCommit(resolvedProposedOid)
-				if (!proposedMaterialized.ok) {
-					const code = proposedMaterialized.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-011'
-					return incompleteResult([
+				if (!bootstrapConfig) {
+					// `config.config === null` provably implies an error-severity
+					// diagnostic is already present in
+					// `bootstrapMaterialized.commit.validation.diagnostics`:
+					// `decodeConfig` returns `{ config: null }` only alongside an
+					// `EF-FS-001` (repository/config.ts) or under `hasError`
+					// (repository/config.ts), and a wholly absent `ef.yaml` makes
+					// `validateSnapshot` push `EF-VAL-007` (snapshot-validation.ts).
+					// This boundary is therefore already the first error-severity
+					// boundary the walk was going to report; no authoritative ref
+					// exists for this range at all, so the ref-dependent checks and
+					// the bootstrap-exception history probe below are blocked
+					// dependent checks that must never be reached -- the same shape
+					// `validateTransition` already uses after its own ref-deviation
+					// return (transition-validation.ts).
+					return completeResult([
 						...accumulated,
-						makeDiagnostic(code, `Proposed commit '${resolvedProposedOid}' could not be materialized: ${proposedMaterialized.message}`),
-					], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, expectedRefOid })
+						...withCommitOid(bootstrapMaterialized.commit.validation.diagnostics, oid),
+					], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: null, expectedRefOid: null })
 				}
-				const proposedConfig = proposedMaterialized.commit.snapshot.config.config
-				if (!proposedConfig) {
-					return incompleteResult([
-						...accumulated,
-						makeDiagnostic('EF-VAL-007', `Proposed commit '${resolvedProposedOid}' does not name a valid 'integration_ref' to establish the authoritative ref for this range.`),
-					], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, expectedRefOid })
-				}
-				authoritativeIntegrationRef = proposedConfig.repository.integrationRef
+
+				authoritativeIntegrationRef = bootstrapConfig.repository.integrationRef
 
 				if (operationStartRef !== undefined && operationStartRef !== authoritativeIntegrationRef) {
 					return incompleteResult([
@@ -538,17 +682,21 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 				}
 				expectedRefOid = refCheck.expectedRefOid
 			}
+			// `authoritativeIntegrationRef !== undefined` unconditionally past
+			// this point: either the trusted range baseline already fixed it
+			// before the walk began, or it was just fixed above by THIS bootstrap
+			// boundary's own configuration. The loop invariant `previousTriple !==
+			// null => authoritativeIntegrationRef !== undefined` (established at
+			// the baseline, preserved by every subsequent boundary) makes a
+			// bootstrap boundary reached with an ALREADY-fixed ref unreachable --
+			// the bootstrap exception is available at most once per range
+			// (09-validation.md "Bootstrap exception") -- so there is no
+			// equality check to make here against `bootstrapConfig`: the value
+			// just assigned above IS `bootstrapConfig`'s own `integrationRef` by
+			// construction. The transition-branch check below is the sole
+			// enforcement point for later states preserving it.
 
 			const boundaryDiagnostics: Diagnostic[] = [...bootstrapMaterialized.commit.validation.diagnostics]
-
-			const bootstrapConfig = bootstrapMaterialized.commit.snapshot.config.config
-			if (bootstrapConfig && bootstrapConfig.repository.integrationRef !== authoritativeIntegrationRef) {
-				return incompleteResult([
-					...accumulated,
-					...withCommitOid(boundaryDiagnostics, oid),
-					makeDiagnostic('EF-VAL-002', `Commit '${oid}''s configuration's 'integration_ref' ('${bootstrapConfig.repository.integrationRef}') does not match the range's fixed 'integration_ref' ('${authoritativeIntegrationRef}').`, { commitOid: oid }),
-				], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef, expectedRefOid })
-			}
 
 			// ---- Bootstrap history condition (09-validation.md "Bootstrap exception") ----
 
@@ -599,7 +747,7 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 
 		// ---- Ordinary transition boundary (present -> distinct present) -------
 
-		const transitionMaterialized = await getCommit(oid)
+		const transitionMaterialized = await materialize(git, oid)
 		if (!transitionMaterialized.ok) {
 			const code = transitionMaterialized.reason === 'git-unavailable' ? 'EF-VAL-006' : 'EF-VAL-011'
 			return incompleteResult([

@@ -105,6 +105,22 @@ function withSideEffectBeforeCall(base: GitExecutor, matches: (args: readonly st
 	}
 }
 
+/** Wraps a real executor, counting `execIn` invocations whose args match `predicate`; every call still passes through to the real executor unchanged. */
+function countingExecutor(base: GitExecutor, predicate: (args: readonly string[]) => boolean): { executor: GitExecutor, count: () => number } {
+	let count = 0
+	return {
+		executor: {
+			exec: (args, options) => base.exec(args, options),
+			execIn: (root, args, options): Promise<GitExecOutcome> => {
+				if (predicate(args))
+					count += 1
+				return base.execIn(root, args, options)
+			},
+		},
+		count: () => count,
+	}
+}
+
 const GIT_TEST_ENV = {
 	GIT_AUTHOR_NAME: 'EF Test',
 	GIT_AUTHOR_EMAIL: 'ef-test@example.com',
@@ -1453,7 +1469,7 @@ schemas:
 				.toBe(0)
 		})
 
-		it('selects integration_ref from the proposed commit\'s configuration when the baseline is pre-EF', async () => {
+		it('selects integration_ref from the range\'s bootstrap commit\'s configuration when the baseline is pre-EF', async () => {
 			await writeFile(root, 'README.txt', 'pre-EF\n')
 			const baseline = commitAll(root, 'pre-EF baseline')
 			await writeMinimalProject(root)
@@ -1466,6 +1482,63 @@ schemas:
 				.toBe('refs/heads/main')
 			expect(outcome.exitCode)
 				.toBe(0)
+		})
+
+		it('required end-to-end (round 2): the preflight captures integration_ref from the bootstrap commit, not the range end -- a later removal reports EF-VAL-013, not a stale EF-VAL-007', async () => {
+			await writeFile(root, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(root, 'pre-EF baseline')
+			await writeMinimalProject(root)
+			commitAll(root, 'bootstrap declaring refs/heads/main')
+			await removeFile(root, '.engineering')
+			const removalOid = commitAll(root, 'removes .engineering')
+			git(root, ['update-ref', 'refs/heads/main', baseline])
+			// Ordinary upward project discovery (implicit `--project`) requires
+			// `.engineering` to exist in the CURRENT working tree, independent of
+			// the historical commits being validated -- restore it on disk
+			// (uncommitted) so discovery succeeds.
+			await writeMinimalProject(root)
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed: removalOid, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(1)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(true)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-013')
+			expect(json.diagnostics[0].commit_oid)
+				.toBe(removalOid)
+			expect(json.integration_ref)
+				.toBe('refs/heads/main')
+			expect(json.expected_ref_oid)
+				.toBe(baseline)
+		})
+
+		it('the bootstrap commit\'s own config still fixes integration_ref even when a LATER, strictly-newer proposed commit has a malformed ef.yaml', async () => {
+			await writeFile(root, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(root, 'pre-EF baseline')
+			await writeMinimalProject(root)
+			const bootstrapOid = commitAll(root, 'bootstrap declaring refs/heads/main')
+			await writeFile(root, '.engineering/ef.yaml', 'not: [valid, yaml: broken\n')
+			const proposed = commitAll(root, 'later commit with malformed ef.yaml')
+			git(root, ['update-ref', 'refs/heads/main', baseline])
+			// Restore a decodable config on disk (uncommitted) so implicit
+			// project discovery succeeds independently of the malformed
+			// historical commit under test.
+			await writeMinimalProject(root)
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.integration_ref)
+				.toBe('refs/heads/main')
+			expect(json.expected_ref_oid)
+				.toBe(baseline)
+			expect(outcome.exitCode)
+				.toBe(1)
+			const fsFinding = json.diagnostics.find((d: { code: string }) => d.code === 'EF-FS-001')
+			expect(fsFinding.commit_oid)
+				.toBe(proposed)
+			void bootstrapOid
 		})
 
 		it('reports EF-VAL-006 (never an empty-config fallback) when the baseline\'s ef.yaml is a symlink (mode 120000)', async () => {
@@ -1486,7 +1559,7 @@ schemas:
 				.toBe(true)
 		})
 
-		it('reports EF-VAL-006 when the fallback proposed commit\'s ef.yaml is a symlink (mode 120000) and the baseline is pre-EF', async () => {
+		it('reports EF-VAL-006 when the range\'s bootstrap commit\'s ef.yaml is a symlink (mode 120000) and the baseline is pre-EF', async () => {
 			await writeFile(root, 'README.txt', 'pre-EF\n')
 			const baseline = commitAll(root, 'pre-EF baseline')
 			await writeMinimalProject(root)
@@ -1494,6 +1567,35 @@ schemas:
 			stageSymlinkModeConfig(root, CONFIG_YAML)
 			const proposedTree = writeTreeOid(root)
 			const proposed = commitTreeOid(root, proposedTree, 'proposed with symlinked config', baseline)
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(false)
+			expect(json.diagnostics.some((d: { code: string, message: string }) => d.code === 'EF-VAL-006' && d.message.includes('not a regular file')))
+				.toBe(true)
+		})
+
+		it('reports EF-VAL-006 when the bootstrap commit\'s ef.yaml is a symlink and the bootstrap commit is STRICTLY OLDER than --proposed', async () => {
+			await writeFile(root, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(root, 'pre-EF baseline')
+			await writeMinimalProject(root)
+			git(root, ['add', '-A'])
+			stageSymlinkModeConfig(root, CONFIG_YAML)
+			const bootstrapTree = writeTreeOid(root)
+			const bootstrapOid = commitTreeOid(root, bootstrapTree, 'bootstrap with symlinked config', baseline)
+
+			// Stage one more file on top of the SAME index (still holding the
+			// symlinked `.engineering/ef.yaml` entry) and commit again -- never
+			// checking out or resetting, so the symlink is never materialized on
+			// disk. `git add` is scoped to only the new path so the existing
+			// symlink-mode index entry is left completely untouched.
+			await writeFile(root, 'unrelated-later.txt', 'x\n')
+			git(root, ['add', 'unrelated-later.txt'])
+			const laterTree = writeTreeOid(root)
+			const proposed = commitTreeOid(root, laterTree, 'a later, unrelated commit', bootstrapOid)
 
 			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
 			expect(outcome.exitCode)
@@ -1522,6 +1624,66 @@ schemas:
 				.toBe('EF-VAL-002')
 			expect(json.expected_ref_oid)
 				.toBe(newTip)
+		})
+
+		// ---- Round 2: the preflight probes the ref exactly once, and only when one exists --
+
+		it('makes no ref probe (show-ref) at all for an EF-inert range', async () => {
+			await writeFile(root, 'a.txt', 'a\n')
+			const baseline = commitAll(root, 'a')
+			await writeFile(root, 'b.txt', 'b\n')
+			const proposed = commitAll(root, 'b')
+			// Ordinary upward project discovery (implicit `--project`) requires
+			// `.engineering` to exist in the CURRENT working tree -- write it
+			// uncommitted so discovery succeeds without making the validated
+			// range itself EF-bearing.
+			await writeMinimalProject(root)
+
+			const { executor, count } = countingExecutor(createGitExecutor(), args => args[0] === 'show-ref')
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor })
+			expect(outcome.exitCode)
+				.toBe(0)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.integration_ref)
+				.toBeNull()
+			expect(json.expected_ref_oid)
+				.toBeNull()
+			expect(json.diagnostics.map((d: { code: string }) => d.code))
+				.toEqual(['EF-VAL-014'])
+			expect(count())
+				.toBe(0)
+		})
+
+		it('skips the ref-selection preflight entirely (zero show-ref calls) when --baseline is a well-formed but nonexistent OID', async () => {
+			await writeMinimalProject(root)
+			const proposed = commitAll(root, 'proposed')
+			const nonexistentBaseline = 'a'.repeat(40)
+
+			const { executor, count } = countingExecutor(createGitExecutor(), args => args[0] === 'show-ref')
+			const outcome = await runValidateCommand({ scope: 'range', baseline: nonexistentBaseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor })
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-002')
+			expect(count())
+				.toBe(0)
+		})
+
+		it('skips the ref-selection preflight entirely (zero show-ref calls) when --proposed is a 64-hex OID in a SHA-1 repository', async () => {
+			await writeMinimalProject(root)
+			const baseline = commitAll(root, 'baseline')
+			const sha256Shaped = 'a'.repeat(64)
+
+			const { executor, count } = countingExecutor(createGitExecutor(), args => args[0] === 'show-ref')
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed: sha256Shaped, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, { cwd: root, executor })
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-011')
+			expect(count())
+				.toBe(0)
 		})
 
 		// ---- --workspace uses the proposed commit's configuration -----------------

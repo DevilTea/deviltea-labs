@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
 import { createGitRepository } from '../git/repository'
 import { computeHistory } from './query-history'
-import { validateRange } from './range-validation'
+import { findRangeIntegrationRefSource, validateRange } from './range-validation'
 import { loadSnapshotFromCommit } from './snapshot'
 import { validateSnapshot } from './snapshot-validation'
 
@@ -1358,6 +1358,511 @@ describe('validateRange', () => {
 				.toEqual(['EF-VAL-006'])
 			expect(result.diagnostics[0]!.commitOid)
 				.toBeUndefined()
+		})
+	})
+
+	// -------------------------------------------------------------------------
+	// Round 2 fix: the range's bootstrap boundary (never the proposed commit)
+	// fixes the authoritative integration_ref -- no look-ahead
+	// -------------------------------------------------------------------------
+
+	describe('ref selection: the bootstrap boundary fixes integration_ref, never the proposed commit', () => {
+		it('required (reviewer scenario): EF-state removal at the proposed commit no longer preempts the bootstrap boundary\'s own ref fixing', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap declaring refs/heads/main')
+			await removeFile(tempDir, '.engineering')
+			const removalOid = commitAll(tempDir, 'removes the EF state')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: removalOid,
+				operationStartRef: 'refs/heads/main',
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.complete)
+				.toBe(true)
+			expect(result.valid)
+				.toBe(false)
+			expect(result.exitCode)
+				.toBe(1)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-013'])
+			expect(result.diagnostics[0]!.commitOid)
+				.toBe(removalOid)
+			expect(result.integrationRef)
+				.toBe('refs/heads/main')
+			expect(result.expectedRefOid)
+				.toBe(baseline)
+			void bootstrapOid
+		})
+
+		it('required (reviewer scenario): a malformed later commit no longer preempts the bootstrap boundary\'s own findings', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap declaring refs/heads/main')
+			await writeFile(tempDir, '.engineering/ef.yaml', 'not: [valid, yaml: broken\n')
+			const malformedOid = commitAll(tempDir, 'malformed ef.yaml')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: malformedOid,
+				operationStartRef: 'refs/heads/main',
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.complete)
+				.toBe(true)
+			expect(result.exitCode)
+				.toBe(1)
+			expect(result.integrationRef)
+				.toBe('refs/heads/main')
+			expect(result.expectedRefOid)
+				.toBe(baseline)
+			const fsFinding = result.diagnostics.find(d => d.code === 'EF-FS-001')
+			expect(fsFinding)
+				.toBeDefined()
+			expect(fsFinding!.commitOid)
+				.toBe(malformedOid)
+			expect(commitOidsOf(result.diagnostics))
+				.not.toContain(bootstrapOid)
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-VAL-007')
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-VAL-002')
+		})
+
+		it('preemption regression: an invalid bootstrap boundary wins even when a later commit is also malformed', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/chg/CHG-001.md', changeMd('CHG-001', '[]'))
+			const invalidBootstrapOid = commitAll(tempDir, 'bootstrap with a CHG (invalid)')
+			await writeFile(tempDir, '.engineering/ef.yaml', 'not: [valid, yaml: broken\n')
+			const malformedOid = commitAll(tempDir, 'later malformed ef.yaml')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: malformedOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.complete)
+				.toBe(true)
+			expect(result.exitCode)
+				.toBe(1)
+			for (const d of result.diagnostics) {
+				expect(d.commitOid)
+					.toBe(invalidBootstrapOid)
+			}
+			expect(codesOf(result.diagnostics))
+				.toContain('EF-VAL-010')
+			expect(codesOf(result.diagnostics))
+				.not.toContain('EF-FS-001')
+			expect(commitOidsOf(result.diagnostics))
+				.not.toContain(malformedOid)
+		})
+
+		it('structural no-look-ahead proof: the proposed OID is never read when the walk stops at the bootstrap boundary', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			await writeFile(tempDir, '.engineering/chg/CHG-001.md', changeMd('CHG-001', '[]'))
+			const invalidBootstrapOid = commitAll(tempDir, 'bootstrap with a CHG (invalid)')
+			await writeFile(tempDir, '.engineering/ef.yaml', 'not: [valid, yaml: broken\n')
+			const malformedOid = commitAll(tempDir, 'later malformed ef.yaml')
+
+			const real = repo()
+			const readTreeOids: string[] = []
+			const wrapped = wrapGitRepository(real, {
+				readTree: async (oid: string) => {
+					readTreeOids.push(oid)
+					return real.readTree(oid)
+				},
+			})
+
+			const result = await validateRange({
+				git: wrapped,
+				baselineOid: baseline,
+				proposedOid: malformedOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(1)
+			expect(readTreeOids)
+				.not.toContain(malformedOid)
+			expect(readTreeOids)
+				.toContain(invalidBootstrapOid)
+		})
+
+		it('a bootstrap boundary that names no valid integration_ref is complete and invalid, with no ref check attempted', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeFile(tempDir, '.engineering/.gitignore', GITIGNORE)
+			await writeFile(tempDir, '.engineering/PROJECT.md', projectMd())
+			const noConfigOid = commitAll(tempDir, '.engineering without ef.yaml')
+
+			const withState = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: noConfigOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+			expect(withState.complete)
+				.toBe(true)
+			expect(withState.valid)
+				.toBe(false)
+			expect(withState.exitCode)
+				.toBe(1)
+			expect(withState.integrationRef)
+				.toBeNull()
+			expect(withState.expectedRefOid)
+				.toBeNull()
+			expect(withState.diagnostics.some(d => d.severity === 'error' && d.commitOid === noConfigOid))
+				.toBe(true)
+
+			const withoutState = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: noConfigOid,
+				policy: { strict: false, warningsAsErrors: false },
+			})
+			expect(withoutState.complete)
+				.toBe(true)
+			expect(withoutState.valid)
+				.toBe(false)
+			expect(withoutState.exitCode)
+				.toBe(1)
+			expect(withoutState.integrationRef)
+				.toBeNull()
+			expect(withoutState.expectedRefOid)
+				.toBeNull()
+			expect(codesOf(withoutState.diagnostics))
+				.toEqual(codesOf(withState.diagnostics))
+		})
+
+		it('later states must still preserve the ref fixed by the range\'s own bootstrap boundary (EF-VAL-002)', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap declaring refs/heads/main')
+			await writeFile(tempDir, '.engineering/ef.yaml', CONFIG_YAML_OTHER_REF)
+			const deviatingOid = commitAll(tempDir, 'deviates the integration_ref')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: deviatingOid,
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(2)
+			expect(result.complete)
+				.toBe(false)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-002'])
+			const finding = result.diagnostics.find(d => d.code === 'EF-VAL-002')!
+			expect(finding.commitOid)
+				.toBe(deviatingOid)
+			expect(result.integrationRef)
+				.toBe('refs/heads/main')
+			void bootstrapOid
+		})
+
+		it('the captured-ref check runs at the bootstrap boundary, before a later removal is ever reached', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeFile(tempDir, 'other.txt', 'unrelated\n')
+			const otherOid = commitAll(tempDir, 'unrelated commit')
+			await writeMinimalProject(tempDir)
+			commitAll(tempDir, 'bootstrap declaring refs/heads/main')
+			await removeFile(tempDir, '.engineering')
+			const removalOid = commitAll(tempDir, 'removes the EF state')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: removalOid,
+				operationStartRefState: { resolved: true, oid: otherOid },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(2)
+			expect(result.complete)
+				.toBe(false)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-002'])
+		})
+
+		it('a captured ref NAME mismatch is judged against the bootstrap boundary\'s own configuration', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap declaring refs/heads/main')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: bootstrapOid,
+				operationStartRef: 'refs/heads/other',
+				operationStartRefState: { resolved: true, oid: baseline },
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(2)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-002'])
+		})
+
+		it('a missing capture is never proven ref absence, even with an EF-bearing baseline (EF-VAL-006, not EF-VAL-002)', async () => {
+			await writeMinimalProject(tempDir)
+			const baseline = commitAll(tempDir, 'baseline')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: baseline,
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(2)
+			expect(result.complete)
+				.toBe(false)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-006'])
+			expect(result.diagnostics[0]!.message)
+				.toContain('refs/heads/main')
+		})
+
+		it('a missing capture is never proven ref absence for a pre-EF baseline with a bootstrap in range (EF-VAL-006, not EF-VAL-002)', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap declaring refs/heads/main')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: bootstrapOid,
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(2)
+			expect(result.complete)
+				.toBe(false)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-006'])
+			expect(result.diagnostics[0]!.message)
+				.toContain('refs/heads/main')
+		})
+
+		it('an EF-inert range makes no ref check and needs no capture, even under strict mode', async () => {
+			await writeFile(tempDir, 'a.txt', 'a\n')
+			const baseline = commitAll(tempDir, 'a')
+			await writeFile(tempDir, 'b.txt', 'b\n')
+			const proposed = commitAll(tempDir, 'b')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: baseline,
+				proposedOid: proposed,
+				policy: { strict: true, warningsAsErrors: true },
+			})
+
+			expect(result.exitCode)
+				.toBe(0)
+			expect(result.complete)
+				.toBe(true)
+			expect(result.valid)
+				.toBe(true)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-014'])
+			expect(result.integrationRef)
+				.toBeNull()
+			expect(result.expectedRefOid)
+				.toBeNull()
+		})
+
+		it('an EF-inert empty range (baseline === proposed) makes no ref check and needs no capture', async () => {
+			await writeFile(tempDir, 'a.txt', 'a\n')
+			const oid = commitAll(tempDir, 'a')
+
+			const result = await validateRange({
+				git: repo(),
+				baselineOid: oid,
+				proposedOid: oid,
+				policy: { strict: false, warningsAsErrors: false },
+			})
+
+			expect(result.exitCode)
+				.toBe(0)
+			expect(codesOf(result.diagnostics))
+				.toEqual(['EF-VAL-014'])
+			expect(result.integrationRef)
+				.toBeNull()
+			expect(result.expectedRefOid)
+				.toBeNull()
+		})
+	})
+
+	// -------------------------------------------------------------------------
+	// findRangeIntegrationRefSource: the ONE definition of the ref-selection
+	// rule, consumed by the CLI preflight -- direct tests
+	// -------------------------------------------------------------------------
+
+	describe('findRangeIntegrationRefSource', () => {
+		it('returns the trusted range baseline when its .engineering entry is present', async () => {
+			await writeMinimalProject(tempDir)
+			const baseline = commitAll(tempDir, 'baseline')
+			await writeFile(tempDir, 'unrelated.txt', 'x\n')
+			const proposed = commitAll(tempDir, 'unrelated')
+
+			const source = await findRangeIntegrationRefSource(repo(), baseline, proposed)
+			expect(source)
+				.toEqual({ kind: 'commit', role: 'baseline', commitOid: baseline })
+		})
+
+		it('returns the range\'s bootstrap boundary -- not the proposed commit -- when the baseline is pre-EF', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeFile(tempDir, 'unrelated-1.txt', 'x\n')
+			commitAll(tempDir, 'unrelated 1')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap')
+			await writeFile(tempDir, 'unrelated-2.txt', 'x\n')
+			const proposed = commitAll(tempDir, 'unrelated 2')
+
+			const source = await findRangeIntegrationRefSource(repo(), baseline, proposed)
+			expect(source)
+				.toEqual({ kind: 'commit', role: 'bootstrap', commitOid: bootstrapOid })
+			expect(source).not.toMatchObject({ commitOid: proposed })
+		})
+
+		it('still finds the bootstrap boundary when the proposed commit itself removes .engineering -- the removal must never hide it', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap')
+			await removeFile(tempDir, '.engineering')
+			const proposed = commitAll(tempDir, 'removes .engineering')
+
+			const source = await findRangeIntegrationRefSource(repo(), baseline, proposed)
+			expect(source)
+				.toEqual({ kind: 'commit', role: 'bootstrap', commitOid: bootstrapOid })
+		})
+
+		it('finds a root-commit bootstrap when baselineOid is null', async () => {
+			await writeMinimalProject(tempDir)
+			const root = commitAll(tempDir, 'root bootstrap')
+
+			const source = await findRangeIntegrationRefSource(repo(), null, root)
+			expect(source)
+				.toEqual({ kind: 'commit', role: 'bootstrap', commitOid: root })
+		})
+
+		it('returns none for an EF-inert range', async () => {
+			await writeFile(tempDir, 'a.txt', 'a\n')
+			const baseline = commitAll(tempDir, 'a')
+			await writeFile(tempDir, 'b.txt', 'b\n')
+			const proposed = commitAll(tempDir, 'b')
+
+			const source = await findRangeIntegrationRefSource(repo(), baseline, proposed)
+			expect(source)
+				.toEqual({ kind: 'none' })
+		})
+
+		it('returns none (never a false EF-VAL-* report) for each listFirstParentRange failure kind, leaving validateRange as the sole reporter', async () => {
+			// A pre-EF baseline forces the function past its own baseline check
+			// and into the `listFirstParentRange` call being exercised here.
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeFile(tempDir, 'unrelated.txt', 'x\n')
+			const proposed = commitAll(tempDir, 'unrelated')
+
+			for (const failure of [
+				{ kind: 'truncated' as const },
+				{ kind: 'unresolved' as const },
+				{ kind: 'not-an-ancestor' as const },
+				{ kind: 'git-unavailable' as const, message: 'simulated' },
+			]) {
+				const wrapped = wrapGitRepository(repo(), {
+					listFirstParentRange: async () => failure,
+				})
+				const source = await findRangeIntegrationRefSource(wrapped, baseline, proposed)
+				expect(source)
+					.toEqual({ kind: 'none' })
+			}
+		})
+
+		it('returns blocked (never none, never a silently skipped commit) for each readPathEntry failure kind at the baseline position', async () => {
+			await writeMinimalProject(tempDir)
+			const baseline = commitAll(tempDir, 'baseline')
+			await writeFile(tempDir, 'unrelated.txt', 'x\n')
+			const proposed = commitAll(tempDir, 'unrelated')
+
+			for (const failure of [
+				{ kind: 'git-unavailable' as const, message: 'simulated git-unavailable' },
+				{ kind: 'missing' as const },
+				{ kind: 'error' as const, message: 'simulated error' },
+			]) {
+				const wrapped = wrapGitRepository(repo(), {
+					readPathEntry: async () => failure,
+				})
+				const source = await findRangeIntegrationRefSource(wrapped, baseline, proposed)
+				expect(source.kind)
+					.toBe('blocked')
+				if (source.kind === 'blocked') {
+					expect(source.message)
+						.toContain('baseline')
+				}
+			}
+		})
+
+		it('returns blocked (never none, never a silently skipped commit) for each readPathEntry failure kind at a mid-sequence position', async () => {
+			await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(tempDir, 'pre-EF baseline')
+			await writeMinimalProject(tempDir)
+			const bootstrapOid = commitAll(tempDir, 'bootstrap')
+
+			for (const failure of [
+				{ kind: 'git-unavailable' as const, message: 'simulated git-unavailable' },
+				{ kind: 'missing' as const },
+				{ kind: 'error' as const, message: 'simulated error' },
+			]) {
+				const real = repo()
+				const wrapped = wrapGitRepository(real, {
+					readPathEntry: async (oid: string, path: string) => {
+						if (oid === bootstrapOid)
+							return failure
+						return real.readPathEntry(oid, path)
+					},
+				})
+				const source = await findRangeIntegrationRefSource(wrapped, baseline, bootstrapOid)
+				expect(source.kind)
+					.toBe('blocked')
+				if (source.kind === 'blocked') {
+					expect(source.message)
+						.toContain(`commit '${bootstrapOid}'`)
+				}
+			}
 		})
 	})
 })
