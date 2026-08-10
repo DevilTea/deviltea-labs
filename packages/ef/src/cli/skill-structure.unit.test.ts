@@ -257,3 +257,60 @@ describe('existing-project bootstrap reference honors the bootstrap contract', (
 			.toBeGreaterThan(0)
 	})
 })
+
+// ---- Terminology-as-first-class-inventory regression coverage -------------
+//
+// Structural (not prose) checks that the brownfield inventory step actually
+// asks for Terminology candidates, that the accepted candidates are wired
+// into the `ef init` call rather than left for a routine post-bootstrap CHG,
+// and that the canonical Terminology row-ordering rule (and its diagnostics)
+// is stated in the authoring reference. These pin the *shape* of the
+// guidance (heading present, section mentions the concept, `--terminology`
+// appears in the init step, the diagnostic codes are named) without
+// snapshotting the prose itself.
+
+/** The text strictly between one `## Step N - ...` heading and the next top-level heading. */
+function sectionBody(text: string, startHeadingPrefix: string): string {
+	const startIndex = text.indexOf(startHeadingPrefix)
+	expect(startIndex, `expected to find a heading starting with ${JSON.stringify(startHeadingPrefix)}`)
+		.toBeGreaterThanOrEqual(0)
+	const nextHeadingIndex = text.indexOf('\n## ', startIndex + startHeadingPrefix.length)
+	return nextHeadingIndex === -1 ? text.slice(startIndex) : text.slice(startIndex, nextHeadingIndex)
+}
+
+describe('brownfield bootstrap inventory covers Terminology candidates', () => {
+	const bootstrapFile = path.join(skillsDir, 'author-engineering-files/references/existing-project-bootstrap.md')
+	const text = fs.readFileSync(bootstrapFile, 'utf8')
+
+	it('step 3 (initial knowledge inventory) explicitly asks for Terminology candidates', () => {
+		const step3 = sectionBody(text, '## Step 3')
+		expect(/terminology/i.test(step3), 'Step 3 never mentions Terminology')
+			.toBe(true)
+		expect(/candidate/i.test(step3), 'Step 3 never frames Terminology as a candidate pending human acceptance')
+			.toBe(true)
+	})
+
+	it('step 4 (initialize EF) wires accepted Terminology into the ef init call', () => {
+		const step4 = sectionBody(text, '## Step 4')
+		expect(step4.includes('--terminology'), 'Step 4 never passes accepted terms via --terminology')
+			.toBe(true)
+	})
+})
+
+describe('draft authoring reference states the Terminology row-ordering rule', () => {
+	const draftAuthoringFile = path.join(skillsDir, 'author-engineering-files/references/draft-authoring.md')
+	const text = fs.readFileSync(draftAuthoringFile, 'utf8')
+
+	it('documents the canonical NFC/uniqueness/bytewise-order rule and its diagnostics', () => {
+		expect(/terminology/i.test(text), 'never mentions Terminology')
+			.toBe(true)
+		expect(/nfc/i.test(text), 'never states the Unicode NFC requirement')
+			.toBe(true)
+		expect(/utf-8 byte sequence/i.test(text), 'never states the UTF-8 bytewise ordering rule')
+			.toBe(true)
+		expect(text.includes('EF-BODY-018'), 'never names EF-BODY-018')
+			.toBe(true)
+		expect(text.includes('EF-BODY-019'), 'never names EF-BODY-019')
+			.toBe(true)
+	})
+})
