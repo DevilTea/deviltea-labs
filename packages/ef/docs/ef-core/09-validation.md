@@ -301,18 +301,37 @@ The authoritative `integration_ref` is read only from a trusted commit tree:
 
 - from the trusted range baseline's configuration when that baseline contains a
   decodable EF state; otherwise
-- from the proposed commit's configuration, exactly as bootstrap scope trusts
-  the proposed configuration.
+- from the configuration of the range's bootstrap boundary — the oldest commit
+  in the validated sequence whose EF state is present — exactly as bootstrap
+  scope trusts the bootstrapping commit's own configuration.
 
-When the value is taken from the proposed configuration, the bootstrap boundary
-inside the range MUST declare that same ref. Every EF state in the range MUST
-declare it. Any deviation is `EF-VAL-002` and exits `2`.
+The value is never read from a commit later in the sequence than the boundary
+being evaluated. Selecting it from the proposed commit would let a later
+commit's content decide an earlier boundary's outcome, contradicting
+oldest-first walk termination: a range whose proposed commit removes the EF
+state, or whose later configuration is malformed, MUST still report the earlier
+boundary's own finding first. Every EF state in the range from that boundary
+onward MUST declare the same ref. Any deviation is `EF-VAL-002` and exits `2`.
+
+When the range's bootstrap boundary names no valid `integration_ref` at all,
+that state is itself invalid: no authoritative ref exists for the range, no
+ref-state check is performed, and the result is complete and invalid on that
+boundary's own findings with `integration_ref` and `expected_ref_oid` null.
 
 Operation-start ref state is an explicit validation input. The integration
 operation captures the state of the authoritative ref once before validation and
 supplies a proven OID, proven absence, or a probe failure. The validator MUST
 NOT resolve or re-resolve that ref itself. The captured ref name MUST equal the
-authoritative `integration_ref`; a mismatch is `EF-VAL-002`.
+authoritative `integration_ref`; a mismatch is `EF-VAL-002`. Identifying which
+commit fixes that ref is a read of immutable Git objects — the `.engineering`
+tree entry of the endpoints and of the first-parent sequence between them, and
+then that one commit's configuration — and is not itself validation: it
+materializes nothing, evaluates no rule, and emits no finding. The single
+mutable observation, the ref probe, still happens exactly once, after that
+identification and before any boundary is evaluated. A caller that supplies no
+captured ref state at all while the range has an authoritative `integration_ref`
+has not met this obligation: the result is `EF-VAL-006` and exits `2`, and the
+absence of a capture MUST NOT be read as proven ref absence.
 
 That one-time capture MUST be performed by probing the exact `integration_ref`
 name in the local Git repository the operation is bound to, using that
@@ -322,10 +341,14 @@ whose local repository never materializes that ref name — as a resolvable ref
 or as a provable absence — cannot supply a valid captured ref state, regardless
 of which commit is otherwise checked out or reachable there.
 
-A complete range result requires the captured operation-start OID to equal the
-trusted range baseline OID: either both are present and equal, or both are
-absent. Any other combination is `EF-VAL-002` and exits `2`. A failed ref probe
-is `EF-VAL-006`, exits `2`, and MUST NOT be folded into proven absence.
+A complete range result that has an authoritative `integration_ref` requires the
+captured operation-start OID to equal the trusted range baseline OID: either
+both are present and equal, or both are absent. Any other combination is
+`EF-VAL-002` and exits `2`. A failed ref probe is `EF-VAL-006`, exits `2`, and
+MUST NOT be folded into proven absence. A complete result whose
+`integration_ref` is null — an EF-inert range, or a range whose first EF state
+named no valid `integration_ref` — performs no such check and reports
+`expected_ref_oid` as null.
 
 Running range validation after `integration_ref` has already advanced to the
 proposed commit is therefore stale by construction and reports `EF-VAL-002` with
@@ -346,7 +369,10 @@ Range validation reports the findings of the first state or boundary that
 produces an error-severity diagnostic and then stops. Later states and
 boundaries are blocked dependent checks and produce no diagnostics: feeding an
 already-invalid state into a later boundary comparison would emit the
-speculative aliases the cascading rules prohibit.
+speculative aliases the cascading rules prohibit. No boundary's outcome may
+depend on content from a commit later in the sequence; in particular the
+authoritative `integration_ref` is never read from the proposed commit when a
+bootstrap boundary inside the range fixes it.
 
 Warning-severity findings never stop the walk, including under strict or
 warnings-as-errors policy, because policy changes outcome rather than diagnostic
@@ -992,19 +1018,23 @@ Rules:
   the trusted baseline configuration for transition, the proposed
   configuration for bootstrap, or the current configuration for snapshot. For
   range it is selected from the trusted range baseline's configuration when
-  that baseline contains a decodable EF state, and from the proposed
-  configuration otherwise. It is null when no applicable valid configuration
-  could be loaded, and null on a complete range result that evaluated no EF
-  state boundary.
+  that baseline's `.engineering` entry is present, and otherwise from the
+  configuration of the range's bootstrap boundary — the oldest commit in the
+  validated sequence whose EF state is present. It is null when no applicable
+  valid configuration could be loaded, and null on a complete range result
+  that evaluated no EF state boundary or whose first EF state named no valid
+  `integration_ref`.
 - `expected_ref_oid` is the operation-start OID captured from `integration_ref`
   for transition, bootstrap, and range, or null when that ref was unresolved. A
   complete transition requires it to equal `baseline_oid`. A complete range
-  requires it to equal `baseline_oid` as well, with both values null when the
-  range is EF-inert or when the caller asserted and validation proved that the
-  ref was unresolved. It is always null for snapshot scope. On an incomplete
-  result, null can also mean that the ref state could not be established;
-  `complete` distinguishes that case from a complete bootstrap or range whose
-  expected ref state is absence.
+  whose `integration_ref` is non-null requires it to equal `baseline_oid` as
+  well, with both values null when the caller asserted and validation proved
+  that the ref was unresolved; a complete range whose `integration_ref` is null
+  (EF-inert, or a first EF state that named no valid `integration_ref`) reports
+  it as null and makes no such comparison. It is always null for snapshot
+  scope. On an incomplete result, null can also mean that the ref state could
+  not be established; `complete` distinguishes that case from a complete
+  bootstrap or range whose expected ref state is absence.
 - `complete` is false when exit is `2` or `3`.
 - `valid` reflects the selected finding policy.
 - `valid` MUST be false when `complete` is false.

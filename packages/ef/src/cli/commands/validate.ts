@@ -26,9 +26,17 @@
  * 09-validation.md's "operation-start captured ... local-ref state" is
  * defined against the trusted commit's own fixed ref, resolved fresh at the
  * moment validation begins. For range scope the ref is selected from the
- * trusted range baseline's configuration when it is EF-bearing, and from the
- * proposed commit's configuration otherwise (09-validation.md "Ref
- * selection, capture, and staleness").
+ * trusted range baseline's configuration when the baseline's `.engineering`
+ * entry is present, and otherwise from the configuration of the range's
+ * bootstrap boundary -- the oldest commit on the validated first-parent
+ * sequence whose `.engineering` entry is present -- via
+ * `findRangeIntegrationRefSource` (09-validation.md "Ref selection, capture,
+ * and staleness"). It is NEVER read from the `--proposed` commit to select
+ * the ref: the preflight below reads only immutable Git objects (tree
+ * entries along the first-parent sequence, then one commit's configuration)
+ * and performs the single mutable ref probe last, immediately before
+ * `validateRange` runs, so the capture stays a one-time operation-start
+ * observation of the ref NAME in this local repository.
  */
 
 import type { OperationStartRefState } from '../../application/bootstrap-validation'
@@ -40,7 +48,7 @@ import type { Config } from '../../repository/config'
 import type { CommandOutcome } from '../command-outcome'
 import type { LoadWorkingTreeContextResult } from '../working-tree-context'
 import { validateBootstrap } from '../../application/bootstrap-validation'
-import { validateRange } from '../../application/range-validation'
+import { findRangeIntegrationRefSource, validateRange } from '../../application/range-validation'
 import { summarizeValidation } from '../../application/snapshot-validation'
 import { validateTransition } from '../../application/transition-validation'
 import { severityOf } from '../../domain/diagnostic-codes'
@@ -356,63 +364,76 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	// ---- range (09-validation.md "Range scope") --------------------------------
 
 	if (options.scope === 'range') {
-		// `--baseline` is optional for range scope: resolve it only when
-		// supplied. A malformed/missing/non-commit value is intentionally left
-		// for `validateRange` itself to report (`EF-VAL-002`) -- this peek is
-		// only used to pick which commit's configuration establishes the
-		// authoritative ref to capture, exactly mirroring the transition
-		// branch's own `operationStartRefOid` derivation above.
+		// Git-object-only preflight (09-validation.md "Ref selection, capture,
+		// and staleness"): locate the ONE commit that fixes the range's
+		// authoritative `integration_ref` -- the trusted range baseline's own
+		// configuration when its `.engineering` entry is present, and otherwise
+		// the range's bootstrap boundary, via `findRangeIntegrationRefSource`
+		// (the same rule `validateRange`'s own walk independently re-derives) --
+		// and read only THAT commit's configuration. The `--proposed` commit is
+		// NEVER read to select the ref: doing so would be a look-ahead letting a
+		// later removal or a later malformed configuration preempt an earlier
+		// boundary's own findings. Only after this Git-object-only
+		// identification does the single mutable ref probe run, exactly once,
+		// immediately before `validateRange` itself.
+		//
+		// A malformed/missing/non-commit `--baseline` or `--proposed` is
+		// intentionally left for `validateRange` itself to report
+		// (`EF-VAL-002`/`EF-VAL-011`/`EF-VAL-006`) -- this preflight is simply
+		// skipped for unusable endpoints (`endpointsUsable`) so it never probes
+		// a ref for a range it cannot itself go on to validate.
 		let resolvedBaselineOid: string | null = null
+		let endpointsUsable = true
 		if (options.baseline !== undefined) {
 			const baselineResolved = await git.resolveCommit(options.baseline)
 			if (baselineResolved.kind === 'resolved')
 				resolvedBaselineOid = baselineResolved.oid
+			else
+				endpointsUsable = false
 		}
 
-		// Ref selection: the trusted range baseline's configuration first, the
-		// proposed commit's configuration as the fallback -- exactly as
-		// bootstrap scope trusts the proposed configuration
-		// (09-validation.md "Ref selection, capture, and staleness"). Both
-		// `untrusted` and `error` peeks are surfaced as `EF-VAL-006` and are
-		// NEVER folded into `absent`, at either position.
-		let integrationRef: string | undefined
-		if (resolvedBaselineOid !== null) {
-			const baselinePeek = await peekConfigAt(git, resolvedBaselineOid)
-			if (baselinePeek.kind === 'error')
-				return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading the trusted range baseline's configuration: ${baselinePeek.message}`)
-			if (baselinePeek.kind === 'untrusted') {
-				return earlyFailure(options, 'EF-VAL-006', `The trusted range baseline's '.engineering/ef.yaml' is not a regular file (Git mode '${baselinePeek.mode}') and cannot be used to establish operation-start ref state.`)
-			}
-			if (baselinePeek.kind === 'found')
-				integrationRef = baselinePeek.config.repository.integrationRef
-			// `absent`: the trusted range baseline is pre-EF; fall through to
-			// the proposed commit's configuration below.
-		}
-
-		if (integrationRef === undefined) {
-			const proposedResolvedForRef = await git.resolveCommit(options.proposed!)
-			if (proposedResolvedForRef.kind === 'resolved') {
-				const proposedPeek = await peekConfigAt(git, proposedResolvedForRef.oid)
-				if (proposedPeek.kind === 'error')
-					return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading the proposed commit's configuration: ${proposedPeek.message}`)
-				if (proposedPeek.kind === 'untrusted') {
-					return earlyFailure(options, 'EF-VAL-006', `The proposed commit's '.engineering/ef.yaml' is not a regular file (Git mode '${proposedPeek.mode}') and cannot be used to establish operation-start ref state.`)
-				}
-				if (proposedPeek.kind === 'found')
-					integrationRef = proposedPeek.config.repository.integrationRef
-				// `absent`: neither commit yields a config; the range may be
-				// entirely EF-inert, or `--proposed` itself is invalid --
-				// `validateRange` reports whichever applies.
-			}
-			// Unresolved proposed OID: left for `validateRange` to report
-			// (`EF-VAL-011`); no ref can be selected here either way.
+		let resolvedProposedOid: string | null = null
+		if (endpointsUsable) {
+			const proposedResolved = await git.resolveCommit(options.proposed!)
+			if (proposedResolved.kind === 'resolved')
+				resolvedProposedOid = proposedResolved.oid
+			else
+				endpointsUsable = false
 		}
 
 		let operationStartRef: string | undefined
-		let operationStartRefState: OperationStartRefState = { resolved: false }
-		if (integrationRef !== undefined) {
-			operationStartRef = integrationRef
-			operationStartRefState = await resolveRefStateOrUnresolved(git, integrationRef)
+		let operationStartRefState: OperationStartRefState | undefined
+
+		if (endpointsUsable) {
+			const refSource = await findRangeIntegrationRefSource(git, resolvedBaselineOid, resolvedProposedOid!)
+			if (refSource.kind === 'blocked')
+				return earlyFailure(options, 'EF-VAL-006', refSource.message)
+
+			let integrationRef: string | undefined
+			if (refSource.kind === 'commit') {
+				const peek = await peekConfigAt(git, refSource.commitOid)
+				if (peek.kind === 'error') {
+					const subject = refSource.role === 'baseline' ? 'the trusted range baseline\'s configuration' : `commit '${refSource.commitOid}''s configuration`
+					return earlyFailure(options, 'EF-VAL-006', `Git is unavailable while reading ${subject}: ${peek.message}`)
+				}
+				if (peek.kind === 'untrusted') {
+					const subject = refSource.role === 'baseline' ? 'The trusted range baseline\'s' : `Commit '${refSource.commitOid}''s`
+					return earlyFailure(options, 'EF-VAL-006', `${subject} '.engineering/ef.yaml' is not a regular file (Git mode '${peek.mode}') and cannot be used to establish operation-start ref state.`)
+				}
+				if (peek.kind === 'found')
+					integrationRef = peek.config.repository.integrationRef
+				// `absent`: that commit names no valid `integration_ref`;
+				// `validateRange` reports its own findings for that boundary, and
+				// no ref check is performed at all.
+			}
+			// `refSource.kind === 'none'`: an EF-inert range, or the validated
+			// sequence itself could not be resolved -- `validateRange` alone
+			// reports the latter (`EF-VAL-006`/`EF-VAL-007`/`EF-VAL-011`).
+
+			if (integrationRef !== undefined) {
+				operationStartRef = integrationRef
+				operationStartRefState = await resolveRefStateOrUnresolved(git, integrationRef)
+			}
 		}
 
 		const result = await validateRange({
