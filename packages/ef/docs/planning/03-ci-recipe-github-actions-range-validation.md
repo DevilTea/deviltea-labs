@@ -36,22 +36,47 @@ when the CI job cannot honor it:
 1. **The candidate must be unpublished.** The proposed commit must not already
    be reachable from the authoritative `integration_ref`.
 2. **`integration_ref` must still resolve to the baseline.** A complete range
-   result requires the captured operation-start OID to equal the trusted range
-   baseline OID, or both to be absent; anything else is `EF-VAL-002` and exits
-   `2` (09-validation.md "Ref selection, capture, and staleness").
+   result whose `integration_ref` is non-null requires the captured
+   operation-start OID (`expected_ref_oid`) to equal the trusted range baseline
+   OID, or both to be absent; anything else is `EF-VAL-002` and exits `2`
+   (09-validation.md "Ref selection, capture, and staleness"). A complete
+   result can also carry `integration_ref: null` and `expected_ref_oid: null`
+   alongside a non-null `baseline_oid` — that is not this obligation's
+   stale-ref failure, and comparing the two null fields as if they were an OID
+   mismatch misreads it. It means the range's first EF state (the baseline, or
+   otherwise the bootstrap boundary) names no valid `integration_ref` at all,
+   so no ref check was ever performed; that boundary's own diagnostics already
+   make the result invalid (`valid: false`, exit `1`) on their own. Check
+   `valid`, not a null-vs-null comparison, to tell staleness apart from this
+   case (see "Reading the JSON result" below for the full distinction from the
+   EF-inert-range case, which is also all-null but valid).
 3. **The baseline must be on the candidate's first-parent chain.** Otherwise
    the result is `EF-VAL-011` and exits `2`; a chain that cannot be walked far
    enough to decide is `EF-VAL-007` and exits `2`.
-4. **The runner's repository must actually expose that ref state.** The
-   validator does not accept a ref OID as an argument and does not contact a
-   remote: it reads `integration_ref` from the relevant trusted commit's own
-   configuration and then probes exactly that ref name in the local
-   repository. On a GitHub runner nothing creates `refs/heads/main` for you
-   unless you check that branch out, so the job has to materialize the
-   authoritative ref name at its observed OID before validating. Getting this
-   wrong does not soften the check: a locally absent `integration_ref` plus a
-   supplied `--baseline` is the absent/present mismatch of obligation 2, so it
-   reports `EF-VAL-002` and exits `2`.
+4. **The authoritative ref must be identified correctly, and it must actually
+   be present locally under that name.** These are two separate obligations:
+
+   - *Identifying the ref.* The validator never accepts a ref OID as an
+     argument and never contacts a remote, and it never derives
+     `integration_ref` from `--proposed`. It reads `integration_ref` from the
+     trusted range baseline's own configuration when the baseline's
+     `.engineering` entry is present, and otherwise from the range's own
+     bootstrap boundary — the oldest commit in the validated first-parent
+     sequence whose `.engineering` entry is present (09-validation.md "Ref
+     selection, capture, and staleness"). Reading `--proposed` to pick the ref
+     would let a later commit's removal of EF state, or a later malformed
+     configuration, preempt an earlier boundary's own findings — exactly what
+     the oldest-first, fail-fast walk must not allow.
+   - *Exposing that ref locally.* Once the ref name is known, the validator
+     probes exactly that name in the local repository. On a GitHub runner
+     nothing creates `refs/heads/main` for you unless you check that branch
+     out, so the job has to materialize the authoritative ref name at its
+     observed OID before validating — a job that never materializes that ref
+     name locally cannot satisfy this rule, no matter how correctly the ref
+     was identified. Getting this wrong does not soften the check: a locally
+     absent `integration_ref` plus a supplied `--baseline` is the
+     absent/present mismatch of obligation 2, so it reports `EF-VAL-002` and
+     exits `2`.
 
 Obligation 4 is why every recipe below has an explicit "capture the
 operation-start ref state" step, and why the baseline OID passed to
@@ -356,21 +381,42 @@ jobs:
           exit "$status"
 ```
 
-One constraint deserves emphasis. A merge group is built on the target branch
-*plus the pull requests ahead of it in the queue*. When those earlier entries
-are still unmerged, the group's base commit is not the published tip of
-`integration_ref`, so the captured operation-start OID does not equal the
-group's base and validation reports `EF-VAL-002` with exit `2`. That is
-correct behavior — the candidate genuinely does not start at the ref's actual
-state — but it means a speculatively built group can fail this check for a
-reason that has nothing to do with the EF content. Repositories that want
-every group validated against the published tip should restrict the queue's
-build/merge concurrency so that at most one group is in flight at a time, and
-should confirm against their own queue configuration that a group's base is
-the branch tip. Note also that when a merge queue is enabled, the
-`merge_group` run is the one that gates the merge; keep the `pull_request` job
-as fast author feedback if you like, but the queue's required check is the
-gate.
+One invariant matters here, and it is narrower than "only one group in
+flight". GitHub documents a merge group as the target branch plus the pull
+request's own changes and the changes of any entries already ahead of it in
+the queue
+(<https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/incorporating-changes-from-a-pull-request/merging-a-pull-request-with-a-merge-queue>).
+Those earlier, still-unmerged entries do not by themselves cause `EF-VAL-002`:
+they simply become additional first-parent boundaries between the captured
+baseline and the group's head, and walking exactly that kind of boundary
+sequence — several intermediate commits, none of them individually published
+to `integration_ref` yet — is what range scope exists to do. Restricting the
+queue to one group in flight to make this check pass would give up a
+capability range scope already provides; there is no reason to do it.
+
+The real invariant is: the freshly captured `integration_ref` tip must remain
+a first-parent ancestor of the merge-group candidate. Two concrete things can
+break that:
+
+- **The target ref advances after the group was built** — a direct push, or
+  another group merging ahead of this one — so that the tip this job fetches
+  is no longer an ancestor of the group's head as GitHub already built it.
+  `listFirstParentRange` then reports `not-an-ancestor`, i.e. `EF-VAL-011`, not
+  `EF-VAL-002`: the captured baseline resolved fine, it just is not on the
+  candidate's first-parent chain any more.
+- **A speculative group is built on a base that is not (yet) the published
+  tip** — GitHub may construct a merge group optimistically on the assumption
+  that an earlier entry will succeed, before that entry has actually landed.
+  If that assumed base never becomes the true tip, the same ancestry check
+  fails the same way: `EF-VAL-011`.
+
+`EF-VAL-002` in this recipe would instead mean the local `integration_ref` this
+job just fetched does not resolve to the OID passed as `--baseline` — and that
+does not happen merely because other queue entries are unmerged, since both
+values come from the same fetch in the capture step above. Note also that when
+a merge queue is enabled, the `merge_group` run is the one that gates the
+merge; keep the `pull_request` job as fast author feedback if you like, but
+the queue's required check is the gate.
 
 Both workflows can live in one file (`on: [pull_request, merge_group]`) with
 per-event `if:` guards on the candidate-selection step. They are shown
@@ -521,11 +567,27 @@ signal available:
   a multi-commit candidate to fix. Range-level findings — ancestry,
   captured-ref-state, shallow history, EF-inert range — belong to no single
   commit and omit it.
-- `integration_ref` and `expected_ref_oid` are `null` on an EF-inert range
-  (one carrying exactly one `EF-VAL-014` info diagnostic, exit `0`), because no
-  EF publication occurs. A candidate that touches no `.engineering` path in an
-  EF-bearing repository is instead an identity boundary: valid, and validated
-  without materializing anything.
+- `integration_ref` and `expected_ref_oid` are `null` in two distinct
+  situations that a CI consumer must not conflate, since only one of them is a
+  passing run:
+  - **An EF-inert range**: no commit in `[baseline, proposed]` has an
+    `.engineering` entry at all, so there is no EF state boundary of any kind.
+    This is `complete: true`, `valid: true`, exit `0`, carrying exactly one
+    `EF-VAL-014` info diagnostic, and no ref capture is made or required —
+    because no EF publication occurs.
+  - **A range whose first EF state names no valid `integration_ref`**: the
+    trusted baseline (when it carries EF state) or otherwise the range's
+    bootstrap boundary has an `.engineering` entry, but that boundary's own
+    configuration does not name a usable `integration_ref`. This is
+    `complete: true`, `valid: false`, exit `1`, carrying that boundary's own
+    diagnostics (its config or snapshot errors) — and unlike the EF-inert
+    case, `baseline_oid` can be non-null here. Treat this exactly like any
+    other invalid range, not like the EF-inert one: the non-zero exit and
+    `valid: false` already say so, but the shared all-null ref fields are easy
+    to mistake for the passing case above if you check only those.
+  A candidate that touches no `.engineering` path in an EF-bearing repository
+  is instead an identity boundary: valid, and validated without materializing
+  anything.
 
 The steps above print the summary line and every diagnostic before
 re-exporting `ef`'s exit code, so a failing check shows the codes in the job
