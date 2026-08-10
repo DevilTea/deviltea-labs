@@ -404,12 +404,20 @@ describe('applyInitPlan', () => {
 
 		expect(result.applied)
 			.toBe(true)
+		// Plain, unqualified success -- never the `cleanup-failed` variant --
+		// and its own `.tmp` runtime container is genuinely gone, not merely its
+		// marker (round-2 review finding: a leftover empty `.tmp` recreates the
+		// pre-fix rollback hazard even though the marker itself is gone).
+		expect(result.applied === true && result.outcome)
+			.toBe('applied')
 		if (!result.applied)
 			return
 		expect(result.changes)
 			.toEqual(plan.changes)
 
 		expect(await pathExists(path.join(tempDir, '.engineering/.tmp/init-state.json')))
+			.toBe(false)
+		expect(await pathExists(path.join(tempDir, '.engineering/.tmp')))
 			.toBe(false)
 
 		expect((await fs.readdir(path.join(tempDir, '.engineering'))).sort())
@@ -1606,6 +1614,193 @@ describe('applyInitPlan', () => {
 					.toEqual(file.bytes)
 			}
 			await expect(fs.stat(path.join(tempDir, '.engineering/.tmp/init-state.json'))).rejects.toThrow()
+		})
+	})
+
+	// Round-2 review finding (P1, on `init.ts:1434`): a prior implementation
+	// caught EVERY failure to remove the now-empty `.tmp` runtime directory --
+	// `deleteOwnedEntry` returning `false` because ownership could not be
+	// re-proven, OR because the underlying `rmdir` itself failed, OR a thrown
+	// exception -- and folded all three into the exact same silently-ignored
+	// `false`, then unconditionally returned the plain `outcome: 'applied'`
+	// this whole step exists to avoid: a leftover empty `.tmp` recreates the
+	// pre-fix `git reset --hard`-to-pre-EF rollback hazard the module's own
+	// header comment documents, and reporting plain success while that hazard
+	// is left behind is exactly the misreport this describe block guards
+	// against. The fix distinguishes a PROVEN foreign replacement (correctly
+	// left untouched, correctly still a plain success) from an actual removal
+	// failure (surfaced as `outcome: 'cleanup-failed'`, `applied: true` --
+	// never `applied: false`, since publication itself already, physically
+	// completed at the marker's own removal).
+	describe('the owned `.tmp` runtime directory\'s own removal failure is surfaced, never silently swallowed into a plain success (round-2 review finding, init.ts:1434)', () => {
+		/** Every hook below only cares about `.tmp` itself; each still fully delegates to the real dependency for every other call, exactly like the rest of this file's own late-checkpoint regressions. */
+		function tmpPathOf(plan: Awaited<ReturnType<typeof computeValidPlan>>): string {
+			return path.join(plan.targetRoot, '.engineering', '.tmp')
+		}
+
+		it('reports applied:true/cleanup-failed (never a plain success, never applied:false) when rmdir(.tmp) itself fails even though ownership is still genuinely provable', async () => {
+			const plan = await computeValidPlan()
+			const tmpPath = tmpPathOf(plan)
+			const rmdirError = Object.assign(new Error('directory not empty'), { code: 'ENOTEMPTY', syscall: 'rmdir' })
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				rmdir: async (target: string) => {
+					if (target === tmpPath)
+						throw rmdirError
+					return defaultApplyInitPlanDeps.rmdir(target)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('cleanup-failed')
+			expect(result.applied === true && result.outcome === 'cleanup-failed' && result.message)
+				.toContain(tmpPath)
+
+			// Publication genuinely, physically completed -- the marker is gone
+			// and every planned byte is on disk -- but `.tmp` itself, still
+			// genuinely this invocation's own (never deleted, since the real
+			// `rmdir` was never actually invoked by the mock above), is left
+			// exactly as `rmdir` failing for real would leave it: present, and
+			// empty (nothing this invocation did not itself create was ever
+			// written into it).
+			await expect(fs.stat(path.join(tempDir, '.engineering', '.tmp', 'init-state.json'))).rejects.toThrow()
+			expect(await fs.readdir(tmpPath))
+				.toEqual([])
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
+		})
+
+		// The failure must land on the SINGLE, final ownership re-check this
+		// invocation makes of `.tmp` -- the one immediately preceding its own
+		// removal attempt -- not on any of the many EARLIER `verifyClaimIntact`
+		// checkpoints that also observe `.tmp`'s identity throughout the
+		// protocol (creating it, writing each planned file, verifying their
+		// bytes, the marker's own final check). Gating on `markerUnlinked` and
+		// counting calls made strictly afterward isolates exactly that one
+		// checkpoint, exactly like this file's own `directoryIdentity(plan.targetRoot)`
+		// regressions above gate on the same flag for the analogous
+		// post-marker-removal checkpoint.
+		it('reports applied:true/cleanup-failed (never a plain success, never applied:false) when .tmp\'s own ownership cannot be re-proven at all (a mere observation failure)', async () => {
+			const plan = await computeValidPlan()
+			const tmpPath = tmpPathOf(plan)
+			const markerPath = path.join(tmpPath, 'init-state.json')
+			const probeError = Object.assign(new Error('input/output error'), { code: 'EIO', syscall: 'lstat' })
+			let markerUnlinked = false
+			let postMarkerTmpIdentityCalls = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				unlink: async (target: string) => {
+					await defaultApplyInitPlanDeps.unlink(target)
+					if (target === markerPath)
+						markerUnlinked = true
+				},
+				directoryIdentity: async (target: string) => {
+					if (target === tmpPath && markerUnlinked) {
+						postMarkerTmpIdentityCalls++
+						// The FIRST post-marker-removal observation is the ordinary,
+						// still-legitimate final `verifyClaimIntact()` checkpoint --
+						// it must observe faithfully so that checkpoint reaches
+						// `'intact'` and this invocation's own dedicated `.tmp`
+						// removal step is reached at all. Only the SECOND -- this
+						// invocation's own final `.tmp`-specific re-check,
+						// immediately before it would otherwise attempt `rmdir` --
+						// is made to fail.
+						if (postMarkerTmpIdentityCalls === 2)
+							throw probeError
+					}
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('cleanup-failed')
+			expect(result.applied === true && result.outcome === 'cleanup-failed' && result.message)
+				.toContain(tmpPath)
+
+			// Nothing was deleted -- ownership was never re-proven, so this
+			// invocation never even attempted the `rmdir`.
+			expect(await fs.readdir(tmpPath))
+				.toEqual([])
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
+		})
+
+		it('leaves a provably foreign replacement of .tmp completely untouched and still reports a plain applied:true/applied success (never cleanup-failed) when the swap lands strictly after the marker\'s own removal', async () => {
+			const plan = await computeValidPlan()
+			const tmpPath = tmpPathOf(plan)
+			const markerPath = path.join(tmpPath, 'init-state.json')
+			let markerUnlinked = false
+			let postMarkerTmpIdentityCalls = 0
+
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				unlink: async (target: string) => {
+					await defaultApplyInitPlanDeps.unlink(target)
+					if (target === markerPath)
+						markerUnlinked = true
+				},
+				directoryIdentity: async (target: string) => {
+					if (target === tmpPath && markerUnlinked) {
+						postMarkerTmpIdentityCalls++
+						if (postMarkerTmpIdentityCalls === 1) {
+							// The ordinary, still-legitimate final `verifyClaimIntact()`
+							// checkpoint observes the REAL, still-genuine `.tmp` first
+							// (captured below, returned unchanged) -- then, strictly
+							// AFTER that observation, `.tmp` is swapped for a real,
+							// foreign, non-empty directory of the identical name.
+							// This invocation's own dedicated, `.tmp`-specific
+							// re-check (the very next call this same hook receives)
+							// is the one that must observe the swap.
+							const identity = await defaultApplyInitPlanDeps.directoryIdentity(target)
+							const foreign = await fs.mkdtemp(path.join(os.tmpdir(), 'ef-init-tmp-foreign-'))
+							await fs.writeFile(path.join(foreign, 'evidence.txt'), 'not ours')
+							await fs.rmdir(tmpPath)
+							await fs.rename(foreign, tmpPath)
+							return identity
+						}
+					}
+					return defaultApplyInitPlanDeps.directoryIdentity(target)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+
+			expect(result.applied)
+				.toBe(true)
+			expect(result.applied === true && result.outcome)
+				.toBe('applied')
+
+			// The foreign replacement is left completely untouched: still
+			// present, still non-empty, still holding exactly the foreign
+			// content -- never deleted, never mistaken for this invocation's
+			// own now-empty `.tmp`.
+			expect(await fs.readdir(tmpPath))
+				.toEqual(['evidence.txt'])
+			const evidence = await fs.readFile(path.join(tmpPath, 'evidence.txt'), 'utf8')
+			expect(evidence)
+				.toBe('not ours')
+
+			for (const file of plan.files) {
+				const onDisk = await fs.readFile(path.join(tempDir, file.path))
+				expect(new Uint8Array(onDisk))
+					.toEqual(file.bytes)
+			}
 		})
 	})
 
