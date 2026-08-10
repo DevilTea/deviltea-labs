@@ -203,6 +203,41 @@ function commitAll(dir: string, message: string): string {
 		.trim()
 }
 
+/** `git write-tree`: materialize the current index as a tree object, returning its OID. */
+function writeTreeOid(dir: string): string {
+	return git(dir, ['write-tree'])
+		.trim()
+}
+
+/** `git commit-tree`: create a commit for `treeOid` (optionally with `parentOid`) without touching any ref, returning its OID. */
+function commitTreeOid(dir: string, treeOid: string, message: string, parentOid?: string): string {
+	const args = parentOid !== undefined ? ['commit-tree', treeOid, '-p', parentOid, '-m', message] : ['commit-tree', treeOid, '-m', message]
+	return git(dir, args)
+		.trim()
+}
+
+/** `git hash-object -w --stdin`: writes `content` to the object database, returning the resulting blob OID. */
+function hashObjectFromStdin(dir: string, content: string): string {
+	return execFileSync('git', ['-C', dir, 'hash-object', '-w', '--stdin'], { env: { ...process.env, ...GIT_TEST_ENV }, input: content, encoding: 'utf8' })
+		.trim()
+}
+
+/**
+ * Stages `.engineering/ef.yaml` in the index at an explicit non-regular-file
+ * Git `mode` -- `120000` (symlink) or `160000` (gitlink/submodule) -- via
+ * `git update-index --add --cacheinfo`, without ever creating a real
+ * filesystem symlink or submodule (mirrors
+ * `cli/commands/validate.unit.test.ts`'s `stageSymlinkModeConfig`). `ls-tree`
+ * reports a `120000` entry's `type` as `blob` -- identical to an ordinary
+ * file -- so only its Git MODE reveals it is a symlink; a `160000` entry's
+ * `type` is `commit`. `--add --cacheinfo` replaces any existing index entry
+ * at that exact path, so this may be called directly after an ordinary
+ * `git add -A` without a separate `git rm --cached` first.
+ */
+function stageNonRegularEfYaml(dir: string, mode: '120000' | '160000', objectOid: string): void {
+	git(dir, ['update-index', '--add', '--cacheinfo', `${mode},${objectOid},.engineering/ef.yaml`])
+}
+
 function codesOf(diagnostics: readonly { code: string }[]): string[] {
 	return diagnostics.map(d => d.code)
 		.sort()
@@ -1720,6 +1755,181 @@ describe('validateRange', () => {
 				.toBeNull()
 			expect(result.expectedRefOid)
 				.toBeNull()
+		})
+	})
+
+	// -------------------------------------------------------------------------
+	// Absolute Git trust rule (`peekConfigAt`, `cli/commands/validate.ts`): a
+	// non-regular-file entry at exactly `.engineering/ef.yaml` on the ONE
+	// commit whose configuration is trusted to fix the range's authoritative
+	// `integration_ref` must never be silently trusted, and must never be
+	// collapsed into the SAME outcome as a genuine absence of a valid ref.
+	// `validateRange` is not part of the package's public library surface
+	// (`src/index.ts` deliberately exports nothing; `application/index.ts`'s
+	// barrel is internal) and every CLI path into range scope is preceded by
+	// the CLI's own `peekConfigAt`-based preflight, so this is unreachable
+	// through the CLI today -- these are direct-call regressions for a caller
+	// that invokes `validateRange` itself.
+	// -------------------------------------------------------------------------
+
+	describe('a non-regular-file .engineering/ef.yaml on the ref-fixing commit is EF-VAL-006, never a trusted or silently absent ref', () => {
+		describe('baseline-carries-EF path (the trusted range baseline itself names integration_ref)', () => {
+			it('a symlink at the baseline\'s ef.yaml is untrusted -- never the symlink target text', async () => {
+				await writeMinimalProject(tempDir)
+				git(tempDir, ['add', '-A'])
+				stageNonRegularEfYaml(tempDir, '120000', hashObjectFromStdin(tempDir, CONFIG_YAML))
+				const baselineTree = writeTreeOid(tempDir)
+				const baseline = commitTreeOid(tempDir, baselineTree, 'baseline with symlinked config')
+				// Restage from the real (unchanged) working tree -- ef.yaml was
+				// never actually replaced on disk, only its INDEX entry -- so
+				// `proposed` is an ordinary, trusted child commit of `baseline`.
+				git(tempDir, ['add', '-A'])
+				const proposedTree = writeTreeOid(tempDir)
+				const proposed = commitTreeOid(tempDir, proposedTree, 'proposed with real config', baseline)
+
+				const result = await validateRange({
+					git: repo(),
+					baselineOid: baseline,
+					proposedOid: proposed,
+					policy: { strict: false, warningsAsErrors: false },
+				})
+
+				expect(result.complete)
+					.toBe(false)
+				expect(codesOf(result.diagnostics))
+					.toEqual(['EF-VAL-006'])
+				expect(result.diagnostics[0]!.message)
+					.toContain('not a regular file')
+				expect(result.integrationRef)
+					.toBeNull()
+				expect(result.baselineOid)
+					.toBe(baseline)
+			})
+
+			it('a gitlink (submodule, mode 160000) at the baseline\'s ef.yaml is untrusted', async () => {
+				await writeMinimalProject(tempDir)
+				git(tempDir, ['add', '-A'])
+				stageNonRegularEfYaml(tempDir, '160000', 'a'.repeat(40))
+				const baselineTree = writeTreeOid(tempDir)
+				const baseline = commitTreeOid(tempDir, baselineTree, 'baseline with gitlink config')
+				git(tempDir, ['add', '-A'])
+				const proposedTree = writeTreeOid(tempDir)
+				const proposed = commitTreeOid(tempDir, proposedTree, 'proposed with real config', baseline)
+
+				const result = await validateRange({
+					git: repo(),
+					baselineOid: baseline,
+					proposedOid: proposed,
+					policy: { strict: false, warningsAsErrors: false },
+				})
+
+				expect(result.complete)
+					.toBe(false)
+				expect(codesOf(result.diagnostics))
+					.toEqual(['EF-VAL-006'])
+				expect(result.diagnostics[0]!.message)
+					.toContain('not a regular file')
+			})
+
+			it('a directory literally named ef.yaml at the baseline is untrusted', async () => {
+				await writeMinimalProject(tempDir)
+				await removeFile(tempDir, '.engineering/ef.yaml')
+				await writeFile(tempDir, '.engineering/ef.yaml/marker.txt', 'x\n')
+				const baseline = commitAll(tempDir, 'baseline with a directory named ef.yaml')
+				await writeFile(tempDir, 'unrelated.txt', 'x\n')
+				const proposed = commitAll(tempDir, 'proposed')
+
+				const result = await validateRange({
+					git: repo(),
+					baselineOid: baseline,
+					proposedOid: proposed,
+					policy: { strict: false, warningsAsErrors: false },
+				})
+
+				expect(result.complete)
+					.toBe(false)
+				expect(codesOf(result.diagnostics))
+					.toEqual(['EF-VAL-006'])
+				expect(result.diagnostics[0]!.message)
+					.toContain('not a regular file')
+			})
+		})
+
+		describe('bootstrap-boundary path (a pre-EF baseline; the range\'s own bootstrap commit names integration_ref)', () => {
+			it('a symlink at the bootstrap commit\'s ef.yaml is untrusted -- never a silently complete, null-ref result', async () => {
+				await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+				const baseline = commitAll(tempDir, 'pre-EF baseline')
+				await writeMinimalProject(tempDir)
+				git(tempDir, ['add', '-A'])
+				stageNonRegularEfYaml(tempDir, '120000', hashObjectFromStdin(tempDir, CONFIG_YAML))
+				const bootstrapTree = writeTreeOid(tempDir)
+				const bootstrapOid = commitTreeOid(tempDir, bootstrapTree, 'bootstrap with symlinked config', baseline)
+
+				const result = await validateRange({
+					git: repo(),
+					baselineOid: baseline,
+					proposedOid: bootstrapOid,
+					policy: { strict: false, warningsAsErrors: false },
+				})
+
+				expect(result.complete)
+					.toBe(false)
+				expect(codesOf(result.diagnostics))
+					.toEqual(['EF-VAL-006'])
+				expect(result.diagnostics[0]!.message)
+					.toContain('not a regular file')
+				expect(result.integrationRef)
+					.toBeNull()
+				expect(result.baselineOid)
+					.toBe(baseline)
+			})
+
+			it('a gitlink (mode 160000) at the bootstrap commit\'s ef.yaml is untrusted', async () => {
+				await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+				const baseline = commitAll(tempDir, 'pre-EF baseline')
+				await writeMinimalProject(tempDir)
+				git(tempDir, ['add', '-A'])
+				stageNonRegularEfYaml(tempDir, '160000', 'b'.repeat(40))
+				const bootstrapTree = writeTreeOid(tempDir)
+				const bootstrapOid = commitTreeOid(tempDir, bootstrapTree, 'bootstrap with gitlink config', baseline)
+
+				const result = await validateRange({
+					git: repo(),
+					baselineOid: baseline,
+					proposedOid: bootstrapOid,
+					policy: { strict: false, warningsAsErrors: false },
+				})
+
+				expect(result.complete)
+					.toBe(false)
+				expect(codesOf(result.diagnostics))
+					.toEqual(['EF-VAL-006'])
+				expect(result.diagnostics[0]!.message)
+					.toContain('not a regular file')
+			})
+
+			it('a directory literally named ef.yaml at the bootstrap commit is untrusted', async () => {
+				await writeFile(tempDir, 'README.txt', 'pre-EF\n')
+				const baseline = commitAll(tempDir, 'pre-EF baseline')
+				await writeMinimalProject(tempDir)
+				await removeFile(tempDir, '.engineering/ef.yaml')
+				await writeFile(tempDir, '.engineering/ef.yaml/marker.txt', 'x\n')
+				const bootstrapOid = commitAll(tempDir, 'bootstrap with a directory named ef.yaml')
+
+				const result = await validateRange({
+					git: repo(),
+					baselineOid: baseline,
+					proposedOid: bootstrapOid,
+					policy: { strict: false, warningsAsErrors: false },
+				})
+
+				expect(result.complete)
+					.toBe(false)
+				expect(codesOf(result.diagnostics))
+					.toEqual(['EF-VAL-006'])
+				expect(result.diagnostics[0]!.message)
+					.toContain('not a regular file')
+			})
 		})
 	})
 
