@@ -43,7 +43,7 @@
 
 import type { DiagnosticCode } from '../domain/diagnostic-codes'
 import type { Diagnostic } from '../domain/diagnostics'
-import type { GitRepository, GitTreeEntry } from '../git/repository'
+import type { FirstParentResult, GitRepository, GitTreeEntry, GitUnavailable } from '../git/repository'
 import type { OperationStartRefState } from './bootstrap-validation'
 import type { LoadSnapshotFailureReason, ProjectSnapshot } from './snapshot'
 import type { SnapshotValidationResult, ValidationPolicy, ValidationSummary } from './snapshot-validation'
@@ -239,6 +239,77 @@ function checkOperationStartRefState(
 		}
 	}
 	return { ok: true, expectedRefOid: actualOid }
+}
+
+/**
+ * Exhaustiveness guard for a discriminated union already narrowed to
+ * `never`. If a new `FirstParentResult` variant is ever added without
+ * updating {@link checkBootstrapHistoryCondition}'s switch, `value` stops
+ * type-checking as `never` at the `default` branch below and the module fails
+ * to compile -- a future Git adapter change can never silently reopen a
+ * fall-through here.
+ */
+function assertNeverFirstParent(value: never): never {
+	throw new Error(`Unhandled FirstParentResult variant: ${JSON.stringify(value)}`)
+}
+
+type BootstrapHistoryConditionResult
+	= | { kind: 'satisfied' }
+		| { kind: 'violated', commitOid: string }
+		| { kind: 'incomplete', code: DiagnosticCode, message: string }
+
+/**
+ * Establishes the bootstrap history condition (09-validation.md "Bootstrap
+ * exception": "a commit with no first parent satisfies the condition
+ * vacuously and requires no probe"). `firstParent` is `oid`'s OWN
+ * `getFirstParent` result, already narrowed by the caller to exclude
+ * `git-unavailable`.
+ *
+ * `root-commit` is the ONLY variant treated as vacuous success. Every other
+ * variant is either a proof (`resolved`, probed further below) or an
+ * incomplete result -- never a silent fall-through into the vacuous-success
+ * case. `missing` and `not-a-commit` are, in this context, an execution/
+ * observation anomaly rather than a legitimate absence: `oid` was already
+ * proven to exist and materialized as a commit earlier in this same walk (via
+ * `listFirstParentRange` and `materialize`), so a `getFirstParent` probe on
+ * that SAME `oid` reporting it is missing or not a commit contradicts an
+ * already-established fact. That is exactly "the observation could not be
+ * made" territory (09-validation.md "the first-parent chain cannot be walked
+ * far enough to decide membership ... is `EF-VAL-007`"; "a shallow or
+ * unresolvable required history is `EF-VAL-007`"), the SAME code this
+ * function already uses immediately below for `error` and for an
+ * unresolved/shallow history probe -- never a proof the bootstrap history
+ * condition is satisfied.
+ */
+async function checkBootstrapHistoryCondition(
+	git: GitRepository,
+	firstParent: Exclude<FirstParentResult, GitUnavailable>,
+	oid: string,
+): Promise<BootstrapHistoryConditionResult> {
+	switch (firstParent.kind) {
+		case 'root-commit':
+			return { kind: 'satisfied' }
+		case 'resolved': {
+			const historyCheck = await git.pathExistsInFirstParentHistory(firstParent.parentOid, EF_YAML_PATH)
+			if (historyCheck.kind === 'git-unavailable') {
+				return { kind: 'incomplete', code: 'EF-VAL-006', message: `Git is unavailable while checking the bootstrap history condition for commit '${oid}': ${historyCheck.message}` }
+			}
+			if (historyCheck.kind === 'unresolved' || historyCheck.kind === 'shallow') {
+				return { kind: 'incomplete', code: 'EF-VAL-007', message: `Commit '${oid}''s first-parent history cannot be completely inspected to establish the bootstrap history condition.` }
+			}
+			if (historyCheck.kind === 'found') {
+				return { kind: 'violated', commitOid: historyCheck.commitOid }
+			}
+			return { kind: 'satisfied' }
+		}
+		case 'error':
+			return { kind: 'incomplete', code: 'EF-VAL-007', message: `Commit '${oid}''s parentage could not be determined to establish the bootstrap history condition: ${firstParent.message}` }
+		case 'missing':
+		case 'not-a-commit':
+			return { kind: 'incomplete', code: 'EF-VAL-007', message: `Commit '${oid}''s parentage could not be re-established (reported '${firstParent.kind}') to check the bootstrap history condition, contradicting its earlier successful materialization.` }
+		default:
+			return assertNeverFirstParent(firstParent)
+	}
 }
 
 export async function validateRange(input: ValidateRangeInput): Promise<RangeValidationResult> {
@@ -488,33 +559,26 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 					makeDiagnostic('EF-VAL-006', `Git is unavailable while checking commit '${oid}''s parentage: ${firstParent.message}`),
 				], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef, expectedRefOid })
 			}
-			if (firstParent.kind === 'resolved') {
-				const historyCheck = await git.pathExistsInFirstParentHistory(firstParent.parentOid, EF_YAML_PATH)
-				if (historyCheck.kind === 'git-unavailable') {
-					return incompleteResult([
-						...accumulated,
-						makeDiagnostic('EF-VAL-006', `Git is unavailable while checking the bootstrap history condition for commit '${oid}': ${historyCheck.message}`),
-					], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef, expectedRefOid })
-				}
-				if (historyCheck.kind === 'unresolved' || historyCheck.kind === 'shallow') {
-					return incompleteResult([
-						...accumulated,
-						makeDiagnostic('EF-VAL-007', `Commit '${oid}''s first-parent history cannot be completely inspected to establish the bootstrap history condition.`, { commitOid: oid }),
-					], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef, expectedRefOid })
-				}
-				if (historyCheck.kind === 'found') {
-					accumulated.push(makeDiagnostic('EF-VAL-009', `Bootstrap ref '${authoritativeIntegrationRef}' already contains an EF state before commit '${oid}'; commit '${historyCheck.commitOid}' has '.engineering/ef.yaml'.`, { commitOid: oid }))
-					return completeResult(accumulated, policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef, expectedRefOid })
-				}
-			}
-			else if (firstParent.kind === 'error') {
+			const historyCondition = await checkBootstrapHistoryCondition(git, firstParent, oid)
+			if (historyCondition.kind === 'incomplete') {
+				// `commit_oid` mirrors the sibling EF-VAL-007 diagnostics below
+				// (unresolved/shallow history, undetermined parentage): finding
+				// attribution to the specific boundary commit. `EF-VAL-006`
+				// (Git/capability unavailable) never carries `commit_oid` anywhere
+				// in this module -- it is an execution-capability failure, not a
+				// boundary-specific finding -- so it is omitted here too.
+				const options = historyCondition.code === 'EF-VAL-006' ? {} : { commitOid: oid }
 				return incompleteResult([
 					...accumulated,
-					makeDiagnostic('EF-VAL-007', `Commit '${oid}''s parentage could not be determined to establish the bootstrap history condition: ${firstParent.message}`, { commitOid: oid }),
+					makeDiagnostic(historyCondition.code, historyCondition.message, options),
 				], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef, expectedRefOid })
 			}
-			// `firstParent.kind === 'root-commit'`: the condition is vacuously
-			// satisfied, no probe required.
+			if (historyCondition.kind === 'violated') {
+				accumulated.push(makeDiagnostic('EF-VAL-009', `Bootstrap ref '${authoritativeIntegrationRef}' already contains an EF state before commit '${oid}'; commit '${historyCondition.commitOid}' has '.engineering/ef.yaml'.`, { commitOid: oid }))
+				return completeResult(accumulated, policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef, expectedRefOid })
+			}
+			// `historyCondition.kind === 'satisfied'`: continue to the
+			// bootstrap-only state rules below.
 
 			// ---- Bootstrap-only state rules (reuses bootstrap-validation.ts's evaluateBootstrapStateRules core) ----
 
