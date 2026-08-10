@@ -243,11 +243,32 @@ function main() {
 			assertEqual('version: version matches installed package.json', parsed?.version, installedPackageJson.version, describeCliResult(result))
 		}
 
-		// ---- (b) ef help ---------------------------------------------------------
+		// ---- (b) ef help / ef -h / ef --help (13-cli-contract.md "Version and
+		// Help": "-h"/"--help" are aliases of "ef help [command]" on every
+		// command and subcommand of the installed binary, always exit 0, and
+		// are never wrapped in the JSON envelope even with --format json.) -----
 
 		{
-			const result = runCli(['help'], { cwd: consumerDirectory })
-			assertEqual('help: exit code', result.status, 0, describeCliResult(result))
+			const helpResult = runCli(['help'], { cwd: consumerDirectory })
+			assertEqual('help: exit code', helpResult.status, 0, describeCliResult(helpResult))
+			const helpStdout = helpResult.stdout.toString('utf8')
+			assert('help: stdout is non-empty', helpStdout.length > 0, describeCliResult(helpResult))
+
+			const shortFlagResult = runCli(['-h'], { cwd: consumerDirectory })
+			assertEqual('-h: exit code', shortFlagResult.status, 0, describeCliResult(shortFlagResult))
+			assertEqual('-h: stdout matches ef help', shortFlagResult.stdout.toString('utf8'), helpStdout, describeCliResult(shortFlagResult))
+
+			const longFlagResult = runCli(['--help'], { cwd: consumerDirectory })
+			assertEqual('--help: exit code', longFlagResult.status, 0, describeCliResult(longFlagResult))
+			assertEqual('--help: stdout matches ef help', longFlagResult.stdout.toString('utf8'), helpStdout, describeCliResult(longFlagResult))
+
+			// A subcommand's own -h/--help must also succeed, even though this
+			// installed binary has no project at `consumerDirectory` for "version"
+			// to read (it needs none) and even when combined with --format json --
+			// help wins and stays a plain human envelope, per the contract above.
+			const subcommandHelpResult = runCli(['version', '--help', '--format', 'json'], { cwd: consumerDirectory })
+			assertEqual('version --help --format json: exit code', subcommandHelpResult.status, 0, describeCliResult(subcommandHelpResult))
+			assert('version --help --format json: stdout is not a JSON envelope', parseJsonOrUndefined(subcommandHelpResult.stdout) === undefined, describeCliResult(subcommandHelpResult))
 		}
 
 		// ---- Temp Git repo for the project-mutation assertions ------------------

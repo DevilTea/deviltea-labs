@@ -763,7 +763,31 @@ background processes, and editor adapters are outside Core v1.
 All keys are required. The example implementation version is illustrative.
 
 `ef help` and `ef help <command>` are human-facing, read-only, non-project
-commands and exit `0` when the requested help topic exists.
+commands and exit `0` when the requested help topic exists. An unrecognized
+`<command>` value is an invocation failure and exits `2`.
+
+Every command and subcommand additionally accepts the aliases `-h` and
+`--help`. Recognizing either alias for an already-selected command produces
+the human help text for that exact command path when one is documented,
+otherwise the text for its nearest documented ancestor command path, and
+otherwise the same general text as bare `ef help`; it always exits `0`. This
+applies even when the selected command's own required arguments or mandatory
+options are missing or invalid: `-h`/`--help` is recognized before argument
+count, mandatory-option, and unresolved-subcommand-selection checks for that
+command.
+
+`-h`/`--help` output is always the fixed human text described above. It is
+never wrapped in the JSON envelope described under JSON Transport, even when
+`--format json` is also present in the same invocation; implementations MUST
+NOT change `-h`/`--help`'s output based on `--format`, color, or any other
+supplied option.
+
+`-h`/`--help` does not take priority over an earlier option in the same
+invocation whose own value already failed syntactic validation, such as an
+invalid `--format` or `--scope` choice: options remain recognized left to
+right, so a value error encountered while parsing an option positioned before
+`-h`/`--help` is still reported through the ordinary pre-envelope
+invocation-failure path instead of producing help text.
 
 ## Deferred
 

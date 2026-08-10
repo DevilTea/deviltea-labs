@@ -21,7 +21,12 @@
  * command handler instead, where a failure naturally produces the
  * documented incomplete envelope. This is what makes "catch every
  * `CommanderError` as pre-envelope failure" correct without needing to track
- * parse order explicitly.
+ * parse order explicitly. The one deliberate exception is `-h`/`--help`
+ * (13-cli-contract.md "Version and Help"): Commander's `exitOverride()` also
+ * turns its internal help-display `_exit(0, ...)` into a thrown
+ * `CommanderError`, but `attachHelp` below already reported that outcome as
+ * a pre-envelope success via `setOutcome` before the throw, and `runCli`
+ * recognizes that case to return the success instead of a syntax failure.
  */
 
 import type { GitExecutor } from '../git/executor'
@@ -101,7 +106,69 @@ const GENERAL_HELP = [
 	'  ef resource read <owner-id> <location>',
 	'  ef version',
 	'  ef help',
+	'',
+	'Every command and subcommand also accepts -h / --help.',
 ].join('\n')
+
+/**
+ * The full command path leading to `command` (e.g. `['artifact', 'create']`
+ * for `ef artifact create <type>`), excluding the root `ef` program itself
+ * (13-cli-contract.md "Version and Help").
+ */
+function commandPathWords(command: Command): string[] {
+	const words: string[] = []
+	let current: Command | null = command
+	while (current && current.parent) {
+		words.unshift(current.name())
+		current = current.parent
+	}
+	return words
+}
+
+/**
+ * Resolves `-h`/`--help` text for an already-recognized command path: the
+ * exact `HELP_TOPICS` entry for the full path, then each shorter prefix,
+ * then `GENERAL_HELP`. Unlike the explicit `ef help <command>` lookup below
+ * (which fails with an unknown-topic invocation error), this always
+ * succeeds because it is only ever reached for a command Commander itself
+ * already resolved.
+ */
+function resolveHelpTopicWithFallback(words: readonly string[]): string {
+	for (let end = words.length; end >= 1; end--) {
+		const prefix = words
+			.slice(0, end)
+			.join(' ')
+		const text = HELP_TOPICS[prefix]
+		if (text)
+			return text
+	}
+	return GENERAL_HELP
+}
+
+/**
+ * Enables `-h`/`--help` on `command` and routes its output through
+ * `setOutcome` as a pre-envelope success (13-cli-contract.md "Version and
+ * Help"), instead of through Commander's own (deliberately no-op) output
+ * writers or exit path. Text is always the fixed human help for this
+ * command's path, regardless of `--format` or any other option already
+ * supplied -- help wins and is never wrapped in a JSON envelope.
+ *
+ * Commander also calls `outputHelp` with `{ error: true }` for its own
+ * "invalid invocation, show help" fallback (an unmatched group command, or a
+ * bare `ef` with no recognized subcommand) -- that path is a genuine
+ * pre-envelope invocation failure, not a `-h`/`--help` request, so it is left
+ * alone here (no `setOutcome` call) and allowed to keep throwing through to
+ * `runCli`'s ordinary `CommanderError` handling.
+ */
+function attachHelp(command: Command, setOutcome: (outcome: CommandOutcome) => void): Command {
+	command.helpOption('-h, --help', 'display help for this command')
+	command.outputHelp = (context?: { error: boolean } | ((str: string) => string)) => {
+		if (context && typeof context !== 'function' && context.error)
+			return
+		setOutcome({ exitCode: 0, stdout: `${resolveHelpTopicWithFallback(commandPathWords(command))}\n`, stderr: '' })
+	}
+	return command
+}
 
 /**
  * Build the full `ef` Commander program without parsing or executing
@@ -120,15 +187,25 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 	const program = new Command('ef')
 	program.exitOverride()
 	program.configureOutput({ writeOut: () => {}, writeErr: () => {}, outputError: () => {} })
-	program.helpOption(false)
+	attachHelp(program, setOutcome)
 	program.addHelpCommand(false)
 
-	function sub(name: string, argsUsage = ''): Command {
-		const command = program.command(`${name}${argsUsage ? ` ${argsUsage}` : ''}`)
+	/**
+	 * Applies the standard non-inherited-option-set wiring (exitOverride,
+	 * no-op output, `-h`/`--help`) to a freshly created command. Every
+	 * subcommand and leaf command in this file goes through this so `-h`/
+	 * `--help` behaves identically everywhere (13-cli-contract.md "Version
+	 * and Help").
+	 */
+	function applyCommandDefaults(command: Command): Command {
 		command.exitOverride()
 		command.configureOutput({ writeOut: () => {}, writeErr: () => {}, outputError: () => {} })
-		command.helpOption(false)
+		attachHelp(command, setOutcome)
 		return command
+	}
+
+	function sub(name: string, argsUsage = ''): Command {
+		return applyCommandDefaults(program.command(`${name}${argsUsage ? ` ${argsUsage}` : ''}`))
 	}
 
 	// ---- ef init ----------------------------------------------------------------
@@ -174,11 +251,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 	// ---- ef artifact create <type> -----------------------------------------------
 
 	const artifact = sub('artifact')
-	artifact
-		.command('create <type>')
-		.exitOverride()
-		.configureOutput({ writeOut: () => {}, writeErr: () => {}, outputError: () => {} })
-		.helpOption(false)
+	applyCommandDefaults(artifact.command('create <type>'))
 		.addOption(new Option('--project <project-root>'))
 		.addOption(FORMAT_OPTION())
 		.option('--no-color')
@@ -245,10 +318,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 	}
 
 	function queryLeaf(name: string, argsUsage: string): Command {
-		const command = query.command(`${name}${argsUsage ? ` ${argsUsage}` : ''}`)
-		command.exitOverride()
-		command.configureOutput({ writeOut: () => {}, writeErr: () => {}, outputError: () => {} })
-		command.helpOption(false)
+		const command = applyCommandDefaults(query.command(`${name}${argsUsage ? ` ${argsUsage}` : ''}`))
 		return queryCommonOptions(command)
 	}
 
@@ -352,11 +422,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 	// ---- ef resource read <owner-id> <location> ------------------------------------
 
 	const resource = sub('resource')
-	resource
-		.command('read <owner-id> <location>')
-		.exitOverride()
-		.configureOutput({ writeOut: () => {}, writeErr: () => {}, outputError: () => {} })
-		.helpOption(false)
+	applyCommandDefaults(resource.command('read <owner-id> <location>'))
 		.addOption(new Option('--project <project-root>'))
 		.option('--no-color')
 		.option('--no-input')
@@ -403,8 +469,21 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		await program.parseAsync(argv as string[], { from: 'user' })
 	}
 	catch (error) {
-		if (error instanceof CommanderError)
+		if (error instanceof CommanderError) {
+			// `-h`/`--help` (via `attachHelp`'s `outputHelp` override above) already
+			// called `setOutcome` with the pre-envelope success before Commander's
+			// `exitOverride()` turned its own internal `_exit(0, ...)` into this
+			// thrown `CommanderError` -- return that captured outcome instead of
+			// treating a successful help display as an invocation failure. The
+			// `outcome` check excludes Commander's *other* use of the same error
+			// codes (`this.help({ error: true })` for its "invalid invocation, show
+			// help" fallback), which `attachHelp` deliberately leaves for the
+			// `preEnvelopeFailure` branch below because `outputHelp` skips
+			// `setOutcome` in that case.
+			if ((error.code === 'commander.help' || error.code === 'commander.helpDisplayed') && outcome)
+				return outcome
 			return preEnvelopeFailure(error.message || 'Invalid invocation.')
+		}
 		return internalFailure(`Internal CLI failure: ${(error as Error).message}`)
 	}
 
