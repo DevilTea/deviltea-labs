@@ -22,11 +22,17 @@
  * exclusive claim before the marker exists; the matching nonce afterward).
  * On the plain-success path only, it then also removes its own now-empty
  * `.engineering/.tmp` runtime directory through the same ownership-proven
- * primitive, silently, without ever downgrading an already-completed
- * publication (11-filesystem-and-config.md "canonical Artifact and Resource
+ * primitive, without ever downgrading an already-completed publication to
+ * unapplied (11-filesystem-and-config.md "canonical Artifact and Resource
  * directories are created lazily, only when a file is written into them" --
  * `computeInitPlan` therefore never plans the six canonical directories, and
- * a rollback to a pre-EF commit leaves no EF-created residue behind).
+ * a rollback to a pre-EF commit leaves no EF-created residue behind). A
+ * provable removal failure of that owned `.tmp` -- as opposed to a provable
+ * foreign replacement, which is correctly left untouched -- is reported as
+ * `outcome: 'cleanup-failed'` rather than silently absorbed into a plain
+ * success (round-2 review finding: "MUST NOT misreport the published state
+ * as unapplied" bars downgrading to `applied: false`, it does not bar
+ * reporting a genuine cleanup failure honestly).
  * Ownership is proven by IDENTITY *and* CONTENT together, never
  * identity alone: a filesystem that recycles a just-freed inode for a
  * brand-new, unrelated directory (observed on Linux ext4 immediately after an
@@ -931,8 +937,11 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	 * itself both succeed; otherwise `entry.path` is left completely
 	 * untouched. This is the ONE ownership-proven deletion primitive every
 	 * destructive step in `applyInitPlan` routes through: `abort`'s own
-	 * per-entry cleanup loop, and the success path's final removal of the
-	 * marker itself. Routing both through the same primitive closes a gap a
+	 * per-entry cleanup loop, the success path's final removal of the marker
+	 * itself, and -- once ownership is confirmed still provably its own,
+	 * never on a provably foreign replacement -- the success path's
+	 * best-effort removal of its own now-empty `.tmp` runtime directory.
+	 * Routing all three through the same primitive closes a gap a
 	 * bespoke, ad hoc final deletion could otherwise reopen: a same-path
 	 * replacement (a forced-inode-ABA reusing a tracked FILE's captured
 	 * `(dev, ino)` for foreign content) landing strictly after an earlier
@@ -1430,29 +1439,69 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 	// force removal.
 	//
 	// Publication already, physically completed at the marker removal above.
-	// Nothing here may downgrade that: the whole attempt is contained, its
-	// boolean result deliberately ignored, and NO failure is surfaced. A
-	// containing `try`/`catch` is load-bearing, not defensive noise --
-	// `deleteOwnedEntry` -> `entryOwnershipStatus` -> `classifyIdentityProbeError`
-	// rethrows a genuine non-fs-system error, which would otherwise escape to
-	// `applyInitPlan`'s outer catch, leave `natural` undefined, and rethrow as
-	// exit 3 with `applied: false`: exactly the "MUST NOT misreport the published
-	// state as unapplied" violation 13-cli-contract.md forbids. A leftover empty
-	// `.tmp` degrades to the pre-fix behavior and produces no diagnostic in the
-	// initialized project -- discovery's incomplete-init claim keys on
-	// `.tmp/init-state.json`, proven gone above, never on `.tmp` itself.
+	// Nothing here may downgrade that to `applied: false` -- but that
+	// constraint is narrower than "no failure here may ever be surfaced"
+	// (round-2 review finding, correcting this module's own prior over-broad
+	// reading of it): silently swallowing a genuine removal failure and
+	// returning the exact plain `outcome: 'applied'` this whole step exists to
+	// avoid recreates the identical leftover-`.tmp` rollback hazard described
+	// above, just reported as a success instead of merely left unnoticed.
+	// `entryOwnershipStatus` is consulted directly, first, so THREE distinct
+	// cases are told apart rather than collapsed into one silently-ignored
+	// boolean:
+	//
+	// - PROVEN mismatch: the `.tmp` this invocation itself created has been
+	//   provably replaced by a same-name, different-identity foreign
+	//   directory. There is nothing left here that this invocation still
+	//   owns, so there is nothing for ITS OWN cleanup to have failed at --
+	//   left completely untouched, exactly like `abort`'s own per-entry loop
+	//   would leave any other provably-foreign entry, and the plain
+	//   `outcome: 'applied'` below remains correct.
+	// - UNAVAILABLE: ownership could not be re-proven either way (a mere
+	//   observation failure, e.g. a transient `EACCES`/`EIO`). This invocation
+	//   cannot tell whether `.tmp` is still its own, so it must not attempt to
+	//   delete it, but it must not silently claim success either --
+	//   `outcome: 'cleanup-failed'`.
+	// - PROVEN ownership: still provably this invocation's own directory
+	//   (this also covers something having been written into it since --
+	//   non-recursive `rmdir` then fails, e.g. `ENOTEMPTY`, which is exactly
+	//   this entry kind's own content proof; see `CreatedEntry`'s own doc).
+	//   Routed through `deleteOwnedEntry`, which re-proves ownership
+	//   immediately before the actual `rmdir` call. A `false` return here --
+	//   from that re-proof or from `rmdir` itself failing -- is a genuine
+	//   cleanup failure (the foreign-replacement case was already excluded
+	//   above) and is reported as `outcome: 'cleanup-failed'`, never
+	//   swallowed.
+	//
+	// A containing `try`/`catch` around all three checks remains load-bearing:
+	// `entryOwnershipStatus`/`deleteOwnedEntry` -> `classifyIdentityProbeError`
+	// still rethrows a genuine non-fs-system error, which is contained here --
+	// folded into `cleanup-failed`, since publication already, physically
+	// completed -- rather than left to escape to `applyInitPlan`'s outer catch
+	// and rethrow as exit 3 with `applied: false`, the exact "MUST NOT
+	// misreport the published state as unapplied" violation 13-cli-contract.md
+	// forbids. `applied: true` throughout every branch below.
 	const tmpEntryIndex = createdStack.findIndex(entry => entry.path === tmpPath)
 	if (tmpEntryIndex !== -1) {
-		let removed = false
+		const tmpEntry = createdStack[tmpEntryIndex]!
 		try {
-			removed = await deleteOwnedEntry(createdStack[tmpEntryIndex]!)
+			const tmpStatus = await entryOwnershipStatus(tmpEntry)
+			if (tmpStatus === 'unavailable') {
+				return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but ownership of its own now-empty '${tmpPath}' runtime directory could not be re-proven afterward.` }
+			}
+			if (tmpStatus === 'proven') {
+				if (!(await deleteOwnedEntry(tmpEntry))) {
+					return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but its own now-empty '${tmpPath}' runtime directory could not be safely removed: its ownership could not be re-proven immediately before deletion, or the removal itself failed.` }
+				}
+				createdStack.splice(tmpEntryIndex, 1)
+				createdTopLevelNames.delete('.tmp')
+			}
+			// `tmpStatus === 'mismatch'`: a provably foreign replacement, not this
+			// invocation's own cleanup failing -- see the comment above. Left
+			// completely untouched; the plain success below is correct.
 		}
-		catch {
-			removed = false
-		}
-		if (removed) {
-			createdStack.splice(tmpEntryIndex, 1)
-			createdTopLevelNames.delete('.tmp')
+		catch (error) {
+			return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but its own now-empty '${tmpPath}' runtime directory could not be verified or removed afterward: ${(error as Error).message}.` }
 		}
 	}
 

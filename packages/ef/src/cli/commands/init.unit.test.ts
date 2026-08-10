@@ -15,12 +15,14 @@ import { runInitCommand } from './init'
 // actual, non-injected dependency wiring (this command has no
 // `applyInitPlan`-deps injection point of its own). Every test that does not
 // explicitly arm one gets a plain passthrough to the real implementation.
-const { openMock, lstatMock, realFns } = vi.hoisted(() => ({
+const { openMock, lstatMock, rmdirMock, realFns } = vi.hoisted(() => ({
 	openMock: vi.fn(),
 	lstatMock: vi.fn(),
+	rmdirMock: vi.fn(),
 	realFns: {
 		open: undefined as unknown as typeof import('node:fs/promises').open,
 		lstat: undefined as unknown as typeof import('node:fs/promises').lstat,
+		rmdir: undefined as unknown as typeof import('node:fs/promises').rmdir,
 	},
 }))
 
@@ -28,9 +30,11 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('node:fs/promises')>()
 	realFns.open = actual.open
 	realFns.lstat = actual.lstat
+	realFns.rmdir = actual.rmdir
 	openMock.mockImplementation((...args: Parameters<typeof actual.open>) => actual.open(...args))
 	lstatMock.mockImplementation((...args: Parameters<typeof actual.lstat>) => actual.lstat(...args))
-	return { ...actual, open: openMock, lstat: lstatMock }
+	rmdirMock.mockImplementation((...args: Parameters<typeof actual.rmdir>) => actual.rmdir(...args))
+	return { ...actual, open: openMock, lstat: lstatMock, rmdir: rmdirMock }
 })
 
 /** Wraps a real executor, forcing failure for every `execIn` call; used to simulate `computeInitPlan`'s own read-only Git checks becoming unavailable. */
@@ -125,12 +129,14 @@ describe('runInitCommand', () => {
 		git(root, ['init', '-q', '-b', 'main'])
 		openMock.mockImplementation((...args: Parameters<typeof realFns.open>) => realFns.open(...args))
 		lstatMock.mockImplementation((...args: Parameters<typeof realFns.lstat>) => realFns.lstat(...args))
+		rmdirMock.mockImplementation((...args: Parameters<typeof realFns.rmdir>) => realFns.rmdir(...args))
 	})
 
 	afterEach(async () => {
 		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
 		openMock.mockClear()
 		lstatMock.mockClear()
+		rmdirMock.mockClear()
 	})
 
 	function deps(prompts: Prompts = neverPrompts()) {
@@ -697,6 +703,48 @@ describe('runInitCommand', () => {
 		// The initialization genuinely, fully completed on disk -- only
 		// releasing the marker's lease afterward failed.
 		await expect(fs.stat(path.join(root, '.engineering', 'ef.yaml'))).resolves.toBeTruthy()
+	})
+
+	// Round-2 review finding (P1, on `application/init.ts:1434`): a prior
+	// implementation caught the failure of its own best-effort removal of the
+	// now-empty `.engineering/.tmp` runtime directory and unconditionally
+	// reported a plain, unqualified success anyway -- recreating the exact
+	// leftover-`.tmp` rollback hazard this whole step exists to eliminate, just
+	// silently reported as success instead of merely left unnoticed.
+	// Reproduced here through the CLI's real, non-injected `applyInitPlan`
+	// wiring by forcing the real `rmdir` primitive to fail exactly for
+	// `.engineering/.tmp` itself; the marker (a plain file, removed via
+	// `unlink`, not `rmdir`) is genuinely written and removed exactly as
+	// production code does.
+	it('exits 3 (applied:true, complete:false, EF-VAL-008) -- never applied:false, never exit 0, never a plain success -- when its own .tmp directory\'s rmdir fails', async () => {
+		const tmpPath = path.join(root, '.engineering', '.tmp')
+		rmdirMock.mockImplementation(async (...args: Parameters<typeof realFns.rmdir>) => {
+			const [target] = args
+			if (typeof target === 'string' && target === tmpPath)
+				throw Object.assign(new Error('directory not empty'), { code: 'ENOTEMPTY' })
+			return realFns.rmdir(...args)
+		})
+
+		const outcome = await runInitCommand(baseOptions({ yes: true }), deps())
+
+		expect(outcome.exitCode)
+			.toBe(3)
+		const json = JSON.parse(outcome.stdout as string)
+		expect(json.complete)
+			.toBe(false)
+		expect(json.applied)
+			.toBe(true)
+		expect(json.diagnostics[0].code)
+			.toBe('EF-VAL-008')
+
+		// The initialization genuinely, fully completed on disk -- the marker
+		// is gone -- only removing the now-empty `.tmp` container afterward
+		// failed, and it is left behind exactly as a real `rmdir` failure would
+		// leave it: present, and genuinely empty.
+		await expect(fs.stat(path.join(root, '.engineering', 'ef.yaml'))).resolves.toBeTruthy()
+		await expect(fs.stat(path.join(root, '.engineering', '.tmp', 'init-state.json'))).rejects.toThrow()
+		expect(await fs.readdir(tmpPath))
+			.toEqual([])
 	})
 
 	// FINDING A (P1, eighteenth round): `applyInitPlan`'s internal
