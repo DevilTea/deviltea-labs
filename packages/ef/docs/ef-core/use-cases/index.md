@@ -34,7 +34,7 @@ UC-001..004  Establish and locate an EF project
         -> UC-010..019  Create and model draft knowledge
         -> UC-020..025  Normalize input, retain evidence, and migrate deliberately
         -> UC-030..039  Change, complete, retire, or supersede knowledge
-        -> UC-040..045  Validate and publish one authoritative transition
+        -> UC-040..046  Validate and publish authoritative transitions
         -> UC-050..055  Find, trace, resolve, and load explicit context
         -> UC-060..064  Use the CLI safely in people, editor, and CI flows
 ```
@@ -48,7 +48,7 @@ UC-001..004  Establish and locate an EF project
 | 3 | [03-input-and-resources.md](03-input-and-resources.md) | UC-020–UC-025 | Researcher, author, verifier |
 | 4 | [04-engineering-transactions.md](04-engineering-transactions.md) | UC-030–UC-034 | Change author, reviewer, integrator |
 | 5 | [05-terminal-state-and-supersession.md](05-terminal-state-and-supersession.md) | UC-035–UC-039 | Change author, consumer, reviewer |
-| 6 | [06-validation-and-publication.md](06-validation-and-publication.md) | UC-040–UC-045 | CI, integrator, editor |
+| 6 | [06-validation-and-publication.md](06-validation-and-publication.md) | UC-040–UC-046 | CI, integrator, editor |
 | 7 | [07-query-trace-and-context.md](07-query-trace-and-context.md) | UC-050–UC-055 | Engineer, agent, reviewer |
 | 8 | [08-cli-and-automation.md](08-cli-and-automation.md) | UC-060–UC-064 | CLI user, editor, CI, tool author |
 
@@ -63,13 +63,13 @@ UC-001..004  Establish and locate an EF project
 | 04 Relations | UC-014, UC-030, UC-035–UC-039, UC-052–UC-054 |
 | 05 Supersession | UC-035–UC-039, UC-053 |
 | 06 Resources | UC-015, UC-020–UC-024, UC-031, UC-055 |
-| 07 CHG Transaction Semantics | UC-030–UC-034, UC-040–UC-044 |
+| 07 CHG Transaction Semantics | UC-030–UC-034, UC-040–UC-044, UC-046 |
 | 08 Artifact Body Schemas | UC-012–UC-013, UC-030, UC-034–UC-036 |
-| 09 Validation | UC-004, UC-040–UC-045, UC-061–UC-064 |
+| 09 Validation | UC-004, UC-040–UC-046, UC-061–UC-064 |
 | 10 Query and Trace | UC-050–UC-055, UC-063 |
-| 11 Filesystem and Configuration | UC-001–UC-004, UC-025, UC-031, UC-040–UC-045, UC-060 |
+| 11 Filesystem and Configuration | UC-001–UC-004, UC-025, UC-031, UC-040–UC-046, UC-060 |
 | 12 Input Normalization | UC-020–UC-022 |
-| 13 CLI Contract | UC-001, UC-010, UC-040, UC-050–UC-055, UC-060–UC-064 |
+| 13 CLI Contract | UC-001, UC-010, UC-040, UC-046, UC-050–UC-055, UC-060–UC-064 |
 
 ## Test-suite extension model
 

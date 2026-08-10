@@ -74,6 +74,36 @@ describe('diagnosticToJson', () => {
 			.toEqual([{ path: '.engineering/req/REQ-044.md', message: 'Duplicate identity is also declared here.' }])
 	})
 
+	it('includes commit_oid when the diagnostic carries commitOid, and omits it (not null) otherwise', () => {
+		const withCommitOid: Diagnostic = {
+			code: 'EF-VAL-013',
+			severity: 'error',
+			message: 'range removal',
+			commitOid: 'abc123',
+			related: [],
+		}
+		const json = diagnosticToJson(withCommitOid)
+		expect(json.commit_oid)
+			.toBe('abc123')
+
+		const withoutCommitOid: Diagnostic = { code: 'EF-VAL-013', severity: 'error', message: 'range removal', related: [] }
+		expect(Object.keys(JSON.parse(JSON.stringify(diagnosticToJson(withoutCommitOid)))))
+			.not.toContain('commit_oid')
+	})
+
+	it('never emits commit_oid on a related location', () => {
+		const diagnostic: Diagnostic = {
+			code: 'EF-ID-004',
+			severity: 'error',
+			message: 'm',
+			commitOid: 'abc123',
+			related: [{ path: 'x.md', message: 'also here' }],
+		}
+		const json = diagnosticToJson(diagnostic)
+		expect(Object.keys(json.related[0]!))
+			.not.toContain('commit_oid')
+	})
+
 	it('preserves array order and length across zero, one, and many diagnostics', () => {
 		expect(diagnosticsToJson([]))
 			.toEqual([])

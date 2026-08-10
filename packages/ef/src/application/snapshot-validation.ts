@@ -1434,7 +1434,7 @@ export function validateSnapshot(snapshot: ProjectSnapshot): SnapshotValidationR
 // summarizeValidation
 // ---------------------------------------------------------------------------
 
-export type ValidationScope = 'snapshot' | 'transition' | 'bootstrap'
+export type ValidationScope = 'snapshot' | 'transition' | 'bootstrap' | 'range'
 
 export interface ValidationPolicy {
 	strict: boolean

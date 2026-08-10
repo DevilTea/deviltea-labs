@@ -105,6 +105,8 @@ function fakeGitRepository(overrides: Partial<GitRepository>): GitRepository {
 		listFirstParentHistory: notImplemented,
 		pathExistsInFirstParentHistory: notImplemented,
 		diffTrees: notImplemented,
+		listFirstParentRange: notImplemented,
+		readPathEntry: notImplemented,
 		...overrides,
 	}
 }

@@ -106,3 +106,42 @@ and publication to another branch are non-conforming.
 **Success assertions:** JSON diagnostics carry stable code, severity, message, path, position, field/section where applicable, and related locations; exits are 0 success, 1 completed domain rejection, 2 incomplete operation, 3 defect.
 
 **Guardrails:** Diagnostics do not mutate, format, migrate, fetch, or repair files; strict policy changes validity treatment, not factual diagnostic order.
+
+## UC-046 — Validate a multi-commit integration range
+
+**User Story:** As CI, I want to validate every authoritative boundary a
+multi-commit candidate would create so a push containing several new
+first-parent commits can be proved before one atomic publication.
+
+**Preconditions:** `--baseline` names the captured pre-integration tip of the
+authoritative ref, or is omitted when that ref was proven unresolved at
+operation start; `--proposed` names the exact candidate tip; the baseline, when
+supplied, is a member of the candidate's first-parent chain.
+
+**Main flow:**
+
+1. CI supplies `--scope range --baseline <full-oid> --proposed <full-oid>`.
+2. EF derives the validated sequence as the first-parent commits after the
+   baseline through the proposed commit inclusive, oldest-first.
+3. A commit whose `.engineering` tree entry equals the previous state is an
+   identity boundary and is neither materialized nor validated.
+4. The first absent-to-present boundary is validated with bootstrap semantics
+   and fixes the authoritative integration ref; every later distinct state is
+   validated as one ordinary transition from the previous distinct state.
+5. EF requires the captured operation-start ref OID to equal `--baseline` and
+   returns the integration ref plus that expected old OID for one conditional
+   publication of the range tip.
+
+**Success assertions:** A clean range is complete and valid (exit 0) and is
+published by exactly one compare-and-swap from the baseline, or from ref
+absence, to the proposed commit. An EF-inert range reports `EF-VAL-014` and
+exits 0. Findings inside the range carry the attributed `commit_oid`.
+
+**Guardrails:** No ref is mutated per intermediate commit and no checkout is
+required; a ref that already advanced to the candidate makes the result stale
+(`EF-VAL-002`, exit 2); commits reachable only through non-first parents are
+never validated; a baseline that is not a first-parent ancestor is `EF-VAL-011`
+(exit 2); shallow history blocks a bootstrap-bearing range (`EF-VAL-007`, exit
+2); a commit that removes the authoritative EF state is `EF-VAL-013` (exit 1)
+and stops the walk; one logical transaction split across two EF-touching commits
+fails at the earlier boundary.

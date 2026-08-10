@@ -278,6 +278,10 @@ async function writeFile(root: string, relativePath: string, content: string): P
 	await fs.writeFile(fullPath, content)
 }
 
+async function removeFile(root: string, relativePath: string): Promise<void> {
+	await fs.rm(path.join(root, relativePath), { force: true, recursive: true })
+}
+
 async function writeMinimalProject(root: string): Promise<void> {
 	await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
 	await writeFile(root, '.engineering/.gitignore', GITIGNORE)
@@ -1310,6 +1314,292 @@ schemas:
 			const json = JSON.parse(outcome.stdout as string)
 			expect(json.complete)
 				.toBe(false)
+		})
+	})
+
+	// ---- Range scope (09-validation.md "Range scope") --------------------------
+
+	describe('range scope', () => {
+		it('accepts --baseline for range scope (unlike snapshot/bootstrap) and validates a clean multi-commit range, exit 0', async () => {
+			await writeMinimalProject(root)
+			const baseline = commitAll(root, 'baseline')
+			// The candidate lives on a separate ref: `main` (the configured
+			// `integration_ref`) must still resolve to `baseline` when
+			// validation begins, matching real CI usage.
+			git(root, ['checkout', '-q', '-b', 'feature'])
+			await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'active'))
+			await writeFile(root, '.engineering/chg/CHG-001.md', changeMd('CHG-001', 'completed', '[{ type: introduces, target: REQ-001 }]'))
+			const proposed = commitAll(root, 'introduce REQ-001')
+			git(root, ['checkout', '-q', 'main'])
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.schema)
+				.toBe('ef/validation-result@1')
+			expect(json.scope)
+				.toBe('range')
+			expect(outcome.exitCode)
+				.toBe(0)
+			expect(json.valid)
+				.toBe(true)
+			expect(json.baseline_oid)
+				.toBe(baseline)
+			expect(json.proposed_oid)
+				.toBe(proposed)
+			expect(json.integration_ref)
+				.toBe('refs/heads/main')
+			expect(json.expected_ref_oid)
+				.toBe(baseline)
+		})
+
+		it('validates a range without --baseline against a proven-unresolved ref (root-commit bootstrap)', async () => {
+			// `main` (the configured `integration_ref`) stays genuinely unborn:
+			// the candidate is committed on a separate local branch, matching
+			// "the ref does not yet resolve".
+			git(root, ['checkout', '-q', '-b', 'candidate'])
+			await writeMinimalProject(root)
+			const proposed = commitAll(root, 'root bootstrap')
+
+			const outcome = await runValidateCommand({ scope: 'range', proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(outcome.exitCode)
+				.toBe(0)
+			expect(json.baseline_oid)
+				.toBeNull()
+			expect(json.expected_ref_oid)
+				.toBeNull()
+		})
+
+		it('exactly one JSON object plus one trailing newline, with exit_code matching the process exit status', async () => {
+			await writeMinimalProject(root)
+			const baseline = commitAll(root, 'baseline')
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed: baseline, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			const raw = outcome.stdout as string
+			expect(raw.endsWith('\n'))
+				.toBe(true)
+			expect(raw.indexOf('\n'))
+				.toBe(raw.length - 1)
+			const json = JSON.parse(raw)
+			expect(json.exit_code)
+				.toBe(outcome.exitCode)
+		})
+
+		it('a diagnostic in a range result carries commit_oid', async () => {
+			await writeMinimalProject(root)
+			const baseline = commitAll(root, 'baseline')
+			await removeFile(root, '.engineering')
+			const removalOid = commitAll(root, 'removes .engineering')
+			git(root, ['update-ref', 'refs/heads/main', baseline])
+			// Ordinary upward project discovery (implicit `--project`) requires
+			// `.engineering` to exist in the CURRENT working tree, independent of
+			// what the historical commits being validated contain -- restore it
+			// on disk (uncommitted) so discovery succeeds.
+			await writeMinimalProject(root)
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed: removalOid, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(1)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-013')
+			expect(json.diagnostics[0].commit_oid)
+				.toBe(removalOid)
+		})
+
+		// ---- Option applicability -----------------------------------------------
+
+		it('rejects --baseline for bootstrap scope even though it is now valid for range (EF-VAL-001)', async () => {
+			const outcome = await runValidateCommand({ scope: 'bootstrap', baseline: 'a'.repeat(40), proposed: 'a'.repeat(40), strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-001')
+		})
+
+		it('rejects --baseline for snapshot scope even though it is now valid for range (EF-VAL-001)', async () => {
+			const outcome = await runValidateCommand({ scope: 'snapshot', baseline: 'a'.repeat(40), strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-001')
+		})
+
+		it('requires --proposed for range scope (EF-VAL-011), and does not require --baseline', async () => {
+			const outcome = await runValidateCommand({ scope: 'range', strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-011')
+		})
+
+		// ---- Ref selection: before's config first, after's config as fallback --
+
+		it('selects integration_ref from the baseline\'s configuration when the baseline is EF-bearing', async () => {
+			await writeMinimalProject(root)
+			const baseline = commitAll(root, 'baseline')
+			await writeFile(root, 'unrelated.txt', 'x\n')
+			const proposed = commitAll(root, 'unrelated change')
+			git(root, ['update-ref', 'refs/heads/main', baseline])
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.integration_ref)
+				.toBe('refs/heads/main')
+			expect(outcome.exitCode)
+				.toBe(0)
+		})
+
+		it('selects integration_ref from the proposed commit\'s configuration when the baseline is pre-EF', async () => {
+			await writeFile(root, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(root, 'pre-EF baseline')
+			await writeMinimalProject(root)
+			const proposed = commitAll(root, 'bootstrap')
+			git(root, ['update-ref', 'refs/heads/main', baseline])
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.integration_ref)
+				.toBe('refs/heads/main')
+			expect(outcome.exitCode)
+				.toBe(0)
+		})
+
+		it('reports EF-VAL-006 (never an empty-config fallback) when the baseline\'s ef.yaml is a symlink (mode 120000)', async () => {
+			await writeMinimalProject(root)
+			git(root, ['add', '-A'])
+			stageSymlinkModeConfig(root, CONFIG_YAML)
+			const baselineTree = writeTreeOid(root)
+			const baseline = commitTreeOid(root, baselineTree, 'baseline with symlinked config')
+			const proposed = commitAll(root, 'proposed')
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(false)
+			expect(json.diagnostics.some((d: { code: string, message: string }) => d.code === 'EF-VAL-006' && d.message.includes('not a regular file')))
+				.toBe(true)
+		})
+
+		it('reports EF-VAL-006 when the fallback proposed commit\'s ef.yaml is a symlink (mode 120000) and the baseline is pre-EF', async () => {
+			await writeFile(root, 'README.txt', 'pre-EF\n')
+			const baseline = commitAll(root, 'pre-EF baseline')
+			await writeMinimalProject(root)
+			git(root, ['add', '-A'])
+			stageSymlinkModeConfig(root, CONFIG_YAML)
+			const proposedTree = writeTreeOid(root)
+			const proposed = commitTreeOid(root, proposedTree, 'proposed with symlinked config', baseline)
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.complete)
+				.toBe(false)
+			expect(json.diagnostics.some((d: { code: string, message: string }) => d.code === 'EF-VAL-006' && d.message.includes('not a regular file')))
+				.toBe(true)
+		})
+
+		// ---- Staleness ------------------------------------------------------------
+
+		it('reports EF-VAL-002 exit 2 when integration_ref has already advanced to the proposed commit (the stale-baseline adopter failure)', async () => {
+			await writeMinimalProject(root)
+			const oldTip = commitAll(root, 'old tip')
+			await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+			const newTip = commitAll(root, 'new tip')
+			git(root, ['update-ref', 'refs/heads/main', newTip])
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline: oldTip, proposed: newTip, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			expect(outcome.exitCode)
+				.toBe(2)
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.diagnostics[0].code)
+				.toBe('EF-VAL-002')
+			expect(json.expected_ref_oid)
+				.toBe(newTip)
+		})
+
+		// ---- --workspace uses the proposed commit's configuration -----------------
+
+		it('--workspace with range scope uses the proposed commit\'s linked_repositories and reports EF-FS-007 for a missing required linked repository', async () => {
+			await writeMinimalProject(root)
+			const baseline = commitAll(root, 'baseline')
+			const configWithLinkedRepo = CONFIG_YAML.replace('linked_repositories: []', 'linked_repositories:\n  - id: missing-repo\n    path: vendor/missing-repo\n    role: implementation\n    required: true\n')
+			await writeFile(root, '.engineering/ef.yaml', configWithLinkedRepo)
+			const proposed = commitAll(root, 'declares a required linked repository that is not checked out')
+			git(root, ['update-ref', 'refs/heads/main', baseline])
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: true, format: 'json', noColor: false }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.workspace)
+				.toBe(true)
+			expect(json.diagnostics.some((d: { code: string }) => d.code === 'EF-FS-007'))
+				.toBe(true)
+		})
+
+		it('--workspace with range scope reports EF-VAL-006 (never an empty-linked-repositories fallback) when the proposed commit\'s ef.yaml is a symlink', async () => {
+			await writeMinimalProject(root)
+			const baseline = commitAll(root, 'baseline')
+			git(root, ['add', '-A'])
+			stageSymlinkModeConfig(root, CONFIG_YAML)
+			const proposedTree = writeTreeOid(root)
+			const proposed = commitTreeOid(root, proposedTree, 'proposed with symlinked config', baseline)
+
+			const outcome = await runValidateCommand({ scope: 'range', baseline, proposed, strict: false, warningsAsErrors: false, workspace: true, format: 'json', noColor: false }, deps())
+			const json = JSON.parse(outcome.stdout as string)
+			expect(json.workspace)
+				.toBe(true)
+			expect(json.complete)
+				.toBe(false)
+			expect(json.diagnostics.some((d: { code: string }) => d.code === 'EF-VAL-006'))
+				.toBe(true)
+		})
+
+		// ---- Policy: strict/warnings-as-errors do not stop the walk ---------------
+
+		it('an intermediate warning-only state exits 0 by default, exits 1 under --strict, and does not stop evaluation of a later boundary', async () => {
+			// The Terminology disorder (EF-BODY-019, warning) is present from
+			// the BASELINE onward and PROJECT.md never changes again, so it
+			// never becomes a changed CHG-required target -- every later
+			// boundary's own per-commit content check keeps re-reporting the
+			// same warning without ever requiring CHG coverage for it.
+			const disorderedProjectMd = PROJECT_MD.replace(
+				'| --- | --- | --- |\n',
+				'| --- | --- | --- |\n| Zebra | last | none |\n| Alpha | first | none |\n',
+			)
+			await writeFile(root, '.engineering/ef.yaml', CONFIG_YAML)
+			await writeFile(root, '.engineering/.gitignore', GITIGNORE)
+			await writeFile(root, '.engineering/PROJECT.md', disorderedProjectMd)
+			const baseline = commitAll(root, 'baseline (terminology already out of order)')
+			await writeFile(root, '.engineering/req/REQ-001.md', requirementMd('REQ-001', 'draft'))
+			commitAll(root, 'draft REQ-001 (CHG-optional, terminology unchanged)')
+			await writeFile(root, '.engineering/req/REQ-002.md', requirementMd('REQ-002', 'draft'))
+			const laterOid = commitAll(root, 'draft REQ-002 (CHG-optional, terminology unchanged)')
+			git(root, ['update-ref', 'refs/heads/main', baseline])
+
+			const lenient = await runValidateCommand({ scope: 'range', baseline, proposed: laterOid, strict: false, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			const lenientJson = JSON.parse(lenient.stdout as string)
+			expect(lenient.exitCode)
+				.toBe(0)
+			expect(lenientJson.diagnostics.some((d: { code: string }) => d.code === 'EF-BODY-019'))
+				.toBe(true)
+			// The later commit was still evaluated (the walk was not stopped by
+			// the warning), so its own content is reflected too: no error-level
+			// finding at all under the lenient policy.
+			expect(lenientJson.valid)
+				.toBe(true)
+
+			const strict = await runValidateCommand({ scope: 'range', baseline, proposed: laterOid, strict: true, warningsAsErrors: false, workspace: false, format: 'json', noColor: false }, deps())
+			const strictJson = JSON.parse(strict.stdout as string)
+			expect(strict.exitCode)
+				.toBe(1)
+			expect(strictJson.diagnostics.some((d: { code: string }) => d.code === 'EF-BODY-019'))
+				.toBe(true)
 		})
 	})
 })

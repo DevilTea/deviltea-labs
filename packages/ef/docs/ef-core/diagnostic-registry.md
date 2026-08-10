@@ -148,6 +148,8 @@ change. Deprecated codes remain listed permanently rather than being reused.
 | `EF-VAL-010` | error | Validation orchestration and execution | 1 | [09-validation.md](09-validation.md) | Proposed bootstrap contains a terminal knowledge Artifact or CHG |
 | `EF-VAL-011` | error | Validation orchestration and execution | 2 | [09-validation.md](09-validation.md) | Proposed OID is missing or lexically invalid, does not resolve to a commit, cannot be materialized, or has inapplicable parentage |
 | `EF-VAL-012` | error | Validation orchestration and execution | 2 | [09-validation.md](09-validation.md) | An incomplete working-tree initialization claim exists |
+| `EF-VAL-013` | error | Validation orchestration and execution | 1 | [09-validation.md](09-validation.md) | A commit in the validated integration range removes the authoritative EF state |
+| `EF-VAL-014` | info | Validation orchestration and execution | unchanged | [09-validation.md](09-validation.md) | Validated integration range contains no EF state boundary |
 
 ## Reserved numeric slots
 

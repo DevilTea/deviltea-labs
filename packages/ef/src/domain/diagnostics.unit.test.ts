@@ -68,6 +68,21 @@ describe('sortDiagnostics', () => {
 		expect(result)
 			.toEqual([a, b])
 	})
+
+	it('breaks a field/section tie by commitOid (bytewise) as the final key, and a missing commitOid sorts after a present one', () => {
+		const withoutCommitOid = diagnostic({ code: 'EF-VAL-013', severity: 'error', message: 'm' })
+		const commitB = diagnostic({ code: 'EF-VAL-013', severity: 'error', message: 'm', commitOid: 'bbbb' })
+		const commitA = diagnostic({ code: 'EF-VAL-013', severity: 'error', message: 'm', commitOid: 'aaaa' })
+		expect(sortDiagnostics([withoutCommitOid, commitB, commitA]))
+			.toEqual([commitA, commitB, withoutCommitOid])
+	})
+
+	it('does not reorder diagnostics that all omit commitOid (non-range scope output is unaffected)', () => {
+		const b = diagnostic({ code: 'EF-X-002', severity: 'error', message: 'm', path: 'a.md' })
+		const a = diagnostic({ code: 'EF-X-001', severity: 'error', message: 'm', path: 'a.md' })
+		expect(sortDiagnostics([b, a]))
+			.toEqual([a, b])
+	})
 })
 
 describe('sortRelated', () => {
@@ -124,6 +139,20 @@ describe('dedupeDiagnostics', () => {
 		const sectionB = diagnostic({ code: 'EF-X-001', severity: 'error', message: 'm', section: 'B' })
 		expect(dedupeDiagnostics([fieldA, fieldB, sectionA, sectionB]))
 			.toEqual([fieldA, fieldB, sectionA, sectionB])
+	})
+
+	it('keeps two findings that are identical except for commitOid (distinct range boundaries sharing code and path)', () => {
+		const atCommitA = diagnostic({ code: 'EF-CHG-005', severity: 'error', message: 'm', path: 'a.md', commitOid: 'aaaa' })
+		const atCommitB = diagnostic({ code: 'EF-CHG-005', severity: 'error', message: 'm', path: 'a.md', commitOid: 'bbbb' })
+		expect(dedupeDiagnostics([atCommitA, atCommitB]))
+			.toEqual([atCommitA, atCommitB])
+	})
+
+	it('collapses two otherwise-identical findings that share the same commitOid', () => {
+		const first = diagnostic({ code: 'EF-CHG-005', severity: 'error', message: 'first message', path: 'a.md', commitOid: 'aaaa' })
+		const duplicate = diagnostic({ code: 'EF-CHG-005', severity: 'error', message: 'a different message', path: 'a.md', commitOid: 'aaaa' })
+		expect(dedupeDiagnostics([first, duplicate]))
+			.toEqual([first])
 	})
 })
 

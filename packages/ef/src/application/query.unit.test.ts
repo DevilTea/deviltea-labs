@@ -900,6 +900,8 @@ function wrapGitRepository(real: GitRepository, overrides: Partial<GitRepository
 		listFirstParentHistory: overrides.listFirstParentHistory ?? real.listFirstParentHistory.bind(real),
 		pathExistsInFirstParentHistory: overrides.pathExistsInFirstParentHistory ?? real.pathExistsInFirstParentHistory.bind(real),
 		diffTrees: overrides.diffTrees ?? real.diffTrees.bind(real),
+		listFirstParentRange: overrides.listFirstParentRange ?? real.listFirstParentRange.bind(real),
+		readPathEntry: overrides.readPathEntry ?? real.readPathEntry.bind(real),
 	}
 }
 

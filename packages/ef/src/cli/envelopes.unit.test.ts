@@ -110,6 +110,50 @@ describe('buildValidationResultJson', () => {
 		expect(json.diagnostics)
 			.toEqual([{ code: 'EF-ID-004', severity: 'error', message: 'dup', artifact_id: 'REQ-031', related: [] }])
 	})
+
+	it('produces scope "range" with the exact documented top-level key set (no new keys) and diagnostics carrying commit_oid', () => {
+		const summary: ValidationSummary = {
+			scope: 'range',
+			baselineOid: '0123456789abcdef0123456789abcdef01234567',
+			proposedOid: 'fedcba9876543210fedcba9876543210fedcba98',
+			integrationRef: 'refs/heads/main',
+			expectedRefOid: '0123456789abcdef0123456789abcdef01234567',
+			strict: false,
+			warningsAsErrors: false,
+			complete: true,
+			valid: false,
+			counts: { error: 1, warning: 0, info: 0 },
+			exitCode: 1,
+		}
+		const diagnostics: Diagnostic[] = [
+			{ code: 'EF-VAL-013', severity: 'error', message: 'removed EF state', commitOid: 'abc123', related: [] },
+		]
+
+		const json = buildValidationResultJson(summary, diagnostics, false)
+		expect(json.scope)
+			.toBe('range')
+		expect(json.diagnostics)
+			.toEqual([{ code: 'EF-VAL-013', severity: 'error', message: 'removed EF state', commit_oid: 'abc123', related: [] }])
+		expect(Object.keys(JSON.parse(JSON.stringify(json)))
+			.sort())
+			.toEqual([
+				'baseline_oid',
+				'complete',
+				'counts',
+				'diagnostics',
+				'exit_code',
+				'expected_ref_oid',
+				'integration_ref',
+				'kind',
+				'proposed_oid',
+				'schema',
+				'scope',
+				'strict',
+				'valid',
+				'warnings_as_errors',
+				'workspace',
+			])
+	})
 })
 
 describe('buildMutationResultJson', () => {

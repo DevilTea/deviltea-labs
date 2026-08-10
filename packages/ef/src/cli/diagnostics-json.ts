@@ -12,6 +12,10 @@
  * Optional fields are omitted (not `null`) by relying on `JSON.stringify`
  * dropping `undefined`-valued keys, matching the diagnostic examples in
  * 09-validation.md, which never show `null` for an absent optional field.
+ * `commit_oid` (wire form of `Diagnostic.commitOid`) follows the same
+ * omit-when-absent rule and is populated only for range-scope diagnostics
+ * (09-validation.md "Diagnostic object"); it never appears on a related
+ * location.
  */
 
 import type { Diagnostic, RelatedLocation, SourceLocation } from '../domain/diagnostics'
@@ -39,6 +43,7 @@ export interface JsonDiagnostic {
 	location?: JsonSourceLocation
 	field?: string
 	section?: string
+	commit_oid?: string
 	related: JsonRelatedLocation[]
 }
 
@@ -70,6 +75,7 @@ export function diagnosticToJson(diagnostic: Diagnostic): JsonDiagnostic {
 		location: locationToJson(diagnostic.location),
 		field: diagnostic.field,
 		section: diagnostic.section,
+		commit_oid: diagnostic.commitOid,
 		related: diagnostic.related.map(relatedToJson),
 	}
 }
