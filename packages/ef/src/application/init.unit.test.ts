@@ -6,6 +6,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createGitExecutor } from '../git/executor'
 import { createGitRepository } from '../git/repository'
+import { discoverProject } from '../repository/discovery'
 import {
 	applyInitPlan,
 	computeInitPlan,
@@ -304,31 +305,18 @@ describe('computeInitPlan', () => {
 		if (!result.ok)
 			return
 
-		expect(result.plan.directories)
-			.toEqual([
-				'.engineering/adr',
-				'.engineering/chg',
-				'.engineering/pol',
-				'.engineering/prd',
-				'.engineering/req',
-				'.engineering/resources',
-			])
 		expect(result.plan.files.map(f => f.path))
 			.toEqual(['.engineering/.gitignore', '.engineering/PROJECT.md', '.engineering/ef.yaml'])
 		expect(result.plan.changes.map(c => c.path))
 			.toEqual([
 				'.engineering/.gitignore',
 				'.engineering/PROJECT.md',
-				'.engineering/adr',
-				'.engineering/chg',
 				'.engineering/ef.yaml',
-				'.engineering/pol',
-				'.engineering/prd',
-				'.engineering/req',
-				'.engineering/resources',
 			])
 		expect(result.plan.changes.every(c => c.action === 'create'))
 			.toBe(true)
+		expect(result.plan.changes.some(c => /^\.engineering\/(?:prd|req|adr|pol|chg|resources)$/.test(c.path)))
+			.toBe(false)
 
 		const gitignoreText = new TextDecoder()
 			.decode(result.plan.files.find(f => f.path === '.engineering/.gitignore')!.bytes)
@@ -424,11 +412,9 @@ describe('applyInitPlan', () => {
 		expect(await pathExists(path.join(tempDir, '.engineering/.tmp/init-state.json')))
 			.toBe(false)
 
-		for (const dir of plan.directories) {
-			const stat = await fs.stat(path.join(tempDir, dir))
-			expect(stat.isDirectory())
-				.toBe(true)
-		}
+		expect((await fs.readdir(path.join(tempDir, '.engineering'))).sort())
+			.toEqual(['.gitignore', 'PROJECT.md', 'ef.yaml'])
+
 		for (const file of plan.files) {
 			const bytes = await fs.readFile(path.join(tempDir, file.path))
 			expect(new Uint8Array(bytes))
@@ -666,14 +652,15 @@ describe('applyInitPlan', () => {
 			.toBe(false)
 	})
 
-	it('cleans up the whole claim when a directory silently fails to materialize', async () => {
+	it('leaves .engineering and its untracked .tmp completely untouched when .tmp itself cannot be verified as materialized', async () => {
 		const plan = await computeValidPlan()
+		const tmpPath = path.join(tempDir, '.engineering', '.tmp')
 		const deps = {
 			...defaultApplyInitPlanDeps,
-			isDirectory: async (targetPath: string) => {
-				if (targetPath.endsWith(path.join('.engineering', 'chg')))
-					return false
-				return defaultApplyInitPlanDeps.isDirectory(targetPath)
+			directoryIdentity: async (targetPath: string) => {
+				if (targetPath === tmpPath)
+					return undefined
+				return defaultApplyInitPlanDeps.directoryIdentity(targetPath)
 			},
 		}
 
@@ -683,10 +670,18 @@ describe('applyInitPlan', () => {
 		expect(result.applied === false && result.outcome)
 			.toBe('incomplete')
 		expect(result.applied === false && result.message)
-			.toBe('Directory \'.engineering/chg\' was not materialized.')
+			.toBe(`'${tmpPath}' could not be verified as an empty, non-symlink directory immediately after being created.`)
 
+		// `.tmp` was never tracked as owned (its ownership witness could not be
+		// established), so `abort` never attempts to delete it directly -- but
+		// `.engineering` itself is still tracked, and its own `rmdir` correctly
+		// fails because the real, untracked `.tmp` directory still physically
+		// exists inside it: cleanup stops there rather than force-removing state
+		// it cannot prove it owns, leaving both completely untouched.
 		expect(await pathExists(path.join(tempDir, '.engineering')))
-			.toBe(false)
+			.toBe(true)
+		expect(await pathExists(tmpPath))
+			.toBe(true)
 	})
 
 	// Both `readFileBytes` stubs below report a mismatch UNCONDITIONALLY, on
@@ -784,14 +779,9 @@ describe('applyInitPlan', () => {
 		expect(result.applied === false && result.message)
 			.toBe('The initialization marker no longer contains the invocation\'s nonce.')
 
-		// Every planned file and directory was actually, fully materialized;
-		// only the final marker check (post-completion) failed, and cleanup
-		// correctly refused to remove a claim it can no longer prove it owns.
-		for (const dir of plan.directories) {
-			const stat = await fs.stat(path.join(tempDir, dir))
-			expect(stat.isDirectory())
-				.toBe(true)
-		}
+		// Every planned file was actually, fully materialized; only the final
+		// marker check (post-completion) failed, and cleanup correctly refused
+		// to remove a claim it can no longer prove it owns.
 		for (const file of plan.files) {
 			const bytes = await fs.readFile(path.join(tempDir, file.path))
 			expect(new Uint8Array(bytes))
@@ -961,20 +951,19 @@ describe('applyInitPlan', () => {
 		it('aborts without publishing any file outside when the claim is swapped for a symlink immediately before file publication', async () => {
 			const plan = await computeValidPlan()
 			const engineeringPath = path.join(tempDir, '.engineering')
-			const lastDir = plan.directories[plan.directories.length - 1]!
-			const lastDirPath = path.join(tempDir, lastDir)
 			const outsideDir = outsidePath()
 
 			const deps = {
 				...defaultApplyInitPlanDeps,
-				mkdir: async (targetPath: string) => {
-					await defaultApplyInitPlanDeps.mkdir(targetPath)
-					if (targetPath === lastDirPath) {
-						// Timed to land the instant after every planned directory
-						// exists, strictly before the first file is published.
+				writeInitMarker: async (markerPath: string, nonce: string) => {
+					const real = await defaultApplyInitPlanDeps.writeInitMarker(markerPath, nonce)
+					if (real.outcome === 'created') {
+						// Timed to land the instant after the marker exists, strictly
+						// before the first planned file is published.
 						await fs.rename(engineeringPath, outsideDir)
 						await fs.symlink(outsideDir, engineeringPath, 'dir')
 					}
+					return real
 				},
 			}
 
@@ -986,13 +975,13 @@ describe('applyInitPlan', () => {
 				expect(result.applied === false && result.outcome)
 					.toBe('incomplete')
 
-				// Every planned directory (created before the swap) and the marker
-				// (written before the swap) are present outside -- but no planned
-				// file is: the swap is caught before the first `createExclusive`
-				// call.
-				const expectedOutsideEntries = [...plan.directories.map(d => d.replace('.engineering/', '')), '.tmp'].sort()
+				// The marker (written before the swap) is present outside, inside
+				// its `.tmp` container -- but no planned file is: the swap is
+				// caught before the first `createExclusive` call.
 				expect((await fs.readdir(outsideDir)).sort())
-					.toEqual(expectedOutsideEntries)
+					.toEqual(['.tmp'])
+				expect(await fs.readdir(path.join(outsideDir, '.tmp')))
+					.toEqual(['init-state.json'])
 				for (const file of plan.files) {
 					await expect(fs.stat(path.join(outsideDir, file.path.replace('.engineering/', ''))))
 						.rejects.toThrow()
@@ -1146,14 +1135,16 @@ describe('applyInitPlan', () => {
 
 		it('never deletes a foreign entry substituted at a previously-created path under the same name but a different identity', async () => {
 			const plan = await computeValidPlan()
+			const firstFilePath = path.join(tempDir, plan.files[0]!.path)
 			const lastFile = plan.files[plan.files.length - 1]!
 			const lastFilePath = path.join(tempDir, lastFile.path)
 			let substituted = false
 
 			const deps = {
 				...defaultApplyInitPlanDeps,
-				isDirectory: async (targetPath: string) => {
-					if (targetPath.endsWith(path.join('.engineering', 'chg')) && !substituted) {
+				readFileBytes: async (targetPath: string) => {
+					const bytes = await defaultApplyInitPlanDeps.readFileBytes(targetPath)
+					if (targetPath === firstFilePath && !substituted) {
 						substituted = true
 						// By this point in the protocol every planned file
 						// (including `lastFilePath`) is already created and tracked.
@@ -1164,9 +1155,8 @@ describe('applyInitPlan', () => {
 						// already-tracked expected path.
 						await fs.rm(lastFilePath, { force: true })
 						await fs.writeFile(lastFilePath, 'foreign replacement content')
-						return false
 					}
-					return defaultApplyInitPlanDeps.isDirectory(targetPath)
+					return bytes
 				},
 			}
 
@@ -1192,6 +1182,7 @@ describe('applyInitPlan', () => {
 
 		it('fails closed via the byte-content check even when the per-entry identity check itself is completely fooled (inode-ABA, forced)', async () => {
 			const plan = await computeValidPlan()
+			const firstFilePath = path.join(tempDir, plan.files[0]!.path)
 			const lastFile = plan.files[plan.files.length - 1]!
 			const lastFilePath = path.join(tempDir, lastFile.path)
 			let capturedIdentity: { dev: number, ino: number } | undefined
@@ -1214,16 +1205,16 @@ describe('applyInitPlan', () => {
 						return capturedIdentity
 					return identity
 				},
-				isDirectory: async (targetPath: string) => {
-					if (targetPath.endsWith(path.join('.engineering', 'chg')) && !substituted) {
+				readFileBytes: async (targetPath: string) => {
+					const bytes = await defaultApplyInitPlanDeps.readFileBytes(targetPath)
+					if (targetPath === firstFilePath && !substituted) {
 						substituted = true
 						// Same substitution as the test above: a genuinely different
 						// real file under the identical, already-tracked path.
 						await fs.rm(lastFilePath, { force: true })
 						await fs.writeFile(lastFilePath, 'foreign replacement content')
-						return false
 					}
-					return defaultApplyInitPlanDeps.isDirectory(targetPath)
+					return bytes
 				},
 			}
 
@@ -1345,7 +1336,6 @@ describe('applyInitPlan', () => {
 			const lastFilePath = path.join(tempDir, lastFile.path)
 			let foreignIdentity: { dev: number, ino: number } | undefined
 			let substitutedForeignFile = false
-			let substitutedMissingDirectory = false
 
 			const deps = {
 				...defaultApplyInitPlanDeps,
@@ -1384,19 +1374,15 @@ describe('applyInitPlan', () => {
 					}
 					return real
 				},
-				// Force an abort strictly AFTER every planned file (including
-				// the tampered one above) has already been created and
-				// tracked, so cleanup's deepest-first loop reaches the tampered
-				// entry -- the very last one pushed onto `createdStack` -- as
-				// its first deletion attempt.
-				isDirectory: async (targetPath: string) => {
-					if (targetPath.endsWith(path.join('.engineering', 'chg')) && !substitutedMissingDirectory) {
-						substitutedMissingDirectory = true
-						return false
-					}
-					return defaultApplyInitPlanDeps.isDirectory(targetPath)
-				},
 			}
+			// The substitution above lands during `lastFile`'s own creation --
+			// the final iteration of the file-creation loop -- so the very next
+			// `verifyClaimIntact()` checkpoint (immediately after that loop,
+			// strictly before the byte-verification loop even starts) already
+			// observes the lease as unlinked and aborts. Cleanup's deepest-first
+			// loop therefore reaches the tampered entry -- the very last one
+			// pushed onto `createdStack` -- as its first deletion attempt,
+			// exactly as intended, with no separate forcing hook required.
 
 			const result = await applyInitPlan(plan, deps)
 
@@ -2256,7 +2242,7 @@ describe('applyInitPlan', () => {
 			const plan = await computeValidPlan()
 			const engineeringPath = path.join(tempDir, '.engineering')
 			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
-			const trackedDirPath = path.join(tempDir, plan.directories[0]!)
+			const trackedDirPath = path.join(engineeringPath, '.tmp')
 			const probeError = Object.assign(new Error('ENOTDIR: not a directory, lstat'), { code: 'ENOTDIR', syscall: 'lstat' })
 			let markerUnlinked = false
 
@@ -2289,7 +2275,7 @@ describe('applyInitPlan', () => {
 			const plan = await computeValidPlan()
 			const engineeringPath = path.join(tempDir, '.engineering')
 			const markerPath = path.join(engineeringPath, '.tmp', 'init-state.json')
-			const trackedDirPath = path.join(tempDir, plan.directories[0]!)
+			const trackedDirPath = path.join(engineeringPath, '.tmp')
 			const probeError = Object.assign(new Error('permission denied'), { code: 'EACCES', syscall: 'lstat' })
 			let markerUnlinked = false
 			let releaseCallCount = 0
@@ -2404,6 +2390,129 @@ describe('applyInitPlan', () => {
 				.rejects.toThrow('bad internal argument')
 			expect(releaseCallCount)
 				.toBe(1)
+		})
+	})
+
+	// Issue #7 P1: a SUCCESSFUL `ef init`, followed by committing the bootstrap
+	// and later rolling back to the pre-init commit (`git reset --hard`), must
+	// leave no EF-created residue -- neither a canonical Artifact/Resource
+	// directory (never planned at all, per `computeInitPlan`) nor the
+	// initialization marker's own `.tmp` runtime container (removed on the
+	// plain-success path). Prior to this fix, an empty, git-ignored `.tmp`
+	// survived the reset (Git cannot see or remove an empty directory), which
+	// in turn kept `.engineering` alive without `ef.yaml` -- a false
+	// `incomplete-initialization` (EF-VAL-012) report for a project that was
+	// never actually left incomplete.
+	describe('a successful init leaves no rollback-hostile residue (issue #7 P1)', () => {
+		function repo() {
+			return createGitRepository(tempDir, createGitExecutor())
+		}
+
+		it('leaves not-found (never incomplete-initialization) after committing a successful init and rolling back to the pre-init commit', async () => {
+			await fs.writeFile(path.join(tempDir, 'README.md'), '# Test\n')
+			const baseOid = commitAll(tempDir, 'pre-EF baseline')
+
+			const plan = await computeValidPlan()
+			const result = await applyInitPlan(plan)
+			expect(result.applied)
+				.toBe(true)
+
+			// Exactly the three planned files -- no canonical directory, no
+			// `.tmp` -- is the precondition for the rollback below to actually
+			// exercise the fix.
+			expect((await fs.readdir(path.join(tempDir, '.engineering'))).sort())
+				.toEqual(['.gitignore', 'PROJECT.md', 'ef.yaml'])
+
+			commitAll(tempDir, 'bootstrap EF state')
+			git(tempDir, ['reset', '--hard', baseOid])
+
+			// Git removes `.engineering` entirely once its last tracked file is
+			// gone -- there is nothing EF-created left over for it to preserve.
+			expect(await pathExists(path.join(tempDir, '.engineering')))
+				.toBe(false)
+
+			const discovered = await discoverProject({ cwd: tempDir, explicitRoot: tempDir }, repo())
+			expect(discovered.kind)
+				.toBe('not-found')
+		})
+
+		it('still reports incomplete-initialization when a genuinely interrupted init leaves a live marker behind', async () => {
+			await fs.writeFile(path.join(tempDir, 'README.md'), '# Test\n')
+			commitAll(tempDir, 'pre-EF baseline')
+
+			const plan = await computeValidPlan()
+			// Every real write genuinely succeeds; only the final, post-write
+			// marker-nonce re-check is tricked into reporting a foreign nonce --
+			// so cleanup fails closed and leaves the fully materialized tree,
+			// including the still-live marker, completely untouched (matching
+			// the existing `readInitMarker`-tampering coverage above).
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				readInitMarker: async () => ({
+					outcome: 'found' as const,
+					marker: { schema: 'ef/init-state@1' as const, nonce: '0'.repeat(32) },
+				}),
+			}
+
+			const result = await applyInitPlan(plan, deps)
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			expect(await pathExists(path.join(tempDir, '.engineering', 'ef.yaml')))
+				.toBe(true)
+			expect(await pathExists(path.join(tempDir, '.engineering', '.tmp', 'init-state.json')))
+				.toBe(true)
+
+			const discovered = await discoverProject({ cwd: tempDir, explicitRoot: tempDir }, repo())
+			expect(discovered.kind)
+				.toBe('incomplete-initialization')
+			expect(discovered.kind === 'incomplete-initialization' && discovered.root)
+				.toBe(tempDir)
+		})
+
+		it('still reports incomplete-initialization when a genuinely interrupted init leaves .engineering without ef.yaml', async () => {
+			await fs.writeFile(path.join(tempDir, 'README.md'), '# Test\n')
+			commitAll(tempDir, 'pre-EF baseline')
+
+			const plan = await computeValidPlan()
+			// `PROJECT.md`'s reported bytes are truncated by exactly one byte on
+			// every read, unconditionally: the byte-verification loop detects the
+			// mismatch and aborts; cleanup's deepest-first loop then genuinely
+			// deletes `ef.yaml` (created after `PROJECT.md`, so checked and
+			// deleted first) before halting at `PROJECT.md` itself, which it can
+			// never prove is byte-for-byte what this invocation wrote (matching
+			// the existing coverage above for this exact deps shape).
+			const deps = {
+				...defaultApplyInitPlanDeps,
+				readFileBytes: async (targetPath: string) => {
+					if (targetPath.endsWith('PROJECT.md')) {
+						const bytes = plan.files.find(f => f.path === '.engineering/PROJECT.md')!.bytes
+						return bytes.slice(0, bytes.length - 1)
+					}
+					return defaultApplyInitPlanDeps.readFileBytes(targetPath)
+				},
+			}
+
+			const result = await applyInitPlan(plan, deps)
+			expect(result.applied)
+				.toBe(false)
+			expect(result.applied === false && result.outcome)
+				.toBe('incomplete')
+
+			expect(await pathExists(path.join(tempDir, '.engineering', 'ef.yaml')))
+				.toBe(false)
+			expect(await pathExists(path.join(tempDir, '.engineering', 'PROJECT.md')))
+				.toBe(true)
+			expect(await pathExists(path.join(tempDir, '.engineering')))
+				.toBe(true)
+
+			const discovered = await discoverProject({ cwd: tempDir, explicitRoot: tempDir }, repo())
+			expect(discovered.kind)
+				.toBe('incomplete-initialization')
+			expect(discovered.kind === 'incomplete-initialization' && discovered.root)
+				.toBe(tempDir)
 		})
 	})
 })

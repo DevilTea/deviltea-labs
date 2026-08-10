@@ -154,6 +154,8 @@ describe('runInitCommand', () => {
 		expect(await engineeringExists())
 			.toBe(true)
 		await expect(fs.stat(path.join(root, '.engineering', 'ef.yaml'))).resolves.toBeTruthy()
+		expect((await fs.readdir(path.join(root, '.engineering'))).sort())
+			.toEqual(['.gitignore', 'PROJECT.md', 'ef.yaml'])
 	})
 
 	it('--dry-run returns a complete unapplied plan and writes nothing', async () => {
@@ -163,8 +165,8 @@ describe('runInitCommand', () => {
 		const json = JSON.parse(outcome.stdout as string)
 		expect(json)
 			.toMatchObject({ complete: true, applied: false, dry_run: true })
-		expect(json.changes.length)
-			.toBeGreaterThan(0)
+		expect(json.changes.map((c: { path: string }) => c.path))
+			.toEqual(['.engineering/.gitignore', '.engineering/PROJECT.md', '.engineering/ef.yaml'])
 		expect(await engineeringExists())
 			.toBe(false)
 	})
