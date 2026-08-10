@@ -108,7 +108,40 @@ that sequence the CLI for common workflows without reimplementing its logic:
 Installing `@deviltea/ef` does not install or mutate an agent's Skill
 directory. The Skill directories ship in the npm tarball and the GitHub
 repository under `skills/`; install them with an existing compatible Skill
-installer for your agent.
+installer for your agent, for example the [`skills`](https://skills.sh/) CLI:
+
+```bash
+npx skills add DevilTea/deviltea-labs \
+  --skill author-engineering-files \
+  --skill review-engineering-change
+```
+
+This clones the repository and copies the two Skills (which live under
+`packages/ef/skills/` in this monorepo) into your agent's Skill directory;
+add `-g` to install them globally instead of into the current project.
+
+### Repository workflow adoption
+
+The Skills activate for EF-specific requests, but only repository-level
+instructions can guarantee that a generic request (e.g. "add feature X")
+first enters the EF lifecycle. Adapt this harness-neutral snippet into your
+repository's instruction file (`AGENTS.md`, `CLAUDE.md`, or equivalent):
+
+```text
+When asked to make an engineering change to this repository:
+1. Discover EF context (does `.engineering/` exist, and what does it say)
+   before writing code.
+2. When applicable, draft or update the engineering intent in EF first
+   (PROJECT/PRD/REQ/ADR/POL) — see the `author-engineering-files` Skill.
+3. Implement the change.
+4. Record a CHG (or other authoritative effect) for the change — see
+   `author-engineering-files`.
+5. Run `ef validate --scope snapshot` on the working tree.
+6. Validate the integration boundary of the candidate commit(s)
+   (`ef validate --scope transition|bootstrap|range`) before the
+   integration ref advances — see the `review-engineering-change` Skill.
+7. Integrate only after validation succeeds.
+```
 
 ## Full Specification
 
@@ -117,6 +150,10 @@ contract are specified in
 [`docs/ef-core/`](https://github.com/DevilTea/deviltea-labs/tree/main/packages/ef/docs/ef-core),
 starting with the [Overview](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/docs/ef-core/00-overview.md)
 and the [CLI Contract](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/docs/ef-core/13-cli-contract.md).
+
+For a worked example wiring `ef validate --scope range` into CI so a whole
+push is validated before its integration ref advances, see the
+[GitHub Actions integration-range recipe](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/docs/planning/03-ci-recipe-github-actions-range-validation.md).
 
 ## License
 
