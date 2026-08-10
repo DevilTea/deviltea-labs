@@ -213,12 +213,24 @@ snapshot validation.
 For range scope, `--baseline` names the captured pre-integration tip of the
 authoritative `integration_ref`. It need not contain EF state. Omitting it in
 range scope is an explicit assertion that `integration_ref` was proven
-unresolved when the operation began, such as for a push that creates the
-branch; validation requires that assertion to be true and otherwise exits `2`.
-Core v1 defines no all-zeros OID sentinel for ref absence: a supplied all-zeros
-value resolves to no commit and is an unusable baseline. The validator still
-requires the captured operation-start ref OID to equal `--baseline`, so an
-already-advanced ref is reported as a stale baseline and exits `2`.
+unresolved when the operation began — for example, an integration process that
+observes the ref as genuinely unborn and then itself performs the creating
+compare-and-swap; validation requires that assertion to be true and otherwise
+exits `2`. Core v1 defines no all-zeros OID sentinel for ref absence: a
+supplied all-zeros value resolves to no commit and is an unusable baseline. The
+validator still requires the captured operation-start ref OID to equal
+`--baseline`, so an already-advanced ref is reported as a stale baseline and
+exits `2`.
+
+The validator establishes that operation-start state by probing the exact
+`integration_ref` name in the local Git repository the command is bound to —
+the resolved project root, using that repository's own ref database — never by
+inspecting a remote-tracking ref, a hosting-provider API, or a value asserted
+through any other channel. A caller MUST ensure that ref name is materialized,
+or genuinely absent, in that same local repository before the command runs; a
+repository that holds only a detached candidate commit, without the
+authoritative ref name itself resolving or provably failing to resolve there,
+cannot satisfy either a supplied `--baseline` or an omitted one.
 
 `--proposed` is required for transition, bootstrap, and range scope and invalid
 for snapshot scope. It accepts only a full commit OID for the project
@@ -296,10 +308,18 @@ The envelope schema is not versioned up for range scope. `scope` gains the value
 `range`, which a consumer can observe only in response to its own
 `--scope range` invocation, and no top-level key is added or removed. Diagnostic
 objects MAY carry the optional `commit_oid` key defined by [Validation and Integrity](09-validation.md); it appears
-only in range scope and is omitted rather than null otherwise. The validated
-commit sequence is intentionally not exposed as an envelope key: a consumer
-derives it with `git rev-list --first-parent <baseline>..<proposed>` or from the
-`commit_oid` values on the returned diagnostics.
+only in range scope and is omitted rather than null otherwise. `commit_oid`
+attributes an emitted diagnostic to the one commit whose EF state or incoming
+boundary produced it; it MUST NOT be read as an enumeration of the validated
+commit sequence, because identity boundaries emit no diagnostic by design, a
+clean transition or bootstrap boundary may likewise emit none, fail-fast walk
+termination omits diagnostics for every boundary after the first
+error-severity one, and a fully conforming range can therefore carry an empty
+diagnostic list end to end (see [Validation and Integrity](09-validation.md)).
+The validated commit sequence is intentionally not exposed as an envelope key;
+a consumer derives it with `git rev-list --first-parent <baseline>..<proposed>`
+only after a complete range result has already proved first-parent ancestry
+between those two OIDs.
 
 ## Query Commands
 
@@ -789,8 +809,10 @@ ef validate \
 ```
 
 `--baseline` is the pinned pre-integration tip of the target branch and is
-omitted for a push that creates the branch, where that ref was proven unresolved
-at operation start.
+omitted only when the integration process has itself proven, in the local
+repository the command runs against, that the ref did not yet exist at
+operation start — never merely inferred from a push or other event that can
+observe the ref only after it may have already advanced.
 
 CI validation is read-only, deterministic, network-free, and independent of
 TTY state. It validates the complete proposed commit tree, does not require caches,

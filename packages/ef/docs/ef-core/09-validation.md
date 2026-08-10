@@ -314,6 +314,14 @@ supplies a proven OID, proven absence, or a probe failure. The validator MUST
 NOT resolve or re-resolve that ref itself. The captured ref name MUST equal the
 authoritative `integration_ref`; a mismatch is `EF-VAL-002`.
 
+That one-time capture MUST be performed by probing the exact `integration_ref`
+name in the local Git repository the operation is bound to, using that
+repository's own ref database, never by inspecting a remote-tracking ref, a
+hosting-provider API, or a value asserted through any other channel. A range
+whose local repository never materializes that ref name — as a resolvable ref
+or as a provable absence — cannot supply a valid captured ref state, regardless
+of which commit is otherwise checked out or reachable there.
+
 A complete range result requires the captured operation-start OID to equal the
 trusted range baseline OID: either both are present and equal, or both are
 absent. Any other combination is `EF-VAL-002` and exits `2`. A failed ref probe
@@ -603,13 +611,28 @@ Fields are:
 | `commit_oid` | full commit OID string | No |
 | `related` | array of related-location objects | Yes, may be `[]` |
 
-`commit_oid` attributes a finding to one commit of a validated commit sequence.
-It is present only in range scope, and only for a finding evaluated at one
-commit's EF state or at one commit's incoming boundary; a boundary finding
-attaches to that boundary's later commit, which is the commit that introduced
-the violation. A range-level finding that belongs to no single commit, such as
-an ancestry, captured-ref-state, shallow-history, or EF-inert-range finding,
-omits it. Every other scope omits it.
+`commit_oid` attributes one finding to the one commit whose EF state or
+incoming boundary produced it. It is present only in range scope, and only for
+a finding evaluated at one commit's EF state or at one commit's incoming
+boundary; a boundary finding attaches to that boundary's later commit, which
+is the commit that introduced the violation. A range-level finding that
+belongs to no single commit, such as an ancestry, captured-ref-state,
+shallow-history, or EF-inert-range finding, omits it. Every other scope omits
+it.
+
+`commit_oid` is attribution for a diagnostic that exists; it MUST NOT be
+documented or read as a means of enumerating or deriving the validated commit
+sequence, and consumers MUST NOT rely on it for that purpose. Three properties
+of range validation make that reading unsound: an identity boundary emits no
+diagnostic at all (above, "An identity boundary is trivially valid"); walk
+termination omits diagnostics for every boundary after the first
+error-severity one (see "Walk termination" below); and a range whose every
+boundary is clean, including a range with no EF state boundary at all, carries
+an empty or near-empty diagnostic list even though its validated commit
+sequence is non-empty. The validated commit sequence is derived from Git
+objects with `git rev-list --first-parent <baseline>..<proposed>`, and only
+after a complete range result has already proved first-parent ancestry between
+those two OIDs.
 
 Line and column numbers are one-based. A column is the one-based Unicode scalar
 value index within the original source line; a tab or combining scalar counts as

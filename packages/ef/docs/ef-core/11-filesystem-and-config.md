@@ -346,16 +346,17 @@ for EF: commands do not search past an incomplete nearer claim and do not
 silently reinterpret it as an unrelated directory. An `.engineering` path that
 is not a directory is invalid and cannot be used as an initialization claim.
 
-For commit-bound transition or bootstrap validation, an explicit `--project`
-identifies the project Git worktree root even when its checked-out tree does not
-contain the candidate configuration. The validator loads authoritative
-configuration from the supplied commit or commits. Current working-tree
-configuration may assist implicit root discovery but is not a semantic
-substitute for either materialized commit. This exception allows bootstrap
-validation from a pre-EF checkout when the repository root is explicit.
-Consequently, the working-tree incomplete-initialization check above does not
-replace or block explicit commit-bound materialization; transition and bootstrap
-validation derive initialization state from their selected commit trees.
+For commit-bound transition, bootstrap, or range validation, an explicit
+`--project` identifies the project Git worktree root even when its
+checked-out tree does not contain the candidate configuration. The validator
+loads authoritative configuration from the supplied commit or commits.
+Current working-tree configuration may assist implicit root discovery but is
+not a semantic substitute for any materialized commit. This exception allows
+bootstrap validation from a pre-EF checkout when the repository root is
+explicit. Consequently, the working-tree incomplete-initialization check above
+does not replace or block explicit commit-bound materialization; transition,
+bootstrap, and range validation derive initialization state from their
+selected commit trees.
 
 After discovery, a command is associated with the project when its working
 directory is:
