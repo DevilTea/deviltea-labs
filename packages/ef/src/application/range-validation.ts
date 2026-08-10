@@ -69,6 +69,7 @@ import type { SnapshotValidationResult, ValidationPolicy, ValidationSummary } fr
 import type { TransitionBoundarySide } from './transition-validation'
 import { severityOf } from '../domain/diagnostic-codes'
 import { aggregateDiagnostics } from '../domain/diagnostics'
+import { REGULAR_FILE_GIT_MODES } from '../git/repository'
 import { evaluateBootstrapStateRules } from './bootstrap-validation'
 import { loadSnapshotFromCommit } from './snapshot'
 import { summarizeValidation, validateSnapshot } from './snapshot-validation'
@@ -215,6 +216,62 @@ async function observeEfState(git: GitRepository, commitOid: string, subject: st
 	switch (entry.kind) {
 		case 'resolved':
 			return { kind: 'present', entry: entry.entry }
+		case 'absent':
+			return { kind: 'absent' }
+		case 'git-unavailable':
+			return { kind: 'blocked', message: `Git is unavailable while reading ${subject}: ${entry.message}` }
+		case 'missing':
+			return { kind: 'blocked', message: `Git is unavailable while reading ${subject}: the commit could not be re-read after already being resolved` }
+		case 'error':
+			return { kind: 'blocked', message: `Git is unavailable while reading ${subject}: ${entry.message}` }
+		default:
+			return assertNeverPathEntry(entry)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Configuration trust (mirrors the CLI's `peekConfigAt` in
+// `cli/commands/validate.ts`, the reference implementation of the absolute
+// Git trust rule: a read result's `untrusted` and `error` states MUST NEVER
+// be collapsed into `absent`)
+// ---------------------------------------------------------------------------
+
+type EfYamlTrustCheck
+	= | { kind: 'trusted' }
+		/** No `.engineering/ef.yaml` blob at this commit at all -- a genuine, ordinary absence, distinct from `untrusted` below. */
+		| { kind: 'absent' }
+		/** A tree entry exists at exactly `.engineering/ef.yaml` but its Git mode/type is not an ordinary regular file (a symlink, a gitlink/submodule, or a directory literally named `ef.yaml`) -- never a genuine absence, and never safe to read as configuration bytes (Finding 5, `peekConfigAt`). */
+		| { kind: 'untrusted', mode: string }
+		/** A Git read failure -- `git-unavailable`, `missing` (contradicts an already-resolved commit), or `error` -- never proof of absence. */
+		| { kind: 'blocked', message: string }
+
+/**
+ * `materialize` (via `loadSnapshotFromCommit`) already excludes a
+ * non-regular-file `.engineering/ef.yaml` entry from the bytes it decodes as
+ * configuration (`snapshot.ts`'s own Finding 5), so it never reads a
+ * symlink's target TEXT as config. But it folds that exclusion into the SAME
+ * `config.config === null` shape a genuinely absent `ef.yaml` produces --
+ * indistinguishable, from `authoritativeIntegrationRef`-fixing code's point of
+ * view, from "this commit simply names no ref." That is exactly the
+ * collapse-into-absent this module's own doc comment and `peekConfigAt` both
+ * forbid: an untrusted entry is a distinct, unresolved trust question, never
+ * a proof of absence.
+ *
+ * This performs the SAME `readPathEntry` + `REGULAR_FILE_GIT_MODES` check
+ * `peekConfigAt` performs, independently, on exactly the ONE commit whose
+ * configuration is about to be trusted to fix the range's authoritative
+ * `integration_ref` (the trusted range baseline when its `.engineering` entry
+ * is present, or the range's bootstrap boundary otherwise) -- never on any
+ * other commit in the sequence, so it stays a single-commit check at the
+ * exact point of trust rather than another look-ahead.
+ */
+async function checkEfYamlTrust(git: GitRepository, commitOid: string, subject: string): Promise<EfYamlTrustCheck> {
+	const entry = await git.readPathEntry(commitOid, EF_YAML_PATH)
+	switch (entry.kind) {
+		case 'resolved':
+			return entry.entry.type === 'blob' && REGULAR_FILE_GIT_MODES.has(entry.entry.mode)
+				? { kind: 'trusted' }
+				: { kind: 'untrusted', mode: entry.entry.mode }
 		case 'absent':
 			return { kind: 'absent' }
 		case 'git-unavailable':
@@ -545,6 +602,29 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 		if (baselineObservation.kind === 'present') {
 			previousTriple = tripleOf(baselineObservation.entry)
 
+			// Absolute Git trust rule (`peekConfigAt`, `cli/commands/validate.ts`):
+			// this commit's configuration is about to be trusted to fix the
+			// range's authoritative `integration_ref`, so its
+			// `.engineering/ef.yaml` entry must itself be a trusted regular file
+			// BEFORE that trust is extended -- never folded into the `!baselineConfig`
+			// branch below, which is reserved for a genuine absence of a valid
+			// ref (a missing or malformed `ef.yaml`), not an unresolved trust
+			// question over a symlink, gitlink, or directory at that exact path.
+			const baselineYamlTrust = await checkEfYamlTrust(git, resolvedBaselineOid, 'the trusted range baseline\'s \'.engineering/ef.yaml\'')
+			if (baselineYamlTrust.kind === 'blocked') {
+				return incompleteResult([
+					makeDiagnostic('EF-VAL-006', baselineYamlTrust.message),
+				], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid })
+			}
+			if (baselineYamlTrust.kind === 'untrusted') {
+				return incompleteResult([
+					makeDiagnostic('EF-VAL-006', `The trusted range baseline's '.engineering/ef.yaml' is not a regular file (Git mode '${baselineYamlTrust.mode}') and cannot be used to establish the range's authoritative integration ref.`),
+				], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid })
+			}
+			// `trusted` or `absent`: fall through to materialization -- `absent`
+			// (no `ef.yaml` at all) is a genuine, ordinary absence, still handled
+			// by the `!baselineConfig` branch below exactly as before.
+
 			const baselineMaterialized = await materialize(git, resolvedBaselineOid)
 			if (!baselineMaterialized.ok) {
 				if (baselineMaterialized.reason === 'git-unavailable') {
@@ -623,6 +703,36 @@ export async function validateRange(input: ValidateRangeInput): Promise<RangeVal
 
 		if (previousTriple === null && currentTriple !== null) {
 			sawPresentState = true
+
+			// Absolute Git trust rule (`peekConfigAt`, `cli/commands/validate.ts`):
+			// reached with `previousTriple === null`, so by the loop invariant
+			// documented below (`previousTriple !== null => authoritativeIntegrationRef
+			// !== undefined`, established at the baseline and preserved by every
+			// subsequent boundary) this commit is unconditionally the range's
+			// bootstrap boundary -- the ONE commit whose own configuration is
+			// about to be trusted to fix the authoritative `integration_ref` when
+			// the trusted range baseline did not already fix it. Its
+			// `.engineering/ef.yaml` entry must itself be a trusted regular file
+			// BEFORE that trust is extended -- never folded into the
+			// `!bootstrapConfig` branch below, which is reserved for a genuine
+			// absence of a valid ref, not an unresolved trust question over a
+			// symlink, gitlink, or directory at that exact path.
+			const bootstrapYamlTrust = await checkEfYamlTrust(git, oid, `commit '${oid}''s '.engineering/ef.yaml'`)
+			if (bootstrapYamlTrust.kind === 'blocked') {
+				return incompleteResult([
+					...accumulated,
+					makeDiagnostic('EF-VAL-006', bootstrapYamlTrust.message),
+				], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef ?? null, expectedRefOid })
+			}
+			if (bootstrapYamlTrust.kind === 'untrusted') {
+				return incompleteResult([
+					...accumulated,
+					makeDiagnostic('EF-VAL-006', `Commit '${oid}''s '.engineering/ef.yaml' is not a regular file (Git mode '${bootstrapYamlTrust.mode}') and cannot be used to establish the range's authoritative integration ref.`),
+				], policy, { baselineOid: resolvedBaselineOid, proposedOid: resolvedProposedOid, integrationRef: authoritativeIntegrationRef ?? null, expectedRefOid })
+			}
+			// `trusted` or `absent`: fall through to materialization -- `absent`
+			// (no `ef.yaml` at all) is a genuine, ordinary absence, still handled
+			// by the `!bootstrapConfig` branch below exactly as before.
 
 			const bootstrapMaterialized = await materialize(git, oid)
 			if (!bootstrapMaterialized.ok) {
