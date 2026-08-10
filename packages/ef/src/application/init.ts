@@ -16,11 +16,18 @@
  *
  * `applyInitPlan` performs the exact eight-step claim-and-complete protocol:
  * atomically claim `.engineering`, create `.tmp` and the nonce-bearing
- * marker, materialize every planned file and directory, verify faithful
- * materialization and marker survival, remove the marker only on success,
- * and on any failure remove only paths whose ownership by this invocation is
- * proven (the exclusive claim before the marker exists; the matching nonce
- * afterward). Ownership is proven by IDENTITY *and* CONTENT together, never
+ * marker, materialize every planned file, verify faithful materialization and
+ * marker survival, remove the marker only on success, and on any failure
+ * remove only paths whose ownership by this invocation is proven (the
+ * exclusive claim before the marker exists; the matching nonce afterward).
+ * On the plain-success path only, it then also removes its own now-empty
+ * `.engineering/.tmp` runtime directory through the same ownership-proven
+ * primitive, silently, without ever downgrading an already-completed
+ * publication (11-filesystem-and-config.md "canonical Artifact and Resource
+ * directories are created lazily, only when a file is written into them" --
+ * `computeInitPlan` therefore never plans the six canonical directories, and
+ * a rollback to a pre-EF commit leaves no EF-created residue behind).
+ * Ownership is proven by IDENTITY *and* CONTENT together, never
  * identity alone: a filesystem that recycles a just-freed inode for a
  * brand-new, unrelated directory (observed on Linux ext4 immediately after an
  * `rm -rf` + `mkdir` of the same path) reports the exact same `lstat`
@@ -83,7 +90,7 @@ import { parseFrontmatterDocument, splitFrontmatter } from '../parsing/frontmatt
 import { extractSections, parseBody } from '../parsing/markdown'
 import { claimDirectory } from '../platform/claim-directory'
 import { createExclusive, readInitMarker, writeInitMarker } from '../platform/exclusive-file'
-import { directoryIdentity, isDirectory, readFileBytes, regularFileIdentity, sameFileIdentity } from '../platform/fs-facts'
+import { directoryIdentity, readFileBytes, regularFileIdentity, sameFileIdentity } from '../platform/fs-facts'
 import { generateNonce } from '../platform/nonce'
 import { isSameLocation } from '../platform/path-identity'
 import { decodeConfig, isValidIntegrationRef } from '../repository/config'
@@ -92,16 +99,6 @@ import { validateSnapshot } from './snapshot-validation'
 // ---------------------------------------------------------------------------
 // Fixed bootstrap content
 // ---------------------------------------------------------------------------
-
-const CANONICAL_DIRECTORIES: readonly string[] = [
-	'.engineering/prd',
-	'.engineering/req',
-	'.engineering/adr',
-	'.engineering/pol',
-	'.engineering/chg',
-	'.engineering/resources',
-].slice()
-	.sort(compareBytewise)
 
 const GITIGNORE_TEXT = '.cache/\n.generated/\n.tmp/\n.lock\n'
 
@@ -146,9 +143,7 @@ export interface InitPlan {
 	integrationRef: string
 	/** Bytewise sorted by path. */
 	files: InitPlanFile[]
-	/** Project-relative canonical directories, bytewise sorted. */
-	directories: string[]
-	/** Files and directories together, bytewise sorted by path (13-cli-contract.md "Changes are sorted by canonical path"). */
+	/** Bytewise sorted by path (13-cli-contract.md "Changes are sorted by canonical path"). */
 	changes: InitPlanChange[]
 }
 
@@ -357,7 +352,6 @@ export async function computeInitPlan(input: ComputeInitPlanInput, deps: Compute
 		['.engineering/ef.yaml', 'file'],
 		['.engineering/.gitignore', 'file'],
 		['.engineering/PROJECT.md', 'file'],
-		...CANONICAL_DIRECTORIES.map(dir => [dir, 'directory'] as const),
 	])
 
 	const syntheticSnapshot: ProjectSnapshot = {
@@ -382,7 +376,7 @@ export async function computeInitPlan(input: ComputeInitPlanInput, deps: Compute
 		}
 	}
 
-	const changes: InitPlanChange[] = [...files.map(f => ({ action: 'create' as const, path: f.path })), ...CANONICAL_DIRECTORIES.map(dir => ({ action: 'create' as const, path: dir }))]
+	const changes: InitPlanChange[] = files.map(f => ({ action: 'create' as const, path: f.path }))
 		.sort((a, b) => compareBytewise(a.path, b.path))
 
 	return {
@@ -391,7 +385,6 @@ export async function computeInitPlan(input: ComputeInitPlanInput, deps: Compute
 			targetRoot,
 			integrationRef: values.integrationRef,
 			files,
-			directories: CANONICAL_DIRECTORIES.slice(),
 			changes,
 		},
 	}
@@ -408,7 +401,6 @@ export interface ApplyInitPlanDeps {
 	writeInitMarker: (path: string, nonce: string) => Promise<CreateExclusiveResult>
 	readInitMarker: (path: string) => Promise<ReadInitMarkerResult>
 	readFileBytes: (path: string) => Promise<Uint8Array>
-	isDirectory: (path: string) => Promise<boolean>
 	unlink: (path: string) => Promise<void>
 	/**
 	 * Remove an EMPTY, non-recursive directory only (plain `rmdir` semantics:
@@ -462,7 +454,6 @@ export const defaultApplyInitPlanDeps: ApplyInitPlanDeps = {
 	writeInitMarker,
 	readInitMarker,
 	readFileBytes,
-	isDirectory,
 	unlink: async (target) => {
 		await fsUnlink(target)
 	},
@@ -512,11 +503,12 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 /**
  * Establish the ownership witness for a directory THIS INVOCATION itself just
- * created via a non-recursive `mkdir` (`tmpPath`, and each of
- * `plan.directories`) -- the directory counterpart of a FILE's handle-bound
- * `createExclusive` identity. `mkdir` returns no handle, so unlike a file
- * there is no way to bind this observation to the exact creating syscall the
- * way `readBackThroughHandle`/`handle.stat()` bind a file's; the strongest
+ * created via a non-recursive `mkdir` (`tmpPath` -- the only directory this
+ * invocation creates besides the claim itself) -- the directory counterpart
+ * of a FILE's handle-bound `createExclusive` identity. `mkdir` returns no
+ * handle, so unlike a file there is no way to bind this observation to the
+ * exact creating syscall the way `readBackThroughHandle`/`handle.stat()`
+ * bind a file's; the strongest
  * reachable substitute (identical to `platform/claim-directory.ts`'s own
  * post-`mkdir` proof) is an immediate `lstat`-based observation that ALSO
  * requires the directory to be EMPTY, not merely "is a non-symlink
@@ -758,10 +750,9 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 
 	/**
 	 * The single path segment of `canonicalRelativePath` immediately below
-	 * `.engineering` -- every planned directory and file
-	 * (`CANONICAL_DIRECTORIES`, `InitPlan.files`) is exactly one level
-	 * beneath it, so this is also the exact entry name `readDirectory`
-	 * reports for it once created.
+	 * `.engineering` -- `.tmp` and every planned file (`InitPlan.files`) are
+	 * exactly one level beneath it, so this is also the exact entry name
+	 * `readDirectory` reports for it once created.
 	 */
 	function topLevelChildName(canonicalRelativePath: string): string {
 		return path.relative('.engineering', canonicalRelativePath)
@@ -1254,26 +1245,6 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		createdStack.push({ path: markerPath, kind: 'file', lease })
 	}
 
-	for (const dir of plan.directories) {
-		if ((await verifyClaimIntact()) !== 'intact')
-			return abort(claimIntactFailureMessage)
-		const dirPath = path.join(plan.targetRoot, dir)
-		try {
-			await deps.mkdir(dirPath)
-		}
-		catch (error) {
-			return abort(`Failed to create directory '${dir}': ${(error as Error).message}`)
-		}
-		// See the `tmpPath` creation above: `mkdir` returns no handle, so
-		// `establishFreshDirectoryIdentity`'s `lstat`-plus-emptiness check is
-		// the strongest reachable ownership proof for a directory entry.
-		const identity = await establishFreshDirectoryIdentity(deps, dirPath)
-		if (identity === undefined)
-			return abort(`'${dirPath}' could not be verified as an empty, non-symlink directory immediately after being created.`)
-		createdStack.push({ path: dirPath, kind: 'directory', identity })
-		createdTopLevelNames.add(topLevelChildName(dir))
-	}
-
 	for (const file of plan.files) {
 		if ((await verifyClaimIntact()) !== 'intact')
 			return abort(claimIntactFailureMessage)
@@ -1305,11 +1276,6 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 
 	if ((await verifyClaimIntact()) !== 'intact')
 		return abort(claimIntactFailureMessage)
-
-	for (const dir of plan.directories) {
-		if (!(await deps.isDirectory(path.join(plan.targetRoot, dir))))
-			return abort(`Directory '${dir}' was not materialized.`)
-	}
 
 	for (const file of plan.files) {
 		let bytes: Uint8Array
@@ -1446,6 +1412,48 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		// the other direction: it also must not misreport an unproven state as
 		// applied).
 		return { applied: false, outcome: 'incomplete', message: claimIntactFailureMessage }
+	}
+
+	// Step 7, continued: the marker's own runtime container. `.engineering/.tmp`
+	// exists only to hold the initialization marker, is a conventional
+	// non-authoritative runtime path (11-filesystem-and-config.md "Runtime and
+	// Derived State"; ignored by the canonical `.engineering/.gitignore`), and is
+	// empty the instant the marker is removed above. Left behind, it is invisible
+	// to Git (`git status` never reports an empty directory) yet keeps
+	// `.engineering` alive after `git reset --hard` to a pre-EF commit, where
+	// every tracked EF file is removed but the directory cannot be -- turning a
+	// SUCCESSFUL init into a false `.engineering`-without-`ef.yaml` incomplete
+	// initialization claim (issue #7 P1). Removed through the exact same
+	// `deleteOwnedEntry` primitive as the marker: identity re-proven immediately
+	// before deletion, non-recursive `rmdir` (which succeeds only on a genuinely
+	// empty directory, so anything foreign inside stops it), never a recursive or
+	// force removal.
+	//
+	// Publication already, physically completed at the marker removal above.
+	// Nothing here may downgrade that: the whole attempt is contained, its
+	// boolean result deliberately ignored, and NO failure is surfaced. A
+	// containing `try`/`catch` is load-bearing, not defensive noise --
+	// `deleteOwnedEntry` -> `entryOwnershipStatus` -> `classifyIdentityProbeError`
+	// rethrows a genuine non-fs-system error, which would otherwise escape to
+	// `applyInitPlan`'s outer catch, leave `natural` undefined, and rethrow as
+	// exit 3 with `applied: false`: exactly the "MUST NOT misreport the published
+	// state as unapplied" violation 13-cli-contract.md forbids. A leftover empty
+	// `.tmp` degrades to the pre-fix behavior and produces no diagnostic in the
+	// initialized project -- discovery's incomplete-init claim keys on
+	// `.tmp/init-state.json`, proven gone above, never on `.tmp` itself.
+	const tmpEntryIndex = createdStack.findIndex(entry => entry.path === tmpPath)
+	if (tmpEntryIndex !== -1) {
+		let removed = false
+		try {
+			removed = await deleteOwnedEntry(createdStack[tmpEntryIndex]!)
+		}
+		catch {
+			removed = false
+		}
+		if (removed) {
+			createdStack.splice(tmpEntryIndex, 1)
+			createdTopLevelNames.delete('.tmp')
+		}
 	}
 
 	return { applied: true, outcome: 'applied', changes: plan.changes }
