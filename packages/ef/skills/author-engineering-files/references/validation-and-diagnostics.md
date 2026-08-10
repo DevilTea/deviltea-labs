@@ -164,13 +164,13 @@ even to a single-maintainer repository that normally commits directly to its
 integration branch - the candidate commit must exist and pass bootstrap or
 transition validation before the branch pointer advances, never after.
 
-## A push with multiple commits: range scope
+## Integrating multiple commits at once: range scope
 
 When the candidate is not one commit but a fast-forward containing several
-new first-parent commits (a multi-commit push, or several batched commits
-about to be integrated at once), validate the whole thing as one integration
-range instead of walking each commit one at a time with repeated `--scope
-transition`/`--scope bootstrap` calls:
+new first-parent commits (several batched commits about to be integrated at
+once), validate the whole thing as one integration range instead of walking
+each commit one at a time with repeated `--scope transition`/`--scope
+bootstrap` calls:
 
 ```bash
 ef validate --scope range \
@@ -183,8 +183,8 @@ Like every other step in the lifecycle above, this never requires moving
 `integration_ref` to validate: the ref only advances after this reports
 `exit_code: 0`, and only via the same conditional ref update from step 4. See
 `docs/planning/03-ci-recipe-github-actions-range-validation.md` for the full
-CI recipe (checkout depth, `before`/`after` SHA wiring, and the conditional
-ref update).
+CI recipe: candidate selection for a required `pull_request`/`merge_group`
+check, and the operation-start ref capture that check depends on.
 
 ## Editor/CI equivalents
 

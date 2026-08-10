@@ -152,7 +152,8 @@ starting with the [Overview](https://github.com/DevilTea/deviltea-labs/blob/main
 and the [CLI Contract](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/docs/ef-core/13-cli-contract.md).
 
 For a worked example wiring `ef validate --scope range` into CI so a whole
-push is validated before its integration ref advances, see the
+candidate range is validated while it is still unpublished, before the
+integration ref advances, see the
 [GitHub Actions integration-range recipe](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/docs/planning/03-ci-recipe-github-actions-range-validation.md).
 
 ## License

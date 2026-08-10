@@ -142,7 +142,7 @@ is reviewing a repository's very first EF state (no prior authoritative EF
 history on the configured integration ref) - not for an ordinary change
 review.
 
-## Reviewing a multi-commit push (range)
+## Reviewing a multi-commit range
 
 ```bash
 ef validate --scope range \
@@ -151,17 +151,19 @@ ef validate --scope range \
   --format json --no-input
 ```
 
-Use this instead of reviewing each pushed commit separately with repeated
+Use this instead of reviewing each proposed commit separately with repeated
 transition/bootstrap calls when the requester's change is a fast-forward
 containing more than one new first-parent commit. `--baseline` is optional
 for range scope - omitting it is an explicit assertion that
-`integration_ref` was proven unresolved at operation start (for example a
-push that creates the branch) and the result is invalid if that assertion
-does not hold. A complete range result's diagnostics MAY carry `commit_oid`,
-attributing a finding to the one pushed commit it was found at; see
+`integration_ref` was proven unresolved at operation start (for example
+bootstrapping a brand-new integration ref before any commit has ever been
+published to it) and the result is invalid if that assertion does not hold.
+A complete range result's diagnostics MAY carry `commit_oid`, attributing a
+finding to the one candidate commit it was found at; see
 `references/diagnostics.md`. See
 `docs/planning/03-ci-recipe-github-actions-range-validation.md` for the full
-CI recipe this scope is designed for.
+CI recipe: candidate selection for a required `pull_request`/`merge_group`
+check, and the operation-start ref capture that check depends on.
 
 ## Reading the JSON envelope
 
