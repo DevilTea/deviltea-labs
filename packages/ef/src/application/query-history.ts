@@ -112,6 +112,7 @@ import type { ProjectSnapshot } from './snapshot'
 import type { SnapshotArtifactRecord, SnapshotValidationResult } from './snapshot-validation'
 import type { TransitionBoundarySide } from './transition-validation'
 import { compareBytewise } from '../domain/model'
+import { evaluateBootstrapStateRules } from './bootstrap-validation'
 import { buildArtifactSummary, canonicalArtifactPath } from './query-projection'
 import { loadSnapshotFromCommit } from './snapshot'
 import { validateSnapshot } from './snapshot-validation'
@@ -119,16 +120,6 @@ import { evaluateTransitionBoundary } from './transition-validation'
 
 const EF_YAML_PATH = '.engineering/ef.yaml'
 const PROJECT_CONTROL_PATHS = [EF_YAML_PATH, '.engineering/.gitignore'] as const
-/**
- * Bootstrap-only state rules (09-validation.md "Bootstrap exception"): no CHG
- * Artifact, and no terminal (`superseded`/`retired`) knowledge Artifact, may
- * be present at the very first EF state. Mirrors `bootstrap-validation.ts`'s
- * own (unexported) `KNOWLEDGE_TYPES` constant of the same name -- duplicated
- * here rather than imported because neither that constant nor the small
- * state-rule loop it drives is exported (see this round's review report for
- * the extraction that would let this module import it instead).
- */
-const BOOTSTRAP_KNOWLEDGE_TYPES = new Set(['prd', 'requirement', 'decision', 'policy'])
 
 function hasErrorDiagnostic(diagnostics: readonly Diagnostic[]): boolean {
 	return diagnostics.some(d => d.severity === 'error')
@@ -485,16 +476,17 @@ export async function computeHistory(
 		if (hasErrorDiagnostic(validation.diagnostics))
 			return { kind: 'invalid' }
 
-		// Bootstrap-only state rules (mirrors `bootstrap-validation.ts`'s own
-		// `validateBootstrap` loop over `validation.byId`): no CHG Artifact, and
-		// no terminal (`superseded`/`retired`) knowledge Artifact, may be
-		// present before the first EF state.
-		for (const record of validation.byId.values()) {
-			if (record.type === 'change')
-				return { kind: 'invalid' }
-			if (BOOTSTRAP_KNOWLEDGE_TYPES.has(record.type) && (record.status === 'superseded' || record.status === 'retired'))
-				return { kind: 'invalid' }
-		}
+		// Bootstrap-only state rules (09-validation.md "Bootstrap exception"):
+		// no CHG Artifact, and no terminal (`superseded`/`retired`) knowledge
+		// Artifact, may be present before the first EF state. Reuses
+		// `bootstrap-validation.ts`'s own pure `evaluateBootstrapStateRules`
+		// core -- the SAME shared rule set `range-validation.ts` reuses at
+		// every bootstrap boundary its own walk finds -- rather than a
+		// hand-maintained duplicate scoped only to this walk, so a future rule
+		// change cannot make bootstrap, range, and history disagree with each
+		// other about what a valid bootstrap boundary is.
+		if (evaluateBootstrapStateRules(validation.byId).length > 0)
+			return { kind: 'invalid' }
 
 		bootstrapIntegrationRef = config.repository.integrationRef
 		return { kind: 'valid', commit: materialized.commit }
