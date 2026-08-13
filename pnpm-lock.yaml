@@ -19,7 +19,7 @@ catalogs:
       specifier: ^4.1.9
       version: 4.1.9
     alien-signals:
-      specifier: ^3.2.1
+      specifier: 3.2.1
       version: 3.2.1
     bumpp:
       specifier: 11.1.0
