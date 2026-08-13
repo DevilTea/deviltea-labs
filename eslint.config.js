@@ -9,7 +9,7 @@ export default deviltea({
 		'packages/ef/docs/**/*.md/**',
 	],
 }, {
-	files: ['packages/*/package.json'],
+	files: ['packages/*/package.json', 'packages/widget/*/package.json'],
 	rules: {
 		'pnpm/json-enforce-catalog': 'off',
 	},
