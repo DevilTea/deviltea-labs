@@ -18,6 +18,7 @@ export default defineConfig({
 				'packages/vue-router-middleware/src/**/*.ts',
 				'packages/vue-temp-var/src/**/*.ts',
 				'packages/vue-temp-var/src/**/*.vue',
+				'packages/widget/core/src/**/*.ts',
 			],
 			exclude: [
 				'**/*.unit.test.ts',
