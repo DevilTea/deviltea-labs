@@ -21,6 +21,7 @@ export default defineConfig({
 						{ text: '@deviltea/tiny-state-machine-vue', link: '/packages/tiny-state-machine-vue' },
 						{ text: '@deviltea/ef', link: '/packages/ef' },
 						{ text: '@deviltea/widget-core', link: '/packages/widget-core' },
+						{ text: '@deviltea/widget-vue', link: '/packages/widget-vue' },
 					],
 				},
 			],
