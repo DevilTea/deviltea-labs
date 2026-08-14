@@ -6,8 +6,15 @@
  * build output into the single directory the Pages workflow already uploads
  * (`docs/site/.vitepress/dist`):
  *
- *   1. build widget-lab with WIDGET_LAB_BASE so its asset/worker URLs resolve under the deployed
- *      subpath (see apps/widget-lab/vite.config.ts);
+ *   1. build widget-lab AND its workspace dependencies (`@deviltea/widget-core`,
+ *      `@deviltea/widget-vue`), in topological order, with WIDGET_LAB_BASE so widget-lab's own
+ *      asset/worker URLs resolve under the deployed subpath (see apps/widget-lab/vite.config.ts).
+ *      The Pages workflow runs only this script — not the root `pnpm build` — so this step cannot
+ *      assume widget-core/widget-vue already have a `dist` (see issue #13 Pages-build-deps
+ *      postmortem: CI failed with an unresolvable `@deviltea/widget-core/inspection` import because
+ *      widget-lab was built alone, before its workspace deps had a `dist`). `widget-lab...` is a
+ *      pnpm filter that selects the package and everything it depends on; WIDGET_LAB_BASE is
+ *      harmless for widget-core/widget-vue's own `tsdown` builds, which never read it.
  *   2. build docs/site — vitepress empties its own `dist` on every build, so this must run before
  *      the copy below, not after;
  *   3. copy widget-lab's build output beneath `dist/widget-lab/`.
@@ -31,7 +38,7 @@ $.verbose = true
 
 await $({
 	env: { ...process.env, WIDGET_LAB_BASE },
-})`pnpm --filter widget-lab run build`
+})`pnpm --filter widget-lab... run build`
 
 await $`pnpm --filter docs run build`
 
