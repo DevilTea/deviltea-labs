@@ -19,11 +19,13 @@ export default defineConfig({
 				'packages/vue-temp-var/src/**/*.ts',
 				'packages/vue-temp-var/src/**/*.vue',
 				'packages/widget/core/src/**/*.ts',
+				'packages/widget/vue/src/**/*.ts',
 			],
 			exclude: [
 				'**/*.unit.test.ts',
 				'**/dist/**',
 				'packages/tsconfig/**',
+				'packages/widget/vue/src/test-fixtures.ts',
 			],
 			excludeAfterRemap: true,
 			// CI/agent environments default the text reporter to skip complete files.

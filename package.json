@@ -15,7 +15,7 @@
 		"lint": "eslint .",
 		"new-package": "tsx scripts/new-package.ts",
 		"prepare": "simple-git-hooks",
-		"publint": "pnpm --filter @deviltea/tiny-state-machine exec publint && pnpm --filter @deviltea/tiny-state-machine-vue exec publint && pnpm --filter @deviltea/ef exec publint && pnpm --filter @deviltea/widget-core exec publint",
+		"publint": "pnpm --filter @deviltea/tiny-state-machine exec publint && pnpm --filter @deviltea/tiny-state-machine-vue exec publint && pnpm --filter @deviltea/ef exec publint && pnpm --filter @deviltea/widget-core exec publint && pnpm --filter @deviltea/widget-vue exec publint",
 		"release": "tsx scripts/release.ts open",
 		"release:tag": "tsx scripts/release.ts tag",
 		"test": "pnpm run test:unit && pnpm --filter @deviltea/eslint-config run test:package && pnpm --filter @deviltea/ef run test:package && pnpm --filter @deviltea/tsconfig run test:contracts",
