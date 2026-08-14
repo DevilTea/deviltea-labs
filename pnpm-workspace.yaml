@@ -21,11 +21,13 @@ catalog:
   '@pikacss/unplugin-pikacss': ^0.0.61
   '@types/node': ^24.13.2
   '@vitest/coverage-v8': ^4.1.9
+  '@vue-flow/core': 1.48.2
   '@vue/test-utils': ^2.4.11
   alien-signals: 3.2.1
   bumpp: 11.1.0
   commander: ^15.0.0
   dockview-vue: ^7.0.4
+  elkjs: 0.12.0
   eslint: 10.6.0
   happy-dom: ^20.11.2
   lint-staged: ^15.5.2
@@ -56,4 +58,9 @@ ignoredBuiltDependencies:
   - esbuild
   - simple-git-hooks
   - unrs-resolver
+  # Transitive dep of @vue-flow/core (via @vueuse/core). Its postinstall only rewrites lib/index.{cjs,mjs,d.ts}
+  # to match the installed Vue major version, defaulting to the Vue 3 variant; verified against the installed
+  # 0.14.10 tarball that lib/index.* is already byte-identical to lib/v3/index.* (same original publish
+  # timestamp, untouched), so skipping the postinstall is a no-op for this workspace's Vue 3.5 toolchain.
+  - vue-demi
 onlyBuiltDependencies: []
