@@ -4,7 +4,10 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
 	plugins: [Vue()],
 	test: {
-		include: ['packages/**/src/**/*.unit.test.ts'],
+		include: [
+			'packages/**/src/**/*.unit.test.ts',
+			'apps/**/src/**/*.unit.test.ts',
+		],
 		coverage: {
 			enabled: true,
 			provider: 'v8',
@@ -26,6 +29,10 @@ export default defineConfig({
 				'**/dist/**',
 				'packages/tsconfig/**',
 				'packages/widget/vue/src/test-fixtures.ts',
+				// widget-lab is a private application shell (never published), not a coverage-gated
+				// package; see its AGENTS.md "Testing" section. Its *.unit.test.ts still run via the
+				// `test.include` glob above.
+				'apps/widget-lab/**',
 			],
 			excludeAfterRemap: true,
 			// CI/agent environments default the text reporter to skip complete files.
