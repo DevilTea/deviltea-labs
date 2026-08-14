@@ -10,6 +10,7 @@
 		"build": "pnpm -r --if-present run build",
 		"check": "pnpm run build && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run publint",
 		"docs:build": "pnpm --filter docs run build",
+		"docs:build:pages": "tsx scripts/build-pages.ts",
 		"docs:dev": "pnpm --filter docs run dev",
 		"docs:preview": "pnpm --filter docs run preview",
 		"lint": "eslint .",
