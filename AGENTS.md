@@ -2,7 +2,7 @@
 
 ## Monorepo guide
 
-This pnpm workspace publishes reusable packages from `packages/*` and hosts the documentation site in `docs/site`. Treat each package as an independently releasable product: preserve its public exports, package boundary, and package-specific build/typecheck commands. Do not describe this repository as a collection of standalone repositories; workspace-wide commands and the root catalog are the source of truth.
+This pnpm workspace publishes reusable packages from `packages/*` and `packages/widget/*`, hosts the documentation site in `docs/site`, and contains private, never-published applications in `apps/*` (currently `apps/widget-lab`). Treat each package as an independently releasable product: preserve its public exports, package boundary, and package-specific build/typecheck commands. Do not describe this repository as a collection of standalone repositories; workspace-wide commands and the root catalog are the source of truth.
 
 ## Commands
 
