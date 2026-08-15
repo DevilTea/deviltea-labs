@@ -19,6 +19,10 @@ catalog:
   '@pikacss/core': ^0.0.61
   '@pikacss/integration': ^0.0.61
   '@pikacss/unplugin-pikacss': ^0.0.61
+  # Exact pin (matches `elkjs`/`modern-monaco`/`@vue-flow/core` precedent): issue #28 browser contract
+  # harness. `minimumReleaseAge: 4320` (3 days) is satisfied — 1.62.1 published 2026-07-30, well over
+  # 3 days before this pin.
+  '@playwright/test': 1.62.1
   '@types/node': ^24.13.2
   '@vitest/coverage-v8': ^4.1.9
   '@vue-flow/core': 1.48.2
