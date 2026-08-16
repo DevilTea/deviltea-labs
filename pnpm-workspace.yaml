@@ -23,6 +23,14 @@ catalog:
   # harness. `minimumReleaseAge: 4320` (3 days) is satisfied — 1.62.1 published 2026-07-30, well over
   # 3 days before this pin.
   '@playwright/test': 1.62.1
+  # issue #25 P3 "curated Implementation source explorer": Shiki fine-grained core, not the `shiki`
+  # convenience bundle — `@shikijs/core` + `@shikijs/engine-javascript` (the JS RegExp engine, no wasm;
+  # see `src/implementation/shiki-highlighter.ts` for the engine-choice rationale) load `tm-grammars`/
+  # `tm-themes` grammars/theme directly, matching the existing `use-monaco-editor.ts` precedent for
+  # those two packages. `minimumReleaseAge: 4320` (3 days) is satisfied — 4.4.3 published 2026-08-10,
+  # more than 3 days before this pin (today is 2026-08-16).
+  '@shikijs/core': ^4.4.3
+  '@shikijs/engine-javascript': ^4.4.3
   '@types/node': ^24.13.2
   '@vitest/coverage-v8': ^4.1.9
   '@vue-flow/core': 1.48.2
