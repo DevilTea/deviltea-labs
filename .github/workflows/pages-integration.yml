@@ -5,18 +5,18 @@ on:
     branches:
       - main
     paths:
-      - 'apps/widget-lab/**'
-      - 'docs/site/**'
-      - 'scripts/build-pages.ts'
-      - '.github/workflows/pages-integration.yml'
-      - 'pnpm-lock.yaml'
+      - apps/widget-lab/**
+      - docs/site/**
+      - scripts/build-pages.ts
+      - .github/workflows/pages-integration.yml
+      - pnpm-lock.yaml
   pull_request:
     paths:
-      - 'apps/widget-lab/**'
-      - 'docs/site/**'
-      - 'scripts/build-pages.ts'
-      - '.github/workflows/pages-integration.yml'
-      - 'pnpm-lock.yaml'
+      - apps/widget-lab/**
+      - docs/site/**
+      - scripts/build-pages.ts
+      - .github/workflows/pages-integration.yml
+      - pnpm-lock.yaml
   workflow_dispatch:
 
 permissions:
