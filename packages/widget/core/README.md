@@ -229,6 +229,31 @@ if (result.ok && result.changed)
 	console.log(document.getSnapshot().revision) // 1
 ```
 
+### SeparatedWidgetSource tooling
+
+`WidgetSource` is the only canonical nested authored representation. The explicit
+`SeparatedWidgetSource` projection contains a nested structural tree and a flat
+`widgets` data list; it is useful for authoring tools and normalization, but it
+is not another `createBlueprint` or `WidgetDocument` input mode.
+
+```typescript
+import {
+	normalizeSeparatedWidgetSource,
+	separateWidgetSource,
+} from '@deviltea/widget-core'
+
+const separated = separateWidgetSource(canonicalSource)
+const normalized = normalizeSeparatedWidgetSource(separated)
+
+normalized.source // best-effort nested source, still unknown for recovery
+normalized.diagnostics // representation diagnostics, separate from Blueprint diagnostics
+```
+
+Normalization is deterministic and non-destructive: the first flat data entry
+for an ID wins, missing data produces a partial nested node, unused data is not
+guessed into the tree, and repeated structural IDs are diagnosed while the
+later occurrence is de-identified with its available subtree preserved.
+
 ### Runtime semantics
 
 - `widget.state[key].get()` returns `T | null` directly — it is not an

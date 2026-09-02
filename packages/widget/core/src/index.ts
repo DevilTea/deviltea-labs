@@ -167,6 +167,21 @@ export type {
 	WidgetStateValidateContext,
 } from './plugin'
 
+export {
+	normalizeSeparatedWidgetSource,
+	separateWidgetSource,
+} from './separated-source'
+
+export type {
+	SeparatedSourceLocation,
+	SeparatedWidgetData,
+	SeparatedWidgetSource,
+	SeparatedWidgetSourceDiagnostic,
+	SeparatedWidgetSourceDiagnosticCode,
+	SeparatedWidgetSourceNormalization,
+	SeparatedWidgetStructure,
+} from './separated-source'
+
 export type {
 	SourcePatch,
 	SourcePatchOperation,

@@ -484,6 +484,30 @@ if (result.ok && result.changed)
 	console.log(document.getSnapshot().revision) // 1
 ```
 
+### Explicit separated-source tooling
+
+`WidgetSource` remains the canonical nested authored form. Core also exports an
+explicit `SeparatedWidgetSource` projection with a nested `structure` tree and
+a flat `widgets` data list. This representation is tooling only; Core never
+auto-detects it at the `unknown` Blueprint or Document recovery boundary.
+
+```ts
+import {
+	normalizeSeparatedWidgetSource,
+	separateWidgetSource,
+} from '@deviltea/widget-core'
+
+const separated = separateWidgetSource(canonicalSource)
+const { source, diagnostics } = normalizeSeparatedWidgetSource(separated)
+```
+
+The normalizer is deterministic, non-destructive, and best-effort. The first
+flat entry for a Widget ID wins; missing data creates a partial nested node;
+unused data is diagnosed rather than guessed into the tree; and repeated
+structural IDs retain their available data/subtree while the later occurrence
+is de-identified. These representation diagnostics are separate from Blueprint
+semantic diagnostics and carry `structure` or flat-`widgets` source locations.
+
 ## Running a runtime
 
 ### Creating a runtime
