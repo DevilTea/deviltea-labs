@@ -34,6 +34,14 @@ const packages = {
 		directory: 'packages/vue-temp-var',
 		name: 'vue-temp-var',
 	},
+	'widget-core': {
+		directory: 'packages/widget/core',
+		name: '@deviltea/widget-core',
+	},
+	'widget-vue': {
+		directory: 'packages/widget/vue',
+		name: '@deviltea/widget-vue',
+	},
 } as const
 
 type PackageId = keyof typeof packages
