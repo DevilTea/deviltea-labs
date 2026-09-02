@@ -34,7 +34,7 @@ test('core diagnostic text is not localized when presentation locale changes (is
 		.toBeVisible()
 	await expect(diagnosticItem.locator('span')
 		.first())
-		.toHaveText('definition')
+		.toHaveText('unknown-widget-type')
 	const diagnosticMessage = diagnosticItem.locator(':scope > div')
 		.nth(1)
 	const englishDiagnostic = await diagnosticMessage.textContent()
@@ -45,7 +45,7 @@ test('core diagnostic text is not localized when presentation locale changes (is
 		.toBeVisible()
 	await expect(diagnosticItem.locator('span')
 		.first())
-		.toHaveText('definition')
+		.toHaveText('unknown-widget-type')
 
 	// The inspector chrome may translate, but the actual core diagnostic payload is invariant.
 	expect(await diagnosticMessage.textContent())

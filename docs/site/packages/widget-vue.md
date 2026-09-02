@@ -13,7 +13,7 @@ This guide covers the full public surface. For installation and a minimal
 end-to-end example, see the
 [package README](https://github.com/DevilTea/deviltea-labs/tree/main/packages/widget/vue#readme).
 Cross-cutting Diagnostic/Result/Failure/Error conventions are maintained in the
-[Widget API conventions](../../architecture/widget-api-conventions.md).
+[Widget API conventions](https://github.com/DevilTea/deviltea-labs/blob/main/docs/architecture/widget-api-conventions.md).
 For an interactive playground built on this integration, see the
 [Widget Lab](../widget-lab/){target="_self"}.
 
