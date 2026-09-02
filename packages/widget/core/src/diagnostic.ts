@@ -70,6 +70,10 @@ export interface DiagnosticCollector<Input> {
 
 // Blueprint locations ---------------------------------------------------------------------------
 
+export interface BlueprintSourceDiagnosticLocation {
+	readonly type: 'source'
+}
+
 export interface BlueprintWidgetDiagnosticLocation<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple> {
 	readonly type: 'widget'
 	readonly node: BlueprintWidgetNode<Plugins>
@@ -100,12 +104,16 @@ export interface BlueprintMethodDiagnosticLocation<Plugins extends AnyWidgetPlug
 	readonly name: WidgetMemberKey
 }
 
-export type BlueprintDiagnosticLocation<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple>
+export type BlueprintNodeDiagnosticLocation<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple>
 	= | BlueprintWidgetDiagnosticLocation<Plugins>
 		| BlueprintSlotDiagnosticLocation<Plugins>
 		| BlueprintSlotChildDiagnosticLocation<Plugins>
 		| BlueprintPropertyDiagnosticLocation<Plugins>
 		| BlueprintMethodDiagnosticLocation<Plugins>
+
+export type BlueprintDiagnosticLocation<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple>
+	= | BlueprintSourceDiagnosticLocation
+		| BlueprintNodeDiagnosticLocation<Plugins>
 
 export type BlueprintStructureDiagnosticLocation<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple>
 	= | BlueprintWidgetDiagnosticLocation<Plugins>
@@ -137,7 +145,7 @@ export interface BlueprintDependencyReference {
 export type BlueprintDependencyTarget = BlueprintDependencyReference['target']
 export type BlueprintDependencyOperation = BlueprintDependencyReference['operation']
 
-type BlueprintDiagnosticRelated<Plugins extends AnyWidgetPluginTuple> = NonEmptyReadonlyArray<BlueprintDiagnosticLocation<Plugins>>
+type BlueprintDiagnosticRelated<Plugins extends AnyWidgetPluginTuple> = NonEmptyReadonlyArray<BlueprintNodeDiagnosticLocation<Plugins>>
 
 export type BlueprintDefinitionDiagnostic<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple>
 	= | DiagnosticBase<'invalid-widget-definition', BlueprintWidgetDiagnosticLocation<Plugins>>
@@ -178,13 +186,38 @@ export type BlueprintDependencyDiagnostic<Plugins extends AnyWidgetPluginTuple =
 		readonly related?: NonEmptyReadonlyArray<BlueprintDependencyDiagnosticLocation<Plugins>>
 	})
 
-export type BlueprintDiagnostic<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple>
-	= (BlueprintDefinitionDiagnostic<Plugins>
+export type JsonCompatibilityReason
+	= | 'undefined'
+		| 'non-finite-number'
+		| 'bigint'
+		| 'symbol'
+		| 'function'
+		| 'unsupported-object-prototype'
+		| 'symbol-key'
+		| 'accessor-property'
+		| 'sparse-array'
+		| 'array-extra-property'
+		| 'cyclic-reference'
+
+export type JsonCompatibilityDiagnostic = DiagnosticBase<'json-incompatible-value', BlueprintSourceDiagnosticLocation> & {
+	readonly path: DiagnosticPath
+	readonly reason: JsonCompatibilityReason
+}
+
+export type SourceAccessDiagnostic = DiagnosticBase<'source-access-failed', BlueprintSourceDiagnosticLocation> & {
+	readonly path: DiagnosticPath
+}
+
+export type BlueprintSourceDiagnostic = JsonCompatibilityDiagnostic | SourceAccessDiagnostic
+
+export type BlueprintNodeDiagnostic<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple>
+	= BlueprintDefinitionDiagnostic<Plugins>
 		| BlueprintConfigDiagnostic<Plugins>
 		| BlueprintStructureDiagnostic<Plugins>
-		| BlueprintDependencyDiagnostic<Plugins>)
+		| BlueprintDependencyDiagnostic<Plugins>
 
-export type BlueprintNodeDiagnostic<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple> = BlueprintDiagnostic<Plugins>
+export type BlueprintDiagnostic<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple>
+	= BlueprintSourceDiagnostic | BlueprintNodeDiagnostic<Plugins>
 
 // Runtime diagnostics ---------------------------------------------------------------------------
 

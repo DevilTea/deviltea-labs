@@ -182,7 +182,10 @@ produces an inspectable Blueprint. Every diagnostic has top-level `code`,
 structured `path` and `related` fields are not hidden behind a `source` object.
 Codes are stable lowercase kebab-case values such as
 `invalid-widget-id`, `invalid-widget-config`, `invalid-widget-structure`, and
-`missing-dependency-target`.
+`missing-dependency-target`. Whole-source JSON inspection adds aggregate-only
+`json-incompatible-value` diagnostics with a source-rooted `path` and closed
+`reason`, while `source-access-failed` means Core could not safely complete the
+inspection. These source-level facts do not appear in a node's `.diagnostics`.
 
 Recovery is best-effort: even invalid input still yields a navigable root and
 node tree via `blueprint.getWidget` / `getParent` / `getChildren` /
@@ -199,7 +202,9 @@ create a Runtime.
 
 `sourceJsonCompatible` is the proof for the authored JSON domain. When it is
 `true`, `blueprint.source` and source fragments on recovered navigation nodes
-are `JsonValue`; when it is `false`, the source remains `unknown`. A valid
+are `JsonValue`; when it is `false`, the source remains `unknown`. The false
+branch covers either confirmed JSON-domain incompatibility or an unproven safe
+inspection; `blueprint.diagnostics` distinguishes those causes. A valid
 Blueprint requires both semantic validity and this proof, so Runtime creation
 never promotes non-JSON authored material.
 

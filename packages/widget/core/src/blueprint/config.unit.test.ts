@@ -93,7 +93,7 @@ describe('config presence', () => {
 			.toEqual([])
 	})
 
-	it('an own-property config: undefined is present and is passed to validate', () => {
+	it('an own-property config: undefined is passed to semantic validation and independently diagnosed outside the authored JSON domain', () => {
 		configProbeCalls.length = 0
 
 		const definition = { id: 'root', type: 'config-probe', config: undefined }
@@ -114,9 +114,15 @@ describe('config presence', () => {
 			.toBe('invalid')
 		const diagnostics = blueprint.diagnostics
 		expect(diagnostics)
-			.toHaveLength(1)
+			.toHaveLength(2)
 		expect(diagnostics[0]!.code)
 			.toBe('invalid-widget-config')
+		expect(diagnostics[1])
+			.toEqual(expect.objectContaining({
+				code: 'json-incompatible-value',
+				path: ['config'],
+				reason: 'undefined',
+			}))
 	})
 
 	it('an invalid present config produces a config diagnostic without duplicating the raw input, then resolves via resolve(null)', () => {

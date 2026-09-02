@@ -1,5 +1,7 @@
+import type { JsonCompatibilityDiagnostic, JsonCompatibilityReason, SourceAccessDiagnostic } from './diagnostic'
+
 /**
- * The authored value domain.  Runtime/config-resolved values intentionally use `unknown` instead;
+ * The authored value domain. Runtime/config-resolved values intentionally use `unknown` instead;
  * this type is only for values that can occur in persisted Widget source and SourcePatch operands.
  */
 export type JsonPrimitive = string | number | boolean | null
@@ -12,66 +14,196 @@ export interface JsonObject {
 
 export type JsonValue = JsonPrimitive | JsonArray | JsonObject
 
-export function isJsonValue(value: unknown, seen = new Set<object>()): value is JsonValue {
-	if (value === null)
-		return true
+type JsonInspectionDiagnostic = JsonCompatibilityDiagnostic | SourceAccessDiagnostic
 
-	if (typeof value === 'string' || typeof value === 'boolean')
-		return true
+export interface JsonValueInspection {
+	readonly compatible: boolean
+	readonly diagnostics: readonly JsonInspectionDiagnostic[]
+}
 
-	if (typeof value === 'number')
-		return Number.isFinite(value)
+function jsonDiagnostic(path: readonly PropertyKey[], reason: JsonCompatibilityReason): JsonCompatibilityDiagnostic {
+	return {
+		code: 'json-incompatible-value',
+		location: { type: 'source' },
+		path: [...path],
+		reason,
+		message: `Authored source is outside the JSON domain (${reason}).`,
+	}
+}
 
+function accessDiagnostic(path: readonly PropertyKey[]): SourceAccessDiagnostic {
+	return {
+		code: 'source-access-failed',
+		location: { type: 'source' },
+		path: [...path],
+		message: 'Authored source could not be safely inspected.',
+	}
+}
+
+function inspectJsonValueAt(
+	value: unknown,
+	path: readonly PropertyKey[],
+	active: Set<object>,
+	diagnostics: JsonInspectionDiagnostic[],
+): void {
+	if (value === null || typeof value === 'string' || typeof value === 'boolean')
+		return
+
+	if (typeof value === 'number') {
+		if (!Number.isFinite(value))
+			diagnostics.push(jsonDiagnostic(path, 'non-finite-number'))
+		return
+	}
+
+	if (typeof value === 'undefined') {
+		diagnostics.push(jsonDiagnostic(path, 'undefined'))
+		return
+	}
+	if (typeof value === 'bigint') {
+		diagnostics.push(jsonDiagnostic(path, 'bigint'))
+		return
+	}
+	if (typeof value === 'symbol') {
+		diagnostics.push(jsonDiagnostic(path, 'symbol'))
+		return
+	}
+	if (typeof value === 'function') {
+		diagnostics.push(jsonDiagnostic(path, 'function'))
+		return
+	}
 	if (typeof value !== 'object')
-		return false
+		return
 
-	if (seen.has(value))
-		return false
-
-	seen.add(value)
+	let isArray: boolean
 	try {
-		if (Array.isArray(value)) {
-			if (Object.getPrototypeOf(value) !== Array.prototype)
-				return false
-
-			for (let index = 0; index < value.length; index++) {
-				const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
-				if (descriptor === undefined || !('value' in descriptor) || !isJsonValue(descriptor.value, seen))
-					return false
-			}
-
-			for (const key of Reflect.ownKeys(value)) {
-				if (typeof key === 'symbol')
-					return false
-				if (key === 'length')
-					continue
-				if (/^(?:0|[1-9]\d*)$/.test(key) && Number(key) < value.length)
-					continue
-				// JSON arrays contain only indexed elements and their intrinsic length. Named
-				// properties are authored material outside the JSON domain.
-				return false
-			}
-			return true
-		}
-
-		if (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
-			return false
-
-		for (const key of Reflect.ownKeys(value)) {
-			if (typeof key !== 'string')
-				return false
-			const descriptor = Object.getOwnPropertyDescriptor(value, key)
-			if (descriptor === undefined || !('value' in descriptor) || !isJsonValue(descriptor.value, seen))
-				return false
-		}
-		return true
+		isArray = Array.isArray(value)
 	}
 	catch {
-		return false
+		diagnostics.push(accessDiagnostic(path))
+		return
+	}
+
+	if (active.has(value)) {
+		diagnostics.push(jsonDiagnostic(path, 'cyclic-reference'))
+		return
+	}
+	active.add(value)
+	try {
+		let prototype: object | null
+		try {
+			prototype = Object.getPrototypeOf(value)
+		}
+		catch {
+			diagnostics.push(accessDiagnostic(path))
+			return
+		}
+
+		if (prototype !== (isArray ? Array.prototype : Object.prototype) && !(prototype === null && !isArray)) {
+			diagnostics.push(jsonDiagnostic(path, 'unsupported-object-prototype'))
+			return
+		}
+
+		let keys: readonly (string | symbol)[]
+		try {
+			keys = Reflect.ownKeys(value)
+		}
+		catch {
+			diagnostics.push(accessDiagnostic(path))
+			return
+		}
+
+		if (isArray) {
+			let length: number
+			try {
+				const descriptor = Object.getOwnPropertyDescriptor(value, 'length')
+				if (descriptor === undefined || !('value' in descriptor) || typeof descriptor.value !== 'number') {
+					diagnostics.push(accessDiagnostic(path))
+					return
+				}
+				length = descriptor.value
+			}
+			catch {
+				diagnostics.push(accessDiagnostic(path))
+				return
+			}
+
+			for (const key of keys) {
+				if (typeof key === 'symbol') {
+					diagnostics.push(jsonDiagnostic([...path, key], 'symbol-key'))
+					continue
+				}
+				if (key === 'length')
+					continue
+				if (/^(?:0|[1-9]\d*)$/.test(key) && Number(key) < length)
+					continue
+				diagnostics.push(jsonDiagnostic([...path, key], 'array-extra-property'))
+			}
+
+			for (let index = 0; index < length; index++) {
+				let descriptor: PropertyDescriptor | undefined
+				try {
+					descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+				}
+				catch {
+					diagnostics.push(accessDiagnostic([...path, index]))
+					continue
+				}
+				if (descriptor === undefined) {
+					diagnostics.push(jsonDiagnostic([...path, index], 'sparse-array'))
+					continue
+				}
+				if (!('value' in descriptor)) {
+					diagnostics.push(jsonDiagnostic([...path, index], 'accessor-property'))
+					continue
+				}
+				inspectJsonValueAt(descriptor.value, [...path, index], active, diagnostics)
+			}
+			return
+		}
+
+		for (const key of keys) {
+			if (typeof key === 'symbol') {
+				diagnostics.push(jsonDiagnostic([...path, key], 'symbol-key'))
+				continue
+			}
+
+			let descriptor: PropertyDescriptor | undefined
+			try {
+				descriptor = Object.getOwnPropertyDescriptor(value, key)
+			}
+			catch {
+				diagnostics.push(accessDiagnostic([...path, key]))
+				continue
+			}
+			if (descriptor === undefined) {
+				diagnostics.push(accessDiagnostic([...path, key]))
+				continue
+			}
+			if (!('value' in descriptor)) {
+				diagnostics.push(jsonDiagnostic([...path, key], 'accessor-property'))
+				continue
+			}
+			inspectJsonValueAt(descriptor.value, [...path, key], active, diagnostics)
+		}
 	}
 	finally {
-		seen.delete(value)
+		active.delete(value)
 	}
+}
+
+/**
+ * Inspect the complete authored candidate without invoking authored accessors/arbitrary behavior.
+ * Diagnostics are deterministic, source-rooted facts; unsafe fragments stop locally while safe
+ * siblings continue to aggregate.
+ */
+export function inspectJsonValue(value: unknown): JsonValueInspection {
+	const diagnostics: JsonInspectionDiagnostic[] = []
+	inspectJsonValueAt(value, [], new Set(), diagnostics)
+	return { compatible: diagnostics.length === 0, diagnostics }
+}
+
+export function isJsonValue(value: unknown): value is JsonValue {
+	return inspectJsonValue(value).compatible
 }
 
 /** JSON-domain equality used by RFC6902 `test` and by SourcePatch no-op detection. */

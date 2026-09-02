@@ -17,6 +17,7 @@ import type {
 	BlueprintDependencyMember,
 	BlueprintDependencyReference,
 	BlueprintDiagnostic,
+	BlueprintNodeDiagnostic,
 	RuntimeMethodDiagnostic,
 	RuntimePropertyDiagnostic,
 	RuntimeStateDiagnostic,
@@ -66,7 +67,7 @@ export interface BlueprintWidgetNodeBase<
 	 * The exact source fragment for this recovered node. Never mutated, cloned or frozen by the core.
 	 */
 	readonly source: Source
-	readonly diagnostics: readonly BlueprintDiagnostic<Plugins>[]
+	readonly diagnostics: readonly BlueprintNodeDiagnostic<Plugins>[]
 }
 
 /**
@@ -567,7 +568,7 @@ export interface CompiledWidgetNodeBase<Plugins extends AnyWidgetPluginTuple = A
 	readonly parentNodeId: InternalNodeId | null
 	readonly location: WidgetLocation<Plugins>
 	readonly rawSlots: readonly CompiledRawSlot[]
-	readonly diagnostics: readonly BlueprintDiagnostic<Plugins>[]
+	readonly diagnostics: readonly BlueprintNodeDiagnostic<Plugins>[]
 }
 
 export interface CompiledUnresolvedWidgetNode<Plugins extends AnyWidgetPluginTuple = AnyWidgetPluginTuple> extends CompiledWidgetNodeBase<Plugins> {

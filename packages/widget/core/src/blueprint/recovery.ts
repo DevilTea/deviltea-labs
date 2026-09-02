@@ -14,7 +14,7 @@
  * parent's own `.slots` is filled in afterward from the now-complete children.
  */
 
-import type { BlueprintDiagnostic } from '../diagnostic'
+import type { BlueprintDiagnostic, BlueprintNodeDiagnostic } from '../diagnostic'
 import type {
 	BlueprintWidgetNode,
 	CompiledMethodMember,
@@ -67,7 +67,7 @@ export interface RecoveryResult<Plugins extends AnyWidgetPluginTuple = AnyWidget
 	/** Grows across the whole compile pipeline; frozen only once compilation finishes. */
 	readonly finalDiagnostics: BlueprintDiagnostic<Plugins>[]
 	/** Filled once, after every pipeline stage has pushed its diagnostics into `finalDiagnostics`. */
-	readonly diagnosticsByNode: Map<InternalNodeId, BlueprintDiagnostic<Plugins>[]>
+	readonly diagnosticsByNode: Map<InternalNodeId, BlueprintNodeDiagnostic<Plugins>[]>
 }
 
 function isRecoverableObject(value: unknown): value is Record<string, unknown> {
@@ -134,7 +134,7 @@ interface BuildContext {
 	readonly pluginsByType: ReadonlyMap<string, AnyWidgetPlugin>
 	readonly nodes: WorkingNode[]
 	readonly finalDiagnostics: BlueprintDiagnostic[]
-	readonly diagnosticsByNode: Map<InternalNodeId, BlueprintDiagnostic[]>
+	readonly diagnosticsByNode: Map<InternalNodeId, BlueprintNodeDiagnostic[]>
 	readonly nodeIdByPublicNode: Map<BlueprintWidgetNode, InternalNodeId>
 	readonly activeSourceObjects: Set<object>
 }
@@ -546,6 +546,6 @@ export function recoverBlueprint<Plugins extends AnyWidgetPluginTuple>(
 		nodeIdByPublicNode: ctx.nodeIdByPublicNode as Map<BlueprintWidgetNode<Plugins>, InternalNodeId>,
 		nodeIdsByWidgetId,
 		finalDiagnostics: ctx.finalDiagnostics as BlueprintDiagnostic<Plugins>[],
-		diagnosticsByNode: ctx.diagnosticsByNode as Map<InternalNodeId, BlueprintDiagnostic<Plugins>[]>,
+		diagnosticsByNode: ctx.diagnosticsByNode as Map<InternalNodeId, BlueprintNodeDiagnostic<Plugins>[]>,
 	}
 }

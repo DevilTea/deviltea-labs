@@ -8,7 +8,7 @@
  * under the `blueprintInternals` symbol for the Runtime unit (U3) to read.
  */
 
-import type { BlueprintDiagnostic } from '../diagnostic'
+import type { BlueprintDiagnostic, BlueprintNodeDiagnostic } from '../diagnostic'
 import type {
 	BlueprintWidgetNode,
 	CompiledBlueprint,
@@ -28,7 +28,7 @@ import type { WidgetId, WidgetMemberKey } from '../types'
 import type { WorkingNode } from './recovery'
 import { EMPTY_DIAGNOSTICS } from '../diagnostic'
 import { blueprintInternals } from '../internal/contract'
-import { isJsonValue } from '../json'
+import { inspectJsonValue } from '../json'
 import { freezeDiagnosticSnapshot } from '../runtime/diagnostics'
 import { createWidgetSystemRuntime } from '../runtime/index'
 import { resolveDependencies } from './deps'
@@ -40,9 +40,11 @@ import { createCompileFacade, createNavigator } from './view'
 function finalizeDiagnosticsByNode(
 	nodeIdByPublicNode: ReadonlyMap<BlueprintWidgetNode, InternalNodeId>,
 	finalDiagnostics: readonly BlueprintDiagnostic[],
-	diagnosticsByNode: Map<InternalNodeId, BlueprintDiagnostic[]>,
+	diagnosticsByNode: Map<InternalNodeId, BlueprintNodeDiagnostic[]>,
 ): void {
 	for (const diagnostic of finalDiagnostics) {
+		if (diagnostic.code === 'json-incompatible-value' || diagnostic.code === 'source-access-failed')
+			continue
 		const node = diagnostic.location.node
 		const nodeId = nodeIdByPublicNode.get(node)
 		if (nodeId === undefined)
@@ -56,9 +58,9 @@ function finalizeDiagnosticsByNode(
 	}
 }
 
-function buildCompiledNodes(nodes: readonly WorkingNode[], diagnosticsByNode: ReadonlyMap<InternalNodeId, BlueprintDiagnostic[]>): CompiledWidgetNode[] {
+function buildCompiledNodes(nodes: readonly WorkingNode[], diagnosticsByNode: ReadonlyMap<InternalNodeId, BlueprintNodeDiagnostic[]>): CompiledWidgetNode[] {
 	return nodes.map((node): CompiledWidgetNode => {
-		const diagnostics = diagnosticsByNode.get(node.nodeId) ?? (EMPTY_DIAGNOSTICS as readonly BlueprintDiagnostic[])
+		const diagnostics = diagnosticsByNode.get(node.nodeId) ?? (EMPTY_DIAGNOSTICS as readonly BlueprintNodeDiagnostic[])
 		const base = {
 			nodeId: node.nodeId,
 			publicNode: node.publicNode,
@@ -94,7 +96,9 @@ export function compileBlueprint<Plugins extends AnyWidgetPluginTuple>(
 ): WidgetSystemBlueprint<Plugins> {
 	const recovery = recoverBlueprint(system, definition)
 	const { nodes, rootNodeId, nodeIdByPublicNode, nodeIdsByWidgetId, finalDiagnostics, diagnosticsByNode } = recovery
-	const sourceJsonCompatible = isJsonValue(definition)
+	const jsonInspection = inspectJsonValue(definition)
+	const sourceJsonCompatible = jsonInspection.compatible
+	finalDiagnostics.push(...jsonInspection.diagnostics)
 
 	const semanticOrder = computeSemanticOrder(nodes, rootNodeId)
 	// `navigator` (full public nodes) backs only the *finalized* Blueprint's own navigation methods
@@ -155,7 +159,7 @@ export function compileBlueprint<Plugins extends AnyWidgetPluginTuple>(
 
 		const blueprint: ValidWidgetSystemBlueprint<Plugins> = {
 			system,
-			source: definition,
+			source: definition as JsonValue,
 			sourceJsonCompatible: true,
 			status: 'valid',
 			root: validNavigator.root,
@@ -195,7 +199,7 @@ export function compileBlueprint<Plugins extends AnyWidgetPluginTuple>(
 		}
 		const blueprint: InvalidWidgetSystemBlueprint<Plugins, JsonValue, true> = {
 			system,
-			source: definition,
+			source: definition as JsonValue,
 			sourceJsonCompatible: true,
 			status: 'invalid',
 			root: jsonInvalidNavigator.root,

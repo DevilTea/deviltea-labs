@@ -35,8 +35,14 @@ function relatedOf(diagnostic: BlueprintDiagnostic): readonly BlueprintDiagnosti
 	return 'related' in diagnostic && diagnostic.related !== undefined ? diagnostic.related : []
 }
 
+function nodeIdOfLocation(location: BlueprintDiagnosticLocation, inspection: BlueprintInspection): InspectionNodeId | null {
+	return location.type === 'source' ? null : nodeIdOf(location.node, inspection)
+}
+
 function relatedLocationLabel(location: BlueprintDiagnosticLocation): string {
 	switch (location.type) {
+		case 'source':
+			return 'source'
 		case 'widget':
 			return 'widget'
 		case 'slot':
@@ -51,7 +57,7 @@ function relatedLocationLabel(location: BlueprintDiagnosticLocation): string {
 }
 
 function onNavigateToLocation(location: BlueprintDiagnosticLocation, inspection: BlueprintInspection): void {
-	const nodeId = nodeIdOf(location.node, inspection)
+	const nodeId = nodeIdOfLocation(location, inspection)
 	if (nodeId !== null)
 		emit('navigate', nodeId)
 }
@@ -75,10 +81,10 @@ function onNavigateToLocation(location: BlueprintDiagnosticLocation, inspection:
 					{{ diagnostic.code }}
 				</span>
 				<button
-					v-if="nodeIdOf(diagnostic.location.node, inspection) !== null"
+					v-if="nodeIdOfLocation(diagnostic.location, inspection) !== null"
 					type="button"
 					:class="pika({ marginLeft: 'auto', fontSize: '11px', color: 'var(--lab-color-accent)', background: 'transparent', border: 'none', cursor: 'pointer', padding: '0' })"
-					@click="emit('navigate', nodeIdOf(diagnostic.location.node, inspection)!)"
+					@click="emit('navigate', nodeIdOfLocation(diagnostic.location, inspection)!)"
 				>
 					{{ i18n.t('jump to node') }}
 				</button>
@@ -116,7 +122,7 @@ function onNavigateToLocation(location: BlueprintDiagnosticLocation, inspection:
 					v-for="(location, relatedIndex) in relatedOf(diagnostic)"
 					:key="relatedIndex"
 					type="button"
-					:disabled="nodeIdOf(location.node, inspection) === null"
+					:disabled="nodeIdOfLocation(location, inspection) === null"
 					:class="pika({ 'fontSize': '11px', 'color': 'var(--lab-color-accent)', 'background': 'var(--lab-color-surface-alt)', 'border': '1px solid var(--lab-color-border)', 'borderRadius': '999px', 'cursor': 'pointer', 'padding': '1px 7px', '$:disabled': { color: 'var(--lab-color-text-muted)', cursor: 'default' } })"
 					@click="onNavigateToLocation(location, inspection)"
 				>

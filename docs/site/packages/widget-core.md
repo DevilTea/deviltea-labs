@@ -416,6 +416,8 @@ kebab-case values.
 | `invalid-widget-*` / `unknown-widget-type` | malformed widget identity and authored shape |
 | `invalid-widget-config` | `config.validate` failures on a resolved node |
 | `invalid-widget-structure` | slot-level / plugin-level / system-level `validateStructure` failures |
+| `json-incompatible-value` | confirmed whole-source JSON-domain violations; carries a source-rooted `path` and closed framework `reason` |
+| `source-access-failed` | whole-source compatibility could not be safely proven for the source-rooted `path` |
 | `*-dependency-*` / `property-evaluation-cycle` | dependency target/member failures, Property purity violations, and Property-containing evaluation cycles |
 
 ```ts
@@ -439,7 +441,10 @@ Only `status === 'valid'`:
 `sourceJsonCompatible` is the authored JSON-domain proof. In its positive
 branch, `blueprint.source` and source fragments on all recovered navigation
 outputs carry `JsonValue`; the false branch keeps the exact source as
-`unknown`. A valid Blueprint requires semantic validity and this proof, so
+`unknown`. False means either confirmed incompatibility or an unproven safe
+inspection; aggregate Blueprint diagnostics distinguish `json-incompatible-value`
+from `source-access-failed`. Source-level diagnostics are not copied onto node
+`.diagnostics`. A valid Blueprint requires semantic validity and this proof, so
 Runtime creation never promotes non-JSON authored material.
 
 ```ts
