@@ -10,6 +10,8 @@ on:
       - 'tiny-state-machine@*'
       - 'tiny-state-machine-vue@*'
       - 'ef@*'
+      - 'widget-core@*'
+      - 'widget-vue@*'
 
 permissions:
   contents: read

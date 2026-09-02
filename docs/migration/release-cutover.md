@@ -28,6 +28,8 @@ environment:
 | `@deviltea/tiny-state-machine` | `tiny-state-machine` | `tiny-state-machine@0.0.6` |
 | `@deviltea/tiny-state-machine-vue` | `tiny-state-machine-vue` | `tiny-state-machine-vue@0.0.6` |
 | `@deviltea/ef` | `ef` | `ef@0.0.1` |
+| `@deviltea/widget-core` | `widget-core` | `widget-core@0.0.1` |
+| `@deviltea/widget-vue` | `widget-vue` | `widget-vue@0.0.1` |
 
 ## Release procedure
 
