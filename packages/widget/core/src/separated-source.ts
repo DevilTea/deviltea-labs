@@ -118,9 +118,11 @@ function readDataProperty(value: object, key: PropertyKey): ReadDataProperty {
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
-	if (typeof value !== 'object' || value === null || Array.isArray(value))
+	if (typeof value !== 'object' || value === null)
 		return false
 	try {
+		if (Array.isArray(value))
+			return false
 		const prototype = Object.getPrototypeOf(value)
 		return prototype === Object.prototype || prototype === null
 	}
@@ -131,11 +133,46 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function ownStringKeys(value: object): readonly string[] | null {
 	try {
-		return Object.keys(value)
+		return Reflect
+			.ownKeys(value)
+			.filter((key): key is string => typeof key === 'string')
 	}
 	catch {
 		return null
 	}
+}
+
+interface ReadArrayInfo {
+	readonly isArray: boolean
+	readonly accessible: boolean
+	readonly length?: number
+}
+
+function readArrayInfo(value: unknown): ReadArrayInfo {
+	try {
+		if (!Array.isArray(value))
+			return { isArray: false, accessible: true }
+		const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
+		if (
+			lengthDescriptor === undefined
+			|| !('value' in lengthDescriptor)
+			|| typeof lengthDescriptor.value !== 'number'
+			|| !Number.isSafeInteger(lengthDescriptor.value)
+			|| lengthDescriptor.value < 0
+		) {
+			return { isArray: true, accessible: false }
+		}
+		return { isArray: true, accessible: true, length: lengthDescriptor.value }
+	}
+	catch {
+		return { isArray: true, accessible: false }
+	}
+}
+
+function freezeLocation(location: SeparatedSourceLocation): SeparatedSourceLocation {
+	if ('path' in location && location.path !== undefined)
+		return Object.freeze({ ...location, path: Object.freeze([...location.path]) }) as SeparatedSourceLocation
+	return Object.freeze({ ...location }) as SeparatedSourceLocation
 }
 
 function freezeDiagnostic<Code extends SeparatedWidgetSourceDiagnosticCode>(
@@ -144,7 +181,7 @@ function freezeDiagnostic<Code extends SeparatedWidgetSourceDiagnosticCode>(
 	message: string,
 	fields: Record<string, unknown> = {},
 ): SeparatedWidgetSourceDiagnostic {
-	return Object.freeze({ code, location: Object.freeze(location), message, ...fields }) as unknown as SeparatedWidgetSourceDiagnostic
+	return Object.freeze({ code, location: freezeLocation(location), message, ...fields }) as unknown as SeparatedWidgetSourceDiagnostic
 }
 
 function cloneJsonValue(value: JsonValue): JsonValue {
@@ -152,20 +189,35 @@ function cloneJsonValue(value: JsonValue): JsonValue {
 		return value
 
 	if (Array.isArray(value)) {
+		const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
+		if (lengthDescriptor === undefined || !('value' in lengthDescriptor) || typeof lengthDescriptor.value !== 'number')
+			throw new TypeError('A valid JsonValue array must have an accessible length.')
 		const copy: JsonValue[] = []
-		for (let index = 0; index < value.length; index++)
-			copy.push(cloneJsonValue(value[index]!))
+		copy.length = lengthDescriptor.value
+		for (let index = 0; index < lengthDescriptor.value; index++) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+			if (descriptor === undefined || !('value' in descriptor))
+				throw new TypeError('A valid JsonValue array cannot contain an accessor property.')
+			Object.defineProperty(copy, String(index), {
+				value: cloneJsonValue(descriptor.value),
+				enumerable: descriptor.enumerable,
+				writable: true,
+				configurable: true,
+			})
+		}
 		return Object.freeze(copy)
 	}
 
 	const copy: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>
-	for (const key of Object.keys(value)) {
+	for (const key of Reflect.ownKeys(value)) {
+		if (typeof key !== 'string')
+			throw new TypeError('A valid JsonValue object cannot contain a symbol property.')
 		const descriptor = Object.getOwnPropertyDescriptor(value, key)
 		if (descriptor === undefined || !('value' in descriptor))
 			throw new TypeError('A valid JsonValue cannot contain an accessor property.')
 		Object.defineProperty(copy, key, {
 			value: cloneJsonValue(descriptor.value),
-			enumerable: true,
+			enumerable: descriptor.enumerable,
 			writable: true,
 			configurable: true,
 		})
@@ -174,7 +226,12 @@ function cloneJsonValue(value: JsonValue): JsonValue {
 }
 
 function copyRecoveryValue(value: unknown): unknown {
-	return isJsonValue(value) ? cloneJsonValue(value) : value
+	try {
+		return isJsonValue(value) ? cloneJsonValue(value) : value
+	}
+	catch {
+		return undefined
+	}
 }
 
 function diagnosticPath(path: readonly PropertyKey[], key: PropertyKey): readonly PropertyKey[] {
@@ -205,7 +262,10 @@ export function separateWidgetSource<const Plugins extends AnyWidgetPluginTuple>
 		if (Object.hasOwn(value, 'slots')) {
 			const slotsValue = value.slots as Record<string, readonly WidgetSource<Plugins>[]>
 			const slots: Record<string, readonly SeparatedWidgetStructure[]> = Object.create(null) as Record<string, readonly SeparatedWidgetStructure[]>
-			for (const slot of Object.keys(slotsValue)) {
+			const slotNames = ownStringKeys(slotsValue)
+			if (slotNames === null)
+				throw new TypeError('WidgetSource slots could not be inspected safely.')
+			for (const slot of slotNames) {
 				const children = slotsValue[slot]!
 				slots[slot] = Object.freeze(children.map(projectNode))
 			}
@@ -252,7 +312,8 @@ export function normalizeSeparatedWidgetSource(input: unknown): SeparatedWidgetS
 		)
 	}
 
-	if (!widgetsProperty.found || !widgetsProperty.accessible || !Array.isArray(widgetsProperty.value)) {
+	const widgetsArray = readArrayInfo(widgetsProperty.value)
+	if (!widgetsProperty.found || !widgetsProperty.accessible || !widgetsArray.isArray || !widgetsArray.accessible) {
 		addDiagnostic(
 			'invalid-separated-source',
 			{ area: 'widgets', index: 0 },
@@ -261,10 +322,11 @@ export function normalizeSeparatedWidgetSource(input: unknown): SeparatedWidgetS
 		)
 	}
 
-	if (Array.isArray(widgetsProperty.value)) {
-		for (let index = 0; index < widgetsProperty.value.length; index++) {
+	if (widgetsArray.isArray && widgetsArray.accessible) {
+		const widgets = widgetsProperty.value as readonly unknown[]
+		for (let index = 0; index < widgetsArray.length!; index++) {
 			const location: SeparatedSourceLocation = { area: 'widgets', index }
-			const entryProperty = readDataProperty(widgetsProperty.value, String(index))
+			const entryProperty = readDataProperty(widgets, String(index))
 			if (!entryProperty.found || !entryProperty.accessible || !isPlainObject(entryProperty.value)) {
 				addDiagnostic('invalid-separated-widget', location, 'flat Widget data entry must be a data object.', { reason: 'invalid-entry' })
 				continue
@@ -291,6 +353,7 @@ export function normalizeSeparatedWidgetSource(input: unknown): SeparatedWidgetS
 	}
 
 	const seenStructureIds = new Set<WidgetId>()
+	const activeStructureNodes = new Set<object>()
 
 	function normalizeNode(value: unknown, path: readonly PropertyKey[]): unknown {
 		if (!isPlainObject(value)) {
@@ -298,88 +361,107 @@ export function normalizeSeparatedWidgetSource(input: unknown): SeparatedWidgetS
 			return value
 		}
 
-		const idProperty = readDataProperty(value, 'id')
-		const rawId = idProperty.accessible ? idProperty.value : undefined
-		const hasStringId = idProperty.found && idProperty.accessible && typeof rawId === 'string'
-		const repeated = hasStringId && seenStructureIds.has(rawId)
-		if (hasStringId && !repeated)
-			seenStructureIds.add(rawId)
+		const objectValue = value as object
+		if (activeStructureNodes.has(objectValue)) {
+			addDiagnostic('invalid-separated-structure', { area: 'structure', path }, 'structure contains a cyclic reference; the repeated node was omitted.', { reason: 'invalid-node' })
+			return Object.create(null)
+		}
+		activeStructureNodes.add(objectValue)
 
-		const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>
-		if (repeated) {
-			addDiagnostic(
-				'duplicate-structure-id',
-				{ area: 'structure', path: diagnosticPath(path, 'id') },
-				`structure id "${rawId}" occurs more than once; the later occurrence is de-identified.`,
-				{ widgetId: rawId },
-			)
-		}
-		else if (idProperty.found && idProperty.accessible) {
-			output.id = copyRecoveryValue(rawId)
-		}
-		else if (!idProperty.found || !idProperty.accessible) {
-			addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'id') }, 'structure entry must have an accessible string id.', { reason: 'invalid-node' })
-		}
-		else {
-			addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'id') }, 'structure entry id must be a string.', { reason: 'invalid-node' })
-		}
+		try {
+			const idProperty = readDataProperty(value, 'id')
+			const rawId = idProperty.accessible ? idProperty.value : undefined
+			const hasStringId = idProperty.found && idProperty.accessible && typeof rawId === 'string'
+			const repeated = hasStringId && seenStructureIds.has(rawId)
+			if (hasStringId && !repeated)
+				seenStructureIds.add(rawId)
 
-		if (hasStringId) {
-			const data = dataById.get(rawId)
-			if (data === undefined) {
-				if (!repeated)
-					addDiagnostic('missing-widget-data', { area: 'structure', path: diagnosticPath(path, 'id') }, `no flat Widget data exists for structure id "${rawId}".`, { widgetId: rawId })
+			const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+			if (repeated) {
+				addDiagnostic(
+					'duplicate-structure-id',
+					{ area: 'structure', path: diagnosticPath(path, 'id') },
+					`structure id "${rawId}" occurs more than once; the later occurrence is de-identified.`,
+					{ widgetId: rawId },
+				)
 			}
-			else {
-				usedData.add(data.index)
-				const typeProperty = readDataProperty(data.value, 'type')
-				if (typeProperty.found && typeProperty.accessible)
-					output.type = copyRecoveryValue(typeProperty.value)
-				const configProperty = readDataProperty(data.value, 'config')
-				if (configProperty.found && configProperty.accessible)
-					output.config = copyRecoveryValue(configProperty.value)
+			else if (idProperty.found && idProperty.accessible) {
+				output.id = copyRecoveryValue(rawId)
+				if (!hasStringId)
+					addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'id') }, 'structure entry id must be a string.', { reason: 'invalid-node' })
 			}
-		}
+			else if (!idProperty.found || !idProperty.accessible) {
+				addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'id') }, 'structure entry must have an accessible string id.', { reason: 'invalid-node' })
+			}
 
-		const slotsProperty = readDataProperty(value, 'slots')
-		if (slotsProperty.found && slotsProperty.accessible) {
-			if (!isPlainObject(slotsProperty.value)) {
-				output.slots = copyRecoveryValue(slotsProperty.value)
-				addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'slots') }, 'structure slots must be an object.', { reason: 'invalid-slots' })
+			if (hasStringId) {
+				const data = dataById.get(rawId)
+				if (data === undefined) {
+					if (!repeated)
+						addDiagnostic('missing-widget-data', { area: 'structure', path: diagnosticPath(path, 'id') }, `no flat Widget data exists for structure id "${rawId}".`, { widgetId: rawId })
+				}
+				else {
+					usedData.add(data.index)
+					const typeProperty = readDataProperty(data.value, 'type')
+					if (typeProperty.found && typeProperty.accessible)
+						output.type = copyRecoveryValue(typeProperty.value)
+					const configProperty = readDataProperty(data.value, 'config')
+					if (configProperty.found && configProperty.accessible)
+						output.config = copyRecoveryValue(configProperty.value)
+					else if (configProperty.found && !configProperty.accessible)
+						addDiagnostic('invalid-separated-widget', { area: 'widgets', index: data.index, path: ['config'] }, 'flat Widget data config could not be inspected safely.', { reason: 'invalid-entry' })
+				}
 			}
-			else {
-				const outputSlots: Record<string, unknown> = Object.create(null) as Record<string, unknown>
-				const slots = ownStringKeys(slotsProperty.value)
-				if (slots === null) {
+
+			const slotsProperty = readDataProperty(value, 'slots')
+			if (slotsProperty.found && !slotsProperty.accessible) {
+				addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'slots') }, 'structure slots could not be inspected safely.', { reason: 'invalid-slots' })
+			}
+			else if (slotsProperty.found && slotsProperty.accessible) {
+				if (!isPlainObject(slotsProperty.value)) {
 					output.slots = copyRecoveryValue(slotsProperty.value)
-					addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'slots') }, 'structure slots could not be inspected safely.', { reason: 'invalid-slots' })
-					return output
+					addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'slots') }, 'structure slots must be an object.', { reason: 'invalid-slots' })
 				}
-				for (const slot of slots) {
-					const slotProperty = readDataProperty(slotsProperty.value, slot)
-					const slotPath = diagnosticPath(diagnosticPath(path, 'slots'), slot)
-					if (!slotProperty.found || !slotProperty.accessible || !Array.isArray(slotProperty.value)) {
-						outputSlots[slot] = copyRecoveryValue(slotProperty.value)
-						addDiagnostic('invalid-separated-structure', { area: 'structure', path: slotPath }, 'structure slot must be an Array.', { reason: 'invalid-slot-children' })
-						continue
+				else {
+					const outputSlots: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+					const slots = ownStringKeys(slotsProperty.value)
+					if (slots === null) {
+						addDiagnostic('invalid-separated-structure', { area: 'structure', path: diagnosticPath(path, 'slots') }, 'structure slots could not be inspected safely.', { reason: 'invalid-slots' })
 					}
+					else {
+						for (const slot of slots) {
+							const slotProperty = readDataProperty(slotsProperty.value, slot)
+							const slotPath = diagnosticPath(diagnosticPath(path, 'slots'), slot)
+							const slotArray = readArrayInfo(slotProperty.value)
+							if (!slotProperty.found || !slotProperty.accessible || !slotArray.isArray || !slotArray.accessible) {
+								if (slotProperty.found && slotProperty.accessible)
+									outputSlots[slot] = copyRecoveryValue(slotProperty.value)
+								addDiagnostic('invalid-separated-structure', { area: 'structure', path: slotPath }, 'structure slot must be an Array.', { reason: 'invalid-slot-children' })
+								continue
+							}
 
-					const children: unknown[] = []
-					for (let index = 0; index < slotProperty.value.length; index++) {
-						const childProperty = readDataProperty(slotProperty.value, String(index))
-						children.push(childProperty.found && childProperty.accessible
-							? normalizeNode(childProperty.value, [...slotPath, index])
-							: undefined)
-						if (!childProperty.found || !childProperty.accessible)
-							addDiagnostic('invalid-separated-structure', { area: 'structure', path: [...slotPath, index] }, 'structure child could not be inspected safely.', { reason: 'invalid-slot-children' })
+							const children: unknown[] = []
+							const childArray = slotProperty.value as readonly unknown[]
+							for (let index = 0; index < slotArray.length!; index++) {
+								const childProperty = readDataProperty(childArray, String(index))
+								children.push(childProperty.found && childProperty.accessible
+									? normalizeNode(childProperty.value, [...slotPath, index])
+									: undefined)
+								if (!childProperty.found || !childProperty.accessible)
+									addDiagnostic('invalid-separated-structure', { area: 'structure', path: [...slotPath, index] }, 'structure child could not be inspected safely.', { reason: 'invalid-slot-children' })
+							}
+							outputSlots[slot] = children
+						}
+						output.slots = outputSlots
 					}
-					outputSlots[slot] = children
 				}
-				output.slots = outputSlots
 			}
-		}
 
-		return output
+			return output
+		}
+		finally {
+			activeStructureNodes.delete(objectValue)
+		}
 	}
 
 	const normalizedSource = structureProperty.found && structureProperty.accessible

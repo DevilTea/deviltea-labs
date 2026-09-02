@@ -198,4 +198,184 @@ describe('separated widget source tooling', () => {
 				}),
 			])
 	})
+
+	it('diagnoses accessible non-string structural ids without using them for data matching', () => {
+		const normalized = normalizeSeparatedWidgetSource({
+			structure: { id: 42 },
+			widgets: [{ id: '42', type: 'leaf' }],
+		})
+
+		expect(normalized.source)
+			.toEqual({ id: 42 })
+		expect(normalized.diagnostics)
+			.toEqual([
+				expect.objectContaining({
+					code: 'invalid-separated-structure',
+					reason: 'invalid-node',
+					location: { area: 'structure', path: ['id'] },
+				}),
+				expect.objectContaining({
+					code: 'unused-widget-data',
+					widgetId: '42',
+				}),
+			])
+	})
+
+	it('recovers cyclic structural references as partial nodes with a cycle diagnostic', () => {
+		const root: { id: string, slots?: Record<string, unknown[]> } = { id: 'root' }
+		const child: { id: string, slots?: Record<string, unknown[]> } = { id: 'child' }
+		root.slots = { items: [child] }
+		child.slots = { back: [root] }
+
+		const normalized = normalizeSeparatedWidgetSource({
+			structure: root,
+			widgets: [
+				{ id: 'root', type: 'container' },
+				{ id: 'child', type: 'leaf' },
+			],
+		})
+
+		expect(() => normalizeSeparatedWidgetSource({ structure: root, widgets: [] }))
+			.not.toThrow()
+		expect(normalized.source)
+			.toEqual({
+				id: 'root',
+				type: 'container',
+				slots: {
+					items: [{ id: 'child', type: 'leaf', slots: { back: [{}] } }],
+				},
+			})
+		expect(normalized.diagnostics)
+			.toEqual([
+				expect.objectContaining({
+					code: 'invalid-separated-structure',
+					reason: 'invalid-node',
+					location: { area: 'structure', path: ['slots', 'items', 0, 'slots', 'back', 0] },
+				}),
+			])
+	})
+
+	it('fails closed for revoked proxies at source, array, entry, slots, and child-array boundaries', () => {
+		const revokedSource = Proxy.revocable({ structure: { id: 'root' }, widgets: [] }, {})
+		revokedSource.revoke()
+		expect(() => normalizeSeparatedWidgetSource(revokedSource.proxy))
+			.not.toThrow()
+
+		const revokedWidgets = Proxy.revocable([], {})
+		revokedWidgets.revoke()
+		const arrayBoundary = normalizeSeparatedWidgetSource({ structure: { id: 'root' }, widgets: revokedWidgets.proxy })
+		expect(arrayBoundary.diagnostics)
+			.toContainEqual(expect.objectContaining({ code: 'invalid-separated-source', reason: 'invalid-widgets' }))
+
+		const revokedEntry = Proxy.revocable({}, {})
+		revokedEntry.revoke()
+		const entryBoundary = normalizeSeparatedWidgetSource({ structure: { id: 'root' }, widgets: [revokedEntry.proxy] })
+		expect(entryBoundary.diagnostics)
+			.toContainEqual(expect.objectContaining({ code: 'invalid-separated-widget', reason: 'invalid-entry' }))
+
+		const revokedSlots = Proxy.revocable({}, {})
+		revokedSlots.revoke()
+		const slotsBoundary = normalizeSeparatedWidgetSource({ structure: { id: 'root', slots: revokedSlots.proxy }, widgets: [] })
+		expect(slotsBoundary.diagnostics)
+			.toContainEqual(expect.objectContaining({ code: 'invalid-separated-structure', reason: 'invalid-slots' }))
+
+		const revokedChildren = Proxy.revocable([], {})
+		revokedChildren.revoke()
+		const childBoundary = normalizeSeparatedWidgetSource({ structure: { id: 'root', slots: { items: revokedChildren.proxy } }, widgets: [] })
+		expect(childBoundary.diagnostics)
+			.toContainEqual(expect.objectContaining({ code: 'invalid-separated-structure', reason: 'invalid-slot-children' }))
+	})
+
+	it('diagnoses inaccessible config and slots without invoking their accessors', () => {
+		let configReads = 0
+		let slotsReads = 0
+		const data = { id: 'root', type: 'leaf' }
+		Object.defineProperty(data, 'config', {
+			enumerable: true,
+			get() {
+				configReads++
+				return { value: 1 }
+			},
+		})
+		const structure = { id: 'root' }
+		Object.defineProperty(structure, 'slots', {
+			enumerable: true,
+			get() {
+				slotsReads++
+				return { items: [] }
+			},
+		})
+
+		const normalized = normalizeSeparatedWidgetSource({ structure, widgets: [data] })
+
+		expect(configReads)
+			.toBe(0)
+		expect(slotsReads)
+			.toBe(0)
+		expect(normalized.source)
+			.toEqual({ id: 'root', type: 'leaf' })
+		expect(normalized.diagnostics)
+			.toEqual([
+				expect.objectContaining({
+					code: 'invalid-separated-widget',
+					reason: 'invalid-entry',
+					location: { area: 'widgets', index: 0, path: ['config'] },
+				}),
+				expect.objectContaining({
+					code: 'invalid-separated-structure',
+					reason: 'invalid-slots',
+					location: { area: 'structure', path: ['slots'] },
+				}),
+			])
+	})
+
+	it('retains and deep-copies non-enumerable JsonValue config properties', () => {
+		type FixturePlugins = ReturnType<typeof createPlugins>
+		const config: { label?: string, flags?: { enabled: boolean } } = { label: 'Root' }
+		const hidden = { nested: { value: 1 } }
+		Object.defineProperty(config, 'hidden', { value: hidden, enumerable: false })
+		const source: WidgetSource<[FixturePlugins['container'], FixturePlugins['leaf']]> = {
+			id: 'root',
+			type: 'container',
+			config,
+		}
+
+		const separated = separateWidgetSource(source)
+		const separatedConfig = separated.widgets[0]!.config as Record<string, unknown>
+		const separatedHidden = separatedConfig.hidden as Record<string, unknown>
+		expect(Object.hasOwn(separatedConfig, 'hidden'))
+			.toBe(true)
+		expect(Object.getOwnPropertyDescriptor(separatedConfig, 'hidden')?.enumerable)
+			.toBe(false)
+		expect(separatedHidden)
+			.not.toBe(hidden)
+		expect(separatedHidden.nested)
+			.not.toBe(hidden.nested)
+
+		const normalized = normalizeSeparatedWidgetSource(separated)
+		const normalizedConfig = (normalized.source as { config: Record<string, unknown> }).config
+		expect(Object.hasOwn(normalizedConfig, 'hidden'))
+			.toBe(true)
+		expect((normalizedConfig.hidden as Record<string, unknown>).nested)
+			.not.toBe(hidden.nested)
+	})
+
+	it('freezes nested separated diagnostic paths', () => {
+		const normalized = normalizeSeparatedWidgetSource({
+			structure: { id: 42 },
+			widgets: [],
+		})
+		const location = normalized.diagnostics[0]!.location
+		if (!('path' in location))
+			throw new Error('expected a path-bearing diagnostic')
+
+		expect(Object.isFrozen(location))
+			.toBe(true)
+		expect(Object.isFrozen(location.path))
+			.toBe(true)
+		expect(() => (location.path as PropertyKey[]).push('changed'))
+			.toThrow(TypeError)
+		expect(location.path)
+			.toEqual(['id'])
+	})
 })
