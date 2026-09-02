@@ -71,11 +71,63 @@ export interface RecoveryResult<Plugins extends AnyWidgetPluginTuple = AnyWidget
 }
 
 function isRecoverableObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
+	if (typeof value !== 'object' || value === null)
+		return false
+	try {
+		return !Array.isArray(value)
+	}
+	catch {
+		return false
+	}
 }
 
-function hasOwn(object: object, key: string): boolean {
-	return Object.hasOwn(object, key)
+interface ReadOwnDataProperty {
+	readonly found: boolean
+	readonly accessible: boolean
+	readonly value?: unknown
+}
+
+function readOwnDataProperty(object: object, key: PropertyKey): ReadOwnDataProperty {
+	try {
+		const descriptor = Object.getOwnPropertyDescriptor(object, key)
+		if (descriptor === undefined)
+			return { found: false, accessible: true }
+		if (!('value' in descriptor))
+			return { found: true, accessible: false }
+		return { found: true, accessible: true, value: descriptor.value }
+	}
+	catch {
+		return { found: true, accessible: false }
+	}
+}
+
+function readOwnEnumerableStringKeys(object: object): readonly string[] | null {
+	try {
+		return Object.keys(object)
+	}
+	catch {
+		return null
+	}
+}
+
+interface ReadArrayInfo {
+	readonly isArray: boolean
+	readonly accessible: boolean
+	readonly length?: number
+}
+
+function readArrayInfo(value: unknown): ReadArrayInfo {
+	try {
+		if (!Array.isArray(value))
+			return { isArray: false, accessible: true }
+		const descriptor = Object.getOwnPropertyDescriptor(value, 'length')
+		if (descriptor === undefined || !('value' in descriptor) || typeof descriptor.value !== 'number')
+			return { isArray: true, accessible: false }
+		return { isArray: true, accessible: true, length: descriptor.value }
+	}
+	catch {
+		return { isArray: true, accessible: false }
+	}
 }
 
 interface BuildContext {
@@ -84,6 +136,7 @@ interface BuildContext {
 	readonly finalDiagnostics: BlueprintDiagnostic[]
 	readonly diagnosticsByNode: Map<InternalNodeId, BlueprintDiagnostic[]>
 	readonly nodeIdByPublicNode: Map<BlueprintWidgetNode, InternalNodeId>
+	readonly activeSourceObjects: Set<object>
 }
 
 type Placement
@@ -148,17 +201,27 @@ function buildNode(
 		return nodeId
 	}
 
+	if (ctx.activeSourceObjects.has(raw)) {
+		localDiagnostics.push(definitionDiagnostic(publicNode, 'Widget definition contains a cyclic source reference.'))
+		finalizeShell(shell, working)
+		flushDiagnostics(ctx, localDiagnostics)
+		return nodeId
+	}
+	ctx.activeSourceObjects.add(raw)
+
 	// --- id ---
-	const rawId = hasOwn(raw, 'id') ? raw.id : undefined
-	const hasValidId = typeof rawId === 'string'
-	if (!hasOwn(raw, 'id') || !hasValidId)
+	const idProperty = readOwnDataProperty(raw, 'id')
+	const rawId = idProperty.accessible ? idProperty.value : undefined
+	const hasValidId = idProperty.found && idProperty.accessible && typeof rawId === 'string'
+	if (!hasValidId)
 		localDiagnostics.push(definitionDiagnostic(publicNode, 'Widget "id" is missing or is not a string.', ['id']))
 
 	// --- type ---
-	const rawType = hasOwn(raw, 'type') ? raw.type : undefined
-	const hasValidTypeShape = typeof rawType === 'string'
+	const typeProperty = readOwnDataProperty(raw, 'type')
+	const rawType = typeProperty.accessible ? typeProperty.value : undefined
+	const hasValidTypeShape = typeProperty.found && typeProperty.accessible && typeof rawType === 'string'
 	let plugin: AnyWidgetPlugin | null = null
-	if (!hasOwn(raw, 'type') || !hasValidTypeShape) {
+	if (!hasValidTypeShape) {
 		localDiagnostics.push(definitionDiagnostic(publicNode, 'Widget "type" is missing or is not a string.', ['type']))
 	}
 	else {
@@ -180,16 +243,23 @@ function buildNode(
 	if (resolved && plugin !== null) {
 		const definition = readWidgetPluginDefinition(plugin)
 
+		const configProperty = readOwnDataProperty(raw, 'config')
 		if (definition.config !== null) {
-			const hasConfig = hasOwn(raw, 'config')
-			if (!hasConfig) {
+			if (!configProperty.found) {
+				const resolved = definition.config.resolve(null)
+				assertSyncValue(resolved, 'config.resolve')
+				working.rawConfig = null
+				working.config = resolved
+			}
+			else if (!configProperty.accessible) {
+				localDiagnostics.push(configDiagnostic(publicNode as ResolvedBlueprintWidgetNode, 'Widget config could not be inspected safely.'))
 				const resolved = definition.config.resolve(null)
 				assertSyncValue(resolved, 'config.resolve')
 				working.rawConfig = null
 				working.config = resolved
 			}
 			else {
-				const rawConfigValue = raw.config
+				const rawConfigValue = configProperty.value
 				const { collector, items } = createCollector<{ message: string, path?: readonly PropertyKey[], reason?: string }>()
 				let ok = false
 				try {
@@ -223,7 +293,7 @@ function buildNode(
 				}
 			}
 		}
-		else if (hasOwn(raw, 'config')) {
+		else if (configProperty.found) {
 			localDiagnostics.push(definitionDiagnostic(publicNode, 'Widget declares "config" but its plugin has no config capability.', ['config']))
 		}
 	}
@@ -240,6 +310,7 @@ function buildNode(
 	// --- slots ---
 	recoverSlots(ctx, working, raw, resolved ? working.plugin : null, localDiagnostics)
 
+	ctx.activeSourceObjects.delete(raw)
 	finalizeShell(shell, working)
 	flushDiagnostics(ctx, localDiagnostics)
 	return nodeId
@@ -284,12 +355,18 @@ function recoverSlots(
 		}
 	}
 
-	if (!hasOwn(raw, 'slots')) {
+	const slotsProperty = readOwnDataProperty(raw, 'slots')
+	if (!slotsProperty.found) {
+		fillMissingDeclaredSlots()
+		return
+	}
+	if (!slotsProperty.accessible) {
+		localDiagnostics.push(definitionDiagnostic(publicNode, 'Widget "slots" could not be inspected safely.', ['slots']))
 		fillMissingDeclaredSlots()
 		return
 	}
 
-	const rawSlotsValue = raw.slots
+	const rawSlotsValue = slotsProperty.value
 	if (!isRecoverableObject(rawSlotsValue)) {
 		localDiagnostics.push(definitionDiagnostic(publicNode, 'Widget "slots" must be a plain object.', ['slots']))
 		fillMissingDeclaredSlots()
@@ -299,8 +376,15 @@ function recoverSlots(
 	if (plugin !== null && declaredSlots === null)
 		localDiagnostics.push(definitionDiagnostic(publicNode, 'Widget declares "slots" but its plugin has no slots capability.', ['slots']))
 
-	for (const slotName of Object.keys(rawSlotsValue)) {
-		const slotValue = rawSlotsValue[slotName]
+	const slotNames = readOwnEnumerableStringKeys(rawSlotsValue)
+	if (slotNames === null) {
+		localDiagnostics.push(definitionDiagnostic(publicNode, 'Widget "slots" could not be inspected safely.', ['slots']))
+		fillMissingDeclaredSlots()
+		return
+	}
+
+	for (const slotName of slotNames) {
+		const slotProperty = readOwnDataProperty(rawSlotsValue, slotName)
 		const isDeclared = declaredSlots !== null && declaredSlots.has(slotName)
 
 		// "not declared" and "malformed value" are independent facts (COMMENT amendment on
@@ -311,15 +395,19 @@ function recoverSlots(
 		if (declaredSlots !== null && !isDeclared)
 			localDiagnostics.push(definitionDiagnostic(publicNode, `Widget slot "${slotName}" is not declared by its plugin.`, ['slots', slotName]))
 
-		if (!Array.isArray(slotValue)) {
+		const slotArray = readArrayInfo(slotProperty.value)
+		if (!slotProperty.found || !slotProperty.accessible || !slotArray.isArray || !slotArray.accessible) {
 			localDiagnostics.push(definitionDiagnostic(publicNode, `Widget slot "${slotName}" must be an array.`, ['slots', slotName]))
 			continue
 		}
 
 		const childNodeIds: InternalNodeId[] = []
 		const placementKind = isDeclared ? 'slot' as const : 'raw-slot' as const
-		for (let index = 0; index < slotValue.length; index++) {
-			const childId = buildNode(ctx, slotValue[index], working.nodeId, publicNode, { kind: placementKind, slot: slotName, index })
+		const slotValue = slotProperty.value as object
+		for (let index = 0; index < slotArray.length!; index++) {
+			const childProperty = readOwnDataProperty(slotValue, String(index))
+			const childSource = childProperty.found && childProperty.accessible ? childProperty.value : undefined
+			const childId = buildNode(ctx, childSource, working.nodeId, publicNode, { kind: placementKind, slot: slotName, index })
 			childNodeIds.push(childId)
 		}
 
@@ -443,6 +531,7 @@ export function recoverBlueprint<Plugins extends AnyWidgetPluginTuple>(
 		finalDiagnostics: [],
 		diagnosticsByNode: new Map(),
 		nodeIdByPublicNode: new Map(),
+		activeSourceObjects: new Set(),
 	}
 
 	const rootNodeId = buildNode(ctx, definition, null, null, { kind: 'root' })

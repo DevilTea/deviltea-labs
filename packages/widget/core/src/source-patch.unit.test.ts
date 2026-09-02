@@ -118,6 +118,20 @@ describe('sourcePatch', () => {
 			.toMatchObject({ ok: false, failure: { code: 'invalid-move-target', operationIndex: 0 } })
 	})
 
+	it('normalizes structured numeric shorthand before move path identity checks', () => {
+		const same = applySourcePatch({ obj: { 1: 'value' } }, [
+			{ op: 'move', from: ['obj', 1], path: ['obj', '1'] },
+		])
+		const descendant = applySourcePatch({ obj: { 1: { child: true } } }, [
+			{ op: 'move', from: ['obj', 1], path: ['obj', '1', 'child'] },
+		])
+
+		expect(same)
+			.toMatchObject({ ok: true, value: { changed: false, source: { obj: { 1: 'value' } } } })
+		expect(descendant)
+			.toMatchObject({ ok: false, failure: { code: 'invalid-move-target', operationIndex: 0 } })
+	})
+
 	it('rolls back all preceding operations when a later operation fails', () => {
 		const source = { value: 1 }
 		const result = applySourcePatch(source, [
@@ -138,6 +152,23 @@ describe('sourcePatch', () => {
 
 		expect(result)
 			.toEqual({ ok: true, value: { changed: true, source: { recovered: true } } })
+	})
+
+	it('keeps root replacement as the universal repair floor for an uninspectable recovery source', () => {
+		const { proxy, revoke } = Proxy.revocable({ stale: true }, {})
+		revoke()
+
+		const replaced = applySourcePatch(proxy, [
+			{ op: 'replace', path: '', value: { recovered: true } },
+		])
+		const traversed = applySourcePatch(proxy, [
+			{ op: 'replace', path: '/stale', value: false },
+		])
+
+		expect(replaced)
+			.toEqual({ ok: true, value: { changed: true, source: { recovered: true } } })
+		expect(traversed)
+			.toMatchObject({ ok: false, failure: { code: 'source-access-failed', operationIndex: 0 } })
 	})
 
 	it('decodes RFC6901 escapes without conflating slash and tilde', () => {
@@ -167,6 +198,25 @@ describe('sourcePatch', () => {
 		expect(Array.from(namedSource.arr))
 			.toEqual([10])
 		expect(Object.getOwnPropertyDescriptor(namedSource.arr, '01')?.value)
+			.toBe('renamed')
+	})
+
+	it('treats canonical structured string keys as Array indexes while keeping noncanonical strings ordinary', () => {
+		const source = { arr: ['zero', 'one', 'two'] }
+		Object.defineProperty(source.arr, '01', { value: 'named', enumerable: true, configurable: true, writable: true })
+
+		const canonical = applySourcePatch(source, [{ op: 'remove', path: ['arr', '1'] }])
+		const noncanonical = applySourcePatch(source, [{ op: 'replace', path: ['arr', '01'], value: 'renamed' }])
+
+		if (!canonical.ok || !noncanonical.ok)
+			throw new Error('expected both structured paths to succeed')
+		const canonicalArray = (canonical.value.source as { arr: string[] }).arr
+		expect(Array.from(canonicalArray))
+			.toEqual(['zero', 'two'])
+		const patched = noncanonical.value.source as { arr: string[] }
+		expect(Array.from(patched.arr))
+			.toEqual(['zero', 'one', 'two'])
+		expect(Object.getOwnPropertyDescriptor(patched.arr, '01')?.value)
 			.toBe('renamed')
 	})
 

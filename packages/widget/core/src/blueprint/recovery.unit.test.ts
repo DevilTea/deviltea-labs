@@ -115,6 +115,72 @@ describe('root recovery for non-object input', () => {
 	})
 })
 
+describe('hostile source recovery', () => {
+	it('does not execute an accessor-backed id while recovering the exact source candidate', () => {
+		let reads = 0
+		const source = Object.defineProperty({ type: 'leaf' }, 'id', {
+			get() {
+				reads++
+				throw new Error('must not execute')
+			},
+			enumerable: true,
+		})
+
+		const blueprint = system.createBlueprint(source)
+
+		expect(reads)
+			.toBe(0)
+		expect(blueprint.status)
+			.toBe('invalid')
+		expect(blueprint.sourceJsonCompatible)
+			.toBe(false)
+		expect(blueprint.root.source)
+			.toBe(source)
+		expect(blueprint.root.diagnostics)
+			.toContainEqual(expect.objectContaining({ code: 'invalid-widget-id', path: ['id'] }))
+	})
+
+	it('fails closed for a revoked Proxy root instead of throwing', () => {
+		const { proxy, revoke } = Proxy.revocable({ id: 'root', type: 'leaf' }, {})
+		revoke()
+
+		const blueprint = system.createBlueprint(proxy)
+
+		expect(blueprint.status)
+			.toBe('invalid')
+		expect(blueprint.sourceJsonCompatible)
+			.toBe(false)
+		expect(blueprint.root.source)
+			.toBe(proxy)
+		expect(blueprint.root.diagnostics)
+			.toContainEqual(expect.objectContaining({ code: 'invalid-widget-definition' }))
+	})
+
+	it('breaks cyclic slot traversal into an inspectable unresolved child', () => {
+		const source: { id: string, type: string, slots: { children: unknown[] } } = {
+			id: 'root',
+			type: 'container',
+			slots: { children: [] },
+		}
+		source.slots.children.push(source)
+
+		const blueprint = system.createBlueprint(source)
+		const root = assertResolved(blueprint.root)
+		const child = at(blueprint.getChildrenAt(root, 'children'), 0)
+
+		expect(blueprint.status)
+			.toBe('invalid')
+		expect(blueprint.sourceJsonCompatible)
+			.toBe(false)
+		expect(child.source)
+			.toBe(source)
+		expect(child.resolved)
+			.toBe(false)
+		expect(child.diagnostics)
+			.toContainEqual(expect.objectContaining({ code: 'invalid-widget-definition' }))
+	})
+})
+
 describe('unknown plugin type', () => {
 	it('keeps a valid-id node unresolved while still indexing it by id', () => {
 		const definition = { id: 'ghost', type: 'does-not-exist' }

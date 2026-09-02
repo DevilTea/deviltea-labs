@@ -101,17 +101,19 @@ function parsePath(path: unknown): PatchResult<ParsedPath> {
 	return { ok: true, value: { segments, append: false, pointer: false } }
 }
 
-function isStructuralContainer(value: unknown): value is object {
+type StructuralContainerKind = 'array' | 'object' | 'opaque'
+
+function inspectStructuralContainer(value: unknown): PatchResult<StructuralContainerKind> {
 	if (typeof value !== 'object' || value === null)
-		return false
-	if (Array.isArray(value))
-		return true
+		return { ok: true, value: 'opaque' }
 	try {
+		if (Array.isArray(value))
+			return { ok: true, value: 'array' }
 		const prototype = Object.getPrototypeOf(value)
-		return prototype === Object.prototype || prototype === null
+		return { ok: true, value: prototype === Object.prototype || prototype === null ? 'object' : 'opaque' }
 	}
 	catch {
-		return false
+		return failure('source-access-failed')
 	}
 }
 
@@ -120,10 +122,9 @@ function isCanonicalArrayIndex(key: string): boolean {
 }
 
 function getArrayIndex(path: ParsedPath, segment: string | number, allowAppend = false): PatchResult<number | null> {
-	if (!path.pointer && typeof segment === 'string')
-		return { ok: true, value: null }
-
 	const key = String(segment)
+	if (!path.pointer && typeof segment === 'string' && !isCanonicalArrayIndex(key))
+		return { ok: true, value: null }
 	if (key === '-' && allowAppend)
 		return { ok: true, value: null }
 	if (key === '-' || !isCanonicalArrayIndex(key))
@@ -151,21 +152,36 @@ function readOwn(container: object, key: string): PatchResult<{ readonly descrip
 	return { ok: true, value: { descriptor: descriptor.value, value: descriptor.value.value } }
 }
 
+function readArrayLength(array: object): PatchResult<number> {
+	const descriptor = ownDescriptor(array, 'length')
+	if (!descriptor.ok)
+		return descriptor
+	if (descriptor.value === undefined || !('value' in descriptor.value) || typeof descriptor.value.value !== 'number')
+		return failure('source-access-failed')
+	return { ok: true, value: descriptor.value.value }
+}
+
 function readAt(source: unknown, path: ParsedPath): PatchResult<unknown> {
 	let current = source
 	for (let index = 0; index < path.segments.length; index++) {
 		const segment = path.segments[index]!
 		const key = String(segment)
-		if (!isStructuralContainer(current))
+		const container = inspectStructuralContainer(current)
+		if (!container.ok)
+			return container
+		if (container.value === 'opaque')
 			return failure('path-not-traversable')
-		if (Array.isArray(current)) {
+		if (container.value === 'array') {
 			const indexResult = getArrayIndex(path, segment)
 			if (!indexResult.ok)
 				return indexResult
-			if (indexResult.value !== null && indexResult.value >= current.length)
+			const length = readArrayLength(current as object)
+			if (!length.ok)
+				return length
+			if (indexResult.value !== null && indexResult.value >= length.value)
 				return failure('invalid-array-index')
 		}
-		const result = readOwn(current, key)
+		const result = readOwn(current as object, key)
 		if (!result.ok)
 			return result
 		current = result.value.value
@@ -225,22 +241,28 @@ function rebuildObject(
 	if (!entries.ok)
 		return entries
 
-	const isArray = Array.isArray(container)
+	const containerKind = inspectStructuralContainer(container)
+	if (!containerKind.ok)
+		return containerKind
+	const isArray = containerKind.value === 'array'
+	const arrayLength = isArray ? readArrayLength(container) : { ok: true as const, value: 0 }
+	if (!arrayLength.ok)
+		return arrayLength
 	const key = String(segment)
 	const append = isArray && pointer && segment === '-' && allowArrayAppend
-	const effectiveKey = append ? String(container.length) : key
+	const effectiveKey = append ? String(arrayLength.value) : key
 	const arrayIndexResult = isArray
 		? getArrayIndex({ segments: [], append: false, pointer }, segment, allowArrayAppend)
 		: { ok: true as const, value: null }
 	if (!arrayIndexResult.ok)
 		return arrayIndexResult
-	const arrayIndex = append ? container.length : arrayIndexResult.value
+	const arrayIndex = append ? arrayLength.value : arrayIndexResult.value
 	if (isArray && pointer && segment === '-' && !allowArrayAppend)
 		return failure('invalid-array-index')
 	if (isArray && arrayIndex !== null) {
-		if (action === 'add' && arrayIndex > container.length)
+		if (action === 'add' && arrayIndex > arrayLength.value)
 			return failure('invalid-array-index')
-		if (action !== 'add' && arrayIndex >= container.length)
+		if (action !== 'add' && arrayIndex >= arrayLength.value)
 			return failure('invalid-array-index')
 	}
 	const exists = entries.value.some(([entryKey]) => entryKey === effectiveKey)
@@ -296,26 +318,32 @@ function modifyAt(
 		return modify({ value: source } as object, 'value')
 
 	function visit(container: unknown, index: number): PatchResult<object> {
-		if (!isStructuralContainer(container))
+		const containerKind = inspectStructuralContainer(container)
+		if (!containerKind.ok)
+			return containerKind
+		if (containerKind.value === 'opaque')
 			return failure('path-not-traversable')
 		const segment = path.segments[index]!
 		const key = String(segment)
 		if (index === path.segments.length - 1)
-			return modify(container, segment)
-		if (Array.isArray(container)) {
+			return modify(container as object, segment)
+		if (containerKind.value === 'array') {
 			const indexResult = getArrayIndex(path, segment)
 			if (!indexResult.ok)
 				return indexResult
-			if (indexResult.value !== null && indexResult.value >= container.length)
+			const length = readArrayLength(container as object)
+			if (!length.ok)
+				return length
+			if (indexResult.value !== null && indexResult.value >= length.value)
 				return failure('invalid-array-index')
 		}
-		const child = readOwn(container, key)
+		const child = readOwn(container as object, key)
 		if (!child.ok)
 			return child
 		const next = visit(child.value.value, index + 1)
 		if (!next.ok)
 			return next
-		return rebuildObject(container, segment, 'replace', next.value, path.pointer)
+		return rebuildObject(container as object, segment, 'replace', next.value, path.pointer)
 	}
 
 	const result = visit(source, 0)
@@ -330,7 +358,10 @@ function modifyRoot(source: unknown, value: unknown): PatchResult<unknown> {
 function copyValue(value: unknown): PatchResult<unknown> {
 	if (value === null || typeof value !== 'object')
 		return { ok: true, value }
-	if (!isStructuralContainer(value))
+	const containerKind = inspectStructuralContainer(value)
+	if (!containerKind.ok)
+		return containerKind
+	if (containerKind.value === 'opaque')
 		return { ok: true, value }
 
 	const seen = new WeakMap<object, object>()
@@ -345,15 +376,23 @@ function copyValue(value: unknown): PatchResult<unknown> {
 		const entries = ownEntries(current)
 		if (!entries.ok)
 			return entries
+		const currentKind = inspectStructuralContainer(current)
+		if (!currentKind.ok)
+			return currentKind
 		for (const [key, descriptor] of entries.value) {
-			if (key === 'length' && Array.isArray(current))
+			if (key === 'length' && currentKind.value === 'array')
 				continue
 			if (!('value' in descriptor))
 				return failure('path-not-traversable', 'Accessor-backed source properties cannot be copied.')
 			const child = descriptor.value
-			const copied = child !== null && typeof child === 'object' && isStructuralContainer(child)
-				? clone(child)
-				: { ok: true as const, value: child }
+			let copied: PatchResult<unknown> = { ok: true, value: child }
+			if (child !== null && typeof child === 'object') {
+				const childKind = inspectStructuralContainer(child)
+				if (!childKind.ok)
+					return childKind
+				if (childKind.value !== 'opaque')
+					copied = clone(child)
+			}
 			if (!copied.ok)
 				return copied
 			const defined = define(result.value, key, { ...descriptor, value: copied.value })
@@ -374,7 +413,11 @@ function structurallyEqual(left: unknown, right: unknown): boolean {
 			return true
 		if (typeof currentLeft !== 'object' || currentLeft === null || typeof currentRight !== 'object' || currentRight === null)
 			return false
-		if (!isStructuralContainer(currentLeft) || !isStructuralContainer(currentRight))
+		const leftKind = inspectStructuralContainer(currentLeft)
+		const rightKind = inspectStructuralContainer(currentRight)
+		if (!leftKind.ok || !rightKind.ok)
+			return false
+		if (leftKind.value === 'opaque' || rightKind.value === 'opaque')
 			return false
 
 		const previous = matched.get(currentLeft)
@@ -421,12 +464,16 @@ function structurallyEqual(left: unknown, right: unknown): boolean {
 	return equal(left, right)
 }
 
+function samePathSegment(left: string | number, right: string | number): boolean {
+	return String(left) === String(right)
+}
+
 function isPrefix(prefix: readonly (string | number)[], value: readonly (string | number)[]): boolean {
-	return prefix.length < value.length && prefix.every((segment, index) => segment === value[index])
+	return prefix.length < value.length && prefix.every((segment, index) => samePathSegment(segment, value[index]!))
 }
 
 function samePath(left: readonly (string | number)[], right: readonly (string | number)[]): boolean {
-	return left.length === right.length && left.every((segment, index) => segment === right[index])
+	return left.length === right.length && left.every((segment, index) => samePathSegment(segment, right[index]!))
 }
 
 function operationError(index: number, error: PatchError): SourcePatchOperationFailure {
