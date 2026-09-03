@@ -9,50 +9,24 @@ shellEmulator: true
 trustPolicy: no-downgrade
 packages:
   - 'packages/*'
-  - 'packages/widget/*'
   - 'docs/*'
-  - 'apps/*'
 
 catalog:
   '@antfu/eslint-config': 9.1.0
   '@clack/prompts': ^0.10.1
-  '@pikacss/core': ^0.0.61
-  '@pikacss/integration': ^0.0.61
-  '@pikacss/unplugin-pikacss': ^0.0.61
-  # Exact pin (matches `elkjs`/`modern-monaco`/`@vue-flow/core` precedent): issue #28 browser contract
-  # harness. `minimumReleaseAge: 4320` (3 days) is satisfied — 1.62.1 published 2026-07-30, well over
-  # 3 days before this pin.
-  '@playwright/test': 1.62.1
-  # issue #25 P3 "curated Implementation source explorer": Shiki fine-grained core, not the `shiki`
-  # convenience bundle — `@shikijs/core` + `@shikijs/engine-javascript` (the JS RegExp engine, no wasm;
-  # see `src/implementation/shiki-highlighter.ts` for the engine-choice rationale) load `tm-grammars`/
-  # `tm-themes` grammars/theme directly, matching the existing `use-monaco-editor.ts` precedent for
-  # those two packages. `minimumReleaseAge: 4320` (3 days) is satisfied — 4.4.3 published 2026-08-10,
-  # more than 3 days before this pin (today is 2026-08-16).
-  '@shikijs/core': ^4.4.3
-  '@shikijs/engine-javascript': ^4.4.3
   '@types/node': ^24.13.2
   '@vitest/coverage-v8': ^4.1.9
-  '@vue-flow/core': 1.48.2
-  '@vue/test-utils': ^2.4.11
-  alien-signals: 3.2.1
   bumpp: 11.1.0
   commander: ^15.0.0
-  dockview-vue: ^7.0.4
-  elkjs: 0.12.0
   eslint: 10.6.0
-  happy-dom: ^20.11.2
   lint-staged: ^15.5.2
   mdast-util-from-markdown: ^2.0.3
   mdast-util-gfm: ^3.1.0
   micromark-extension-gfm: ^3.0.0
-  modern-monaco: 0.4.2
   pathe: ^2.0.3
   publint: ^0.3.21
   rimraf: ^6.1.3
   simple-git-hooks: ^2.13.1
-  tm-grammars: ^1.32.3
-  tm-themes: ^1.12.3
   tsdown: ^0.22.3
   tsx: ^4.23.0
   typescript: ^6.0.3
@@ -70,9 +44,4 @@ ignoredBuiltDependencies:
   - esbuild
   - simple-git-hooks
   - unrs-resolver
-  # Transitive dep of @vue-flow/core (via @vueuse/core). Its postinstall only rewrites lib/index.{cjs,mjs,d.ts}
-  # to match the installed Vue major version, defaulting to the Vue 3 variant; verified against the installed
-  # 0.14.10 tarball that lib/index.* is already byte-identical to lib/v3/index.* (same original publish
-  # timestamp, untouched), so skipping the postinstall is a no-op for this workspace's Vue 3.5 toolchain.
-  - vue-demi
 onlyBuiltDependencies: []

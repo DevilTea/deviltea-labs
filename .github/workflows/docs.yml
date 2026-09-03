@@ -8,9 +8,6 @@ on:
       - .github/workflows/docs.yml
       - .github/actions/setup-node-pnpm/**
       - docs/site/**
-      - apps/widget-lab/**
-      - packages/widget/**
-      - scripts/build-pages.ts
       - package.json
       - pnpm-lock.yaml
       - pnpm-workspace.yaml
@@ -48,8 +45,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build documentation and Widget Lab
-        run: pnpm docs:build:pages
+      - name: Build documentation
+        run: pnpm docs:build
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

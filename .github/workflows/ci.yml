@@ -41,51 +41,6 @@ jobs:
       - name: Run quality checks
         run: pnpm check
 
-  browser-contracts:
-    name: Browser contracts (widget-lab)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
-
-      - name: Set up Node.js and pnpm
-        uses: ./.github/actions/setup-node-pnpm
-        with:
-          node-version: 24
-          pnpm-version: 10.34.4
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # `widget-lab...` (the pnpm filter, not a literal ellipsis) builds widget-lab AND its workspace
-      # dependencies in topological order — this job never assumes a prior root `pnpm build` already
-      # produced @deviltea/widget-core/@deviltea/widget-vue's `dist` (see scripts/build-pages.ts's own
-      # comment for the precedent/postmortem this mirrors).
-      - name: Build widget-lab and its workspace dependencies
-        run: pnpm --filter widget-lab... run build
-
-      - name: Install Playwright Chromium
-        run: pnpm --filter widget-lab exec playwright install --with-deps chromium
-
-      # Runs against the BUILT app (`vite preview`, driven by playwright.config.ts's `webServer`) — the
-      # build above happens exactly once; this suite never rebuilds. Kept out of `pnpm check`/
-      # `test:unit` on purpose (issue #28 CI policy): a separate, slower job so the fast unit suite above
-      # stays fast.
-      - name: Run browser contract suite
-        run: pnpm --filter widget-lab run test:browser
-
-      # Failure-only diagnostics (trace/screenshot; see playwright.config.ts) — never committed, only
-      # uploaded when the suite actually fails.
-      - name: Upload failure diagnostics
-        if: failure()
-        uses: actions/upload-artifact@v6
-        with:
-          name: widget-lab-playwright-report
-          path: apps/widget-lab/test-results
-          if-no-files-found: ignore
-          retention-days: 7
-
   typescript-latest:
     name: Verify tsconfig (latest TypeScript 6)
     runs-on: ubuntu-latest

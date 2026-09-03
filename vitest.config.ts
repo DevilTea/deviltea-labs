@@ -6,7 +6,6 @@ export default defineConfig({
 	test: {
 		include: [
 			'packages/**/src/**/*.unit.test.ts',
-			'apps/**/src/**/*.unit.test.ts',
 		],
 		coverage: {
 			enabled: true,
@@ -21,18 +20,11 @@ export default defineConfig({
 				'packages/vue-router-middleware/src/**/*.ts',
 				'packages/vue-temp-var/src/**/*.ts',
 				'packages/vue-temp-var/src/**/*.vue',
-				'packages/widget/core/src/**/*.ts',
-				'packages/widget/vue/src/**/*.ts',
 			],
 			exclude: [
 				'**/*.unit.test.ts',
 				'**/dist/**',
 				'packages/tsconfig/**',
-				'packages/widget/vue/src/test-fixtures.ts',
-				// widget-lab is a private application shell (never published), not a coverage-gated
-				// package; see its AGENTS.md "Testing" section. Its *.unit.test.ts still run via the
-				// `test.include` glob above.
-				'apps/widget-lab/**',
 			],
 			excludeAfterRemap: true,
 			// CI/agent environments default the text reporter to skip complete files.
