@@ -231,7 +231,7 @@ describe('runArtifactCreateCommand', () => {
 			.toBe(2)
 	})
 
-	it('exits 2 for the project type token (PROJECT is created only by ef init)', async () => {
+	it('exits 2 for the project type token (PROJECT is created only by spec init)', async () => {
 		const outcome = await runArtifactCreateCommand(baseOptions({ yes: true, type: 'project' }), deps())
 		expect(outcome.exitCode)
 			.toBe(2)

@@ -1,25 +1,25 @@
 ---
 name: review-engineering-change
-description: Review a proposed EF Core engineering change (a Git transition between an explicit baseline and proposed commit, or an existing PRD/REQ/ADR/POL/CHG Artifact) using only the read-only `ef` CLI - `ef validate`, `ef query *`, and `ef resource read`. Runs `ef validate --scope transition` against explicit full baseline/proposed commit OIDs, inspects impact, history, relations, and supersession, and explains the resulting deterministic diagnostics. Use when asked to review, audit, approve, or explain the validation result for an EF engineering change, pull request, or CHG before merge.
+description: Review a proposed EF Core engineering change (a Git transition between an explicit baseline and proposed commit, or an existing PRD/REQ/ADR/POL/CHG Artifact) using only the read-only `spec` CLI - `spec validate`, `spec query *`, and `spec resource read`. Runs `spec validate --scope transition` against explicit full baseline/proposed commit OIDs, inspects impact, history, relations, and supersession, and explains the resulting deterministic diagnostics. Use when asked to review, audit, approve, or explain the validation result for an EF engineering change, pull request, or CHG before merge.
 ---
 
 # Review Engineering Change
 
-`ef` is the deterministic ground truth for EF Core state. This Skill is a
-read-only workflow layer over it: it sequences the existing `ef validate` and
-`ef query *` / `ef resource read` commands to review a proposed engineering
+`spec` is the deterministic ground truth for EF Core state. This Skill is a
+read-only workflow layer over it: it sequences the existing `spec validate` and
+`spec query *` / `spec resource read` commands to review a proposed engineering
 change. It never reimplements EF parsing, lifecycle, graph, or CHG-effect
-logic, and it never invents CLI syntax beyond what `ef help` and the commands
+logic, and it never invents CLI syntax beyond what `spec help` and the commands
 below actually accept.
 
-Never fabricate command output. Every `ef ... --format json` result is one
+Never fabricate command output. Every `spec ... --format json` result is one
 JSON object on stdout - run the command and read that object; do not guess its
 shape or assume a result without executing the command.
 
 ## Non-negotiable rules
 
-1. **Stay read-only.** This Skill only ever runs `ef validate`, `ef query
-   <kind>`, and `ef resource read`. Never run `ef init` or `ef artifact
+1. **Stay read-only.** This Skill only ever runs `spec validate`, `spec query
+   <kind>`, and `spec resource read`. Never run `spec init` or `spec artifact
    create`, and never create, edit, delete, or format any file, including
    anything under `.engineering/`.
 2. **Never checkout, publish, or update a branch.** Do not run `git
@@ -34,7 +34,7 @@ shape or assume a result without executing the command.
    substitute. Never treat an arbitrary historical commit as a trusted
    baseline. See `references/validation-recipes.md` for what "trusted
    baseline" means and how to confirm it.
-4. **Never substitute judgment for the validator.** When `ef validate`
+4. **Never substitute judgment for the validator.** When `spec validate`
    reports `valid: false` or `complete: false`, explain the returned
    diagnostics; do not reinterpret, soften, or override that result with
    independent reasoning about lifecycle or graph correctness. This Skill
@@ -83,7 +83,7 @@ shape or assume a result without executing the command.
 
 ## Snapshot vs. transition
 
-`ef validate` defaults to `--scope snapshot`. Snapshot validation proves only
+`spec validate` defaults to `--scope snapshot`. Snapshot validation proves only
 that one complete current tree is internally valid: envelopes, identity,
 lifecycle-status applicability, relation targets, Resource integrity, body
 schemas, and canonical resolution. It **cannot** prove:
@@ -106,11 +106,11 @@ ordinary change, and never pass `--baseline` with it.
 
 ## Reference index
 
-- `references/validation-recipes.md` - full `ef validate` flag reference for
+- `references/validation-recipes.md` - full `spec validate` flag reference for
   snapshot, transition, bootstrap, and range scope; what a trusted baseline
   means; the candidate -> validate -> integrate boundary and how to recognize
   a stale result; the JSON envelope fields; the CI-parity command.
-- `references/query-recipes.md` - full `ef query *` and `ef resource read`
+- `references/query-recipes.md` - full `spec query *` and `spec resource read`
   command reference: impact, history, relations, trace, resolve-current,
   lookup, list, search, and the staged context-composition pattern.
 - `references/diagnostics.md` - the diagnostic object shape, severity levels,

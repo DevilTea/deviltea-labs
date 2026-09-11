@@ -1,9 +1,9 @@
 /**
- * `ef init` (13-cli-contract.md "Project Initialization", "Mutation Planning
+ * `spec init` (13-cli-contract.md "Project Initialization", "Mutation Planning
  * and Authorization", "Initialization claim-and-complete protocol").
  *
- * Target selection is `ef init`'s own rule, not ordinary project discovery
- * (13-cli-contract.md "Common Options": "except for `ef init`"): with
+ * Target selection is `spec init`'s own rule, not ordinary project discovery
+ * (13-cli-contract.md "Common Options": "except for `spec init`"): with
  * `--project` the supplied path must be exactly an existing Git worktree
  * root; without it, the worktree root containing `cwd` is used.
  *
@@ -13,7 +13,7 @@
  * ("Requested validation scope or invocation is invalid") is reused for
  * those, since 09-validation.md frames the whole `EF-VAL-*` namespace as
  * "Validation invocation, capability, completeness, and internal
- * orchestration" broadly, not only the `ef validate` command. Conditions with
+ * orchestration" broadly, not only the `spec validate` command. Conditions with
  * an exact registered match (`history-contains-ef-state` -> `EF-VAL-009`,
  * `git-unavailable` -> `EF-VAL-006`, a computed-plan domain rejection ->
  * its own real `validateSnapshot` diagnostics) use that match instead.
@@ -145,7 +145,7 @@ async function collectValuesInteractively(options: InitCommandOptions, deps: Ini
 }
 
 function planPreview(changes: readonly { action: string, path: string }[]): MutationPlanPreview {
-	return { title: 'ef init', lines: changes.map(c => `${c.action} ${c.path}`) }
+	return { title: 'spec init', lines: changes.map(c => `${c.action} ${c.path}`) }
 }
 
 function projectSummaryFromPlanFiles(files: readonly { path: string, bytes: Uint8Array }[]): ArtifactSummaryProjection | null {
@@ -189,7 +189,7 @@ export async function runInitCommand(options: InitCommandOptions, deps: InitComm
 		values = options.values as InitValues
 	}
 	else {
-		deps.prompts.intro('ef init')
+		deps.prompts.intro('spec init')
 		const collected = await collectValuesInteractively(options, deps, targetRoot)
 		if (collected === undefined) {
 			deps.prompts.outro('Cancelled.')

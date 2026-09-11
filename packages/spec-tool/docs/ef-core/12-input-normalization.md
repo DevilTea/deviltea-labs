@@ -234,7 +234,7 @@ definitions become canonical.
 
 Before the first EF state enters authoritative integration history, accepted
 rows and other accepted initial draft or active knowledge MAY be added to the
-proposed bootstrap after `ef init`; after the resulting tree is committed, that
+proposed bootstrap after `spec init`; after the resulting tree is committed, that
 explicit commit MUST pass bootstrap validation. After bootstrap integration, adding, changing, or
 removing a terminology row mutates the active PROJECT and follows the ordinary
 CHG rules. A project may retain a header-only Terminology table until useful

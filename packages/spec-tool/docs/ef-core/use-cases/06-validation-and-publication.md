@@ -6,7 +6,7 @@
 on the complete current EF state so I can repair integrity findings before
 integration.
 
-**Main flow:** Run `ef validate --scope snapshot`; EF discovers the project,
+**Main flow:** Run `spec validate --scope snapshot`; EF discovers the project,
 parses all authoritative files, validates envelopes, bodies, identity, and
 lifecycle, builds the graph, validates relations and Resources, runs available
 optional hooks, and emits deterministically ordered diagnostics.
@@ -28,7 +28,7 @@ without a baseline CHG so a repository can begin authoritative EF history.
 integration ref is absent or its captured first-parent history has no
 `.engineering/ef.yaml` path.
 
-**Main flow:** Run `ef validate --scope bootstrap --proposed <full-oid>`; EF
+**Main flow:** Run `spec validate --scope bootstrap --proposed <full-oid>`; EF
 materializes the proposed commit, validates its complete snapshot and bootstrap
 parent and ref-history conditions, and returns the fixed integration ref plus
 the expected old ref OID, or `null` for ref absence, for conditional

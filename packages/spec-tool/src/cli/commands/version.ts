@@ -1,5 +1,5 @@
 /**
- * `ef version` (13-cli-contract.md "Version and Help").
+ * `spec version` (13-cli-contract.md "Version and Help").
  */
 
 import type { CommandOutcome } from '../command-outcome'

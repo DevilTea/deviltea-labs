@@ -5,7 +5,7 @@ Status: Accepted
 ## Purpose
 
 This document is an operational recipe, not a specification. It shows how to
-wire `ef validate --scope range` (defined by
+wire `spec validate --scope range` (defined by
 [09-validation.md](../ef-core/09-validation.md) "Range scope" and
 [13-cli-contract.md](../ef-core/13-cli-contract.md) "CI Contract") into GitHub
 Actions so that a candidate integration range is validated **while it is still
@@ -176,7 +176,7 @@ jobs:
           node-version: 22
 
       - name: Install ef
-        run: npm install --global @deviltea/ef
+        run: npm install --global @deviltea/spec-tool
 
       - name: Capture the operation-start state of the integration ref
         id: capture
@@ -204,7 +204,7 @@ jobs:
           proposed="$(git rev-parse HEAD)"
 
           status=0
-          ef validate \
+          spec validate \
             --project "$GITHUB_WORKSPACE" \
             --scope range \
             --baseline "$BASELINE" \
@@ -344,7 +344,7 @@ jobs:
           node-version: 22
 
       - name: Install ef
-        run: npm install --global @deviltea/ef
+        run: npm install --global @deviltea/spec-tool
 
       - name: Capture the operation-start state of the integration ref
         id: capture
@@ -366,7 +366,7 @@ jobs:
           proposed="$(git rev-parse HEAD)"
 
           status=0
-          ef validate \
+          spec validate \
             --project "$GITHUB_WORKSPACE" \
             --scope range \
             --baseline "$BASELINE" \
@@ -462,12 +462,12 @@ proposed="$(build_candidate_on "$baseline")" || exit 1
 # ---- 3. Validate before publishing ----------------------------------------
 status=0
 if [ -n "$baseline" ]; then
-  ef validate --scope range --baseline "$baseline" --proposed "$proposed" \
+  spec validate --scope range --baseline "$baseline" --proposed "$proposed" \
     --strict --format json --no-input > ef-range.json || status=$?
 else
   # No --baseline: the explicit assertion that `integration_ref` was proven
   # unresolved at operation start. Step 1 proved exactly that.
-  ef validate --scope range --proposed "$proposed" \
+  spec validate --scope range --proposed "$proposed" \
     --strict --format json --no-input > ef-range.json || status=$?
 fi
 [ "$status" -eq 0 ] || { jq -r '.diagnostics[] | "\(.severity) \(.code) \(.commit_oid // "-") \(.message)"' ef-range.json; exit "$status"; }
@@ -523,7 +523,7 @@ creation started the job.
 
 For the very first publication of an EF project there is a second, simpler
 option that needs no CI at all: validate locally with
-`ef validate --scope bootstrap --proposed <oid>` while the integration branch
+`spec validate --scope bootstrap --proposed <oid>` while the integration branch
 still does not exist, and only then create it. Bootstrap scope has the same
 operation-start ref obligation, so it too proves the ref was unresolved rather
 than assuming it.
@@ -590,7 +590,7 @@ signal available:
   anything.
 
 The steps above print the summary line and every diagnostic before
-re-exporting `ef`'s exit code, so a failing check shows the codes in the job
+re-exporting `spec`'s exit code, so a failing check shows the codes in the job
 log rather than only a non-zero status.
 
 ## Why this replaces the old commit-by-commit `git update-ref` workaround
@@ -610,7 +610,7 @@ materialization, and the validator does not require the caller to advance
 `integration_ref` (or any other ref) per intermediate commit. Every boundary in
 the range — identity, bootstrap, transition, or EF-state removal — is derived
 deterministically from Git objects plus the one ref state captured at operation
-start. The workflows above reflect that: one `ef validate` call for the whole
+start. The workflows above reflect that: one `spec validate` call for the whole
 candidate, no loop over individual commits, no intermediate ref writes.
 
 The capture step is not a residue of that workaround. It writes the local

@@ -4,7 +4,7 @@
 
 **User Story:** As a CLI user, I want to preview and explicitly authorize the limited write operations so a command cannot surprise me with partial or replacement writes.
 
-**Main flow:** For `ef init` or `ef artifact create`, EF computes the complete
+**Main flow:** For `spec init` or `spec artifact create`, EF computes the complete
 plan first. The user chooses `--dry-run`, confirms interactively, or supplies
 `--yes` with `--no-input`. Initialization atomically claims `.engineering`,
 creates a nonce-bearing completion marker, and removes it last. An interruption
@@ -70,7 +70,7 @@ may be reported with the applicable informational finding.
 
 **User Story:** As CI, I want to reject an invalid candidate deterministically before the target branch moves so integrated EF state remains complete.
 
-**Main flow:** Obtain the target-branch tip and exact candidate full commit OID; run `ef validate --scope transition --baseline <oid> --proposed <oid> --strict --format json --no-input`; review the result; then hand its expected ref state to the compare-and-swap publisher in UC-043.
+**Main flow:** Obtain the target-branch tip and exact candidate full commit OID; run `spec validate --scope transition --baseline <oid> --proposed <oid> --strict --format json --no-input`; review the result; then hand its expected ref state to the compare-and-swap publisher in UC-043.
 
 **Success assertions:** EF's validation step is read-only, network-free,
 cache-independent, and TTY-independent; it validates the complete candidate

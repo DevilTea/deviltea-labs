@@ -1,5 +1,5 @@
 /**
- * `ef resource read <owner-id> <location>` (13-cli-contract.md "Resource
+ * `spec resource read <owner-id> <location>` (13-cli-contract.md "Resource
  * Reading").
  *
  * A raw-byte transport command: it never accepts `--format`, never produces

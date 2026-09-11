@@ -1,5 +1,5 @@
 /**
- * `ef init` plan/apply (13-cli-contract.md "Project Initialization",
+ * `spec init` plan/apply (13-cli-contract.md "Project Initialization",
  * "Filesystem Write Safety" / "Initialization claim-and-complete protocol";
  * 11-filesystem-and-config.md canonical layout, configuration schema, and
  * bootstrap-ref rules; 02-identity.md PROJECT singleton and atomic bootstrap;
@@ -253,7 +253,7 @@ function missingValueFailure(field: string): ComputeInitPlanFailure {
 }
 
 /**
- * Compute the complete `ef init` bootstrap plan in memory. Never touches the
+ * Compute the complete `spec init` bootstrap plan in memory. Never touches the
  * filesystem; the only I/O is the two read-only Git checks (worktree-root
  * identity and the configured integration branch's first-parent history).
  */
@@ -1392,7 +1392,7 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		claimStatus = await verifyClaimIntact()
 	}
 	catch (error) {
-		return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but the claim could not be re-verified afterward: ${(error as Error).message}.` }
+		return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'spec init' completed and its initialization marker was removed, but the claim could not be re-verified afterward: ${(error as Error).message}.` }
 	}
 
 	if (claimStatus === 'unavailable') {
@@ -1404,7 +1404,7 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		// exists to close; fold it into the existing `cleanup-failed` variant
 		// instead, exactly like an exception escaping this same checkpoint
 		// already is above.
-		return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but the claim could not be re-verified afterward: ${claimIntactFailureMessage}` }
+		return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'spec init' completed and its initialization marker was removed, but the claim could not be re-verified afterward: ${claimIntactFailureMessage}` }
 	}
 
 	if (claimStatus === 'mismatch') {
@@ -1487,11 +1487,11 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 		try {
 			const tmpStatus = await entryOwnershipStatus(tmpEntry)
 			if (tmpStatus === 'unavailable') {
-				return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but ownership of its own now-empty '${tmpPath}' runtime directory could not be re-proven afterward.` }
+				return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'spec init' completed and its initialization marker was removed, but ownership of its own now-empty '${tmpPath}' runtime directory could not be re-proven afterward.` }
 			}
 			if (tmpStatus === 'proven') {
 				if (!(await deleteOwnedEntry(tmpEntry))) {
-					return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but its own now-empty '${tmpPath}' runtime directory could not be safely removed: its ownership could not be re-proven immediately before deletion, or the removal itself failed.` }
+					return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'spec init' completed and its initialization marker was removed, but its own now-empty '${tmpPath}' runtime directory could not be safely removed: its ownership could not be re-proven immediately before deletion, or the removal itself failed.` }
 				}
 				createdStack.splice(tmpEntryIndex, 1)
 				createdTopLevelNames.delete('.tmp')
@@ -1501,7 +1501,7 @@ async function applyInitPlanCore(plan: InitPlan, deps: ApplyInitPlanDeps, fileLe
 			// completely untouched; the plain success below is correct.
 		}
 		catch (error) {
-			return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'ef init' completed and its initialization marker was removed, but its own now-empty '${tmpPath}' runtime directory could not be verified or removed afterward: ${(error as Error).message}.` }
+			return { applied: true, outcome: 'cleanup-failed', changes: plan.changes, message: `'spec init' completed and its initialization marker was removed, but its own now-empty '${tmpPath}' runtime directory could not be verified or removed afterward: ${(error as Error).message}.` }
 		}
 	}
 
@@ -1685,7 +1685,7 @@ function foldLeaseReleases(natural: ApplyInitPlanResult, releases: readonly Leas
 	if (failed === undefined)
 		return natural
 
-	return { applied: true, outcome: 'cleanup-failed', changes: natural.changes, message: `'ef init' completed and its initialization marker was removed, but a tracked file's handle could not be cleanly released afterward: ${failed.error.message}.` }
+	return { applied: true, outcome: 'cleanup-failed', changes: natural.changes, message: `'spec init' completed and its initialization marker was removed, but a tracked file's handle could not be cleanly released afterward: ${failed.error.message}.` }
 }
 
 /**

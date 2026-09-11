@@ -4,7 +4,7 @@
  * candidate root is exactly the Git worktree root that directly contains
  * `.engineering`"; 00-implementation-decisions.md "Git Execution").
  *
- * Project discovery and `ef init`'s target-selection rule both compare a
+ * Project discovery and `spec init`'s target-selection rule both compare a
  * path Git reported (`rev-parse --show-toplevel`) against a path this
  * process derived from the filesystem (an ascended `cwd`, or an explicit
  * `--project` value). These are two independent path sources that must

@@ -1,18 +1,18 @@
 ---
 name: author-engineering-files
-description: Author and maintain EF Core engineering files (PROJECT, PRD, REQ, ADR, POL, CHG) under `.engineering/` through the deterministic `ef` CLI - initializing a project, bootstrapping EF for an existing (brownfield) codebase, discovering context with staged read-only queries, creating draft Artifacts, planning CHG-backed transitions for active content, and validating the result. Use when the user asks to set up an EF project, introduce/adopt EF in an existing repository or establish its first engineering files, write or edit a PRD/REQ/ADR/POL/CHG file, plan an engineering change, run or fix `ef validate` diagnostics, or otherwise author EF content with `@deviltea/ef`.
+description: Author and maintain EF Core engineering files (PROJECT, PRD, REQ, ADR, POL, CHG) under `.engineering/` through the deterministic `spec` CLI - initializing a project, bootstrapping EF for an existing (brownfield) codebase, discovering context with staged read-only queries, creating draft Artifacts, planning CHG-backed transitions for active content, and validating the result. Use when the user asks to set up an EF project, introduce/adopt EF in an existing repository or establish its first engineering files, write or edit a PRD/REQ/ADR/POL/CHG file, plan an engineering change, run or fix `spec validate` diagnostics, or otherwise author EF content with `@deviltea/spec-tool`.
 ---
 
 # Author Engineering Files
 
-`ef` is the deterministic ground truth for EF Core state. This Skill is a
-workflow layer over it: it sequences the existing `ef init`, `ef artifact
-create`, `ef validate`, `ef query *`, and `ef resource read` commands. It
+`spec` is the deterministic ground truth for EF Core state. This Skill is a
+workflow layer over it: it sequences the existing `spec init`, `spec artifact
+create`, `spec validate`, `spec query *`, and `spec resource read` commands. It
 never reimplements EF parsing, validation, or graph logic, and it never
-invents CLI syntax beyond what `ef help` and the commands below actually
+invents CLI syntax beyond what `spec help` and the commands below actually
 accept.
 
-Never fabricate command output. Every `ef ... --format json` result is one
+Never fabricate command output. Every `spec ... --format json` result is one
 JSON object on stdout - run the command and read that object; do not guess
 its shape or assume a result without executing the command.
 
@@ -44,7 +44,7 @@ its shape or assume a result without executing the command.
    accept, edit, or reject them. Do not write a PROJECT Terminology row, an
    ADR Decision, or a POL Policy statement as settled fact without an
    explicit human choice.
-4. **Show the mutation before applying it.** For every `ef init` or `ef
+4. **Show the mutation before applying it.** For every `spec init` or `spec
    artifact create` invocation, run it first with `--dry-run` and show the
    plan (`changes[]`, the `artifact` summary). Only after the human confirms
    do you re-run the same command with `--yes`.
@@ -52,7 +52,7 @@ its shape or assume a result without executing the command.
    editing the working tree, run:
 
    ```text
-   ef validate --scope snapshot --format json --no-input
+   spec validate --scope snapshot --format json --no-input
    ```
 
    and resolve every diagnostic before telling the human the work is done.
@@ -86,12 +86,12 @@ its shape or assume a result without executing the command.
           valid completed local EF project + proven EF-free configured
           ref history (or the ref does not resolve) -> resume
           references/existing-project-bootstrap.md at the appropriate
-          step; never rerun `ef init`
+          step; never rerun `spec init`
           ref/history unavailable, or evidence otherwise ambiguous ->
           stop as incomplete; ask the human for the missing evidence
    no  -> is this an established codebase (existing behavior, docs, tests,
           Git history) rather than a fresh/greenfield setup?
-          no (greenfield)   -> references/project-init.md (ef init)
+          no (greenfield)   -> references/project-init.md (spec init)
           yes, or ambiguous -> references/existing-project-bootstrap.md
                                (ask the human when the evidence is unclear;
                                never equate "no .engineering/" with "init
@@ -115,7 +115,7 @@ its shape or assume a result without executing the command.
 
 ## Reference index
 
-- `references/project-init.md` - `ef init` flags, the dry-run/yes plan
+- `references/project-init.md` - `spec init` flags, the dry-run/yes plan
   pattern, and initialization guardrails.
 - `references/existing-project-bootstrap.md` - first-time EF adoption for an
   established codebase: bounded repository archaeology, human-confirmed
@@ -123,13 +123,13 @@ its shape or assume a result without executing the command.
   draft/active status boundary, and one complete bootstrap state validated
   with snapshot then bootstrap scope.
 - `references/context-discovery.md` - the staged query composition, exact
-  `ef query *` / `ef resource read` syntax, and why no step may be skipped.
-- `references/draft-authoring.md` - `ef artifact create <type>`, required
+  `spec query *` / `spec resource read` syntax, and why no step may be skipped.
+- `references/draft-authoring.md` - `spec artifact create <type>`, required
   envelope fields, per-type required body headings, relation ontology,
   Resource attachment, and PROJECT Terminology row ordering.
 - `references/chg-planning.md` - when a CHG is required vs. optional, effect
   classification (`introduces`/`modifies`/`retires`), completed/retired CHG
   body requirements, and why there is no CLI command for this step.
-- `references/validation-and-diagnostics.md` - `ef validate` scopes and
+- `references/validation-and-diagnostics.md` - `spec validate` scopes and
   flags, the JSON envelope, the four exit codes, and the diagnostic
   read-fix-reverify loop.

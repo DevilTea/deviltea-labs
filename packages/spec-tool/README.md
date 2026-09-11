@@ -1,4 +1,4 @@
-# @deviltea/ef
+# @deviltea/spec-tool
 
 > ESM-only Node.js CLI.
 
@@ -6,13 +6,12 @@
 [![npm downloads][npm-downloads-src]][npm-downloads-href]
 [![License][license-src]][license-href]
 
-Engineering Files (EF) is a file-based, Git-native system for maintaining
-canonical engineering knowledge, decision history, and change provenance. `ef`
-is the deterministic CLI over that system: EF Artifacts (PROJECT, PRD, REQ,
-ADR, POL, CHG) live as Markdown files with structured YAML frontmatter under
-`.engineering/`, and `ef` provides a small, read-only-by-default surface to
-initialize a project, create draft Artifacts, validate state, and query the
-resulting graph — no database, no required LLM judgment, no hidden mutation.
+Spec is a Git-native engineering specification maintenance and collaboration
+tool. It maintains authoritative engineering knowledge, decision history, and
+provenance as Markdown files with structured YAML frontmatter under
+`.engineering/`. The initial implementation retains the existing EF Core
+Artifact ontology (PROJECT, PRD, REQ, ADR, POL, CHG) and deterministic,
+read-only-by-default behavior while the new product boundary is designed.
 
 ## Installation
 
@@ -21,64 +20,64 @@ Requires Node.js `^22.14.0 || ^24.0.0`.
 Install the CLI globally:
 
 ```bash
-npm install -g @deviltea/ef
+npm install -g @deviltea/spec-tool
 ```
 
 Or run it without installing:
 
 ```bash
-npx @deviltea/ef init
+npx @deviltea/spec-tool init
 ```
 
 ## Quick Start
 
-EF Core v1 keeps the command surface deliberately small. These are five of
-its core commands.
+The initial Spec CLI keeps the command surface deliberately small. These are
+five of its core commands.
 
-### `ef init`
+### `spec init`
 
-Initializes a new EF project (`.engineering/`) in the current Git worktree
+Initializes a new Spec project (`.engineering/`) in the current Git worktree
 root.
 
 ```bash
-ef init
+spec init
 ```
 
-### `ef artifact create <type>`
+### `spec artifact create <type>`
 
 Creates one new draft Artifact of the given type (`prd`, `req`, `adr`, `pol`,
 or `chg`).
 
 ```bash
-ef artifact create req --title "Search Result Filtering" --summary "Search results support explicit filtering by supported criteria."
+spec artifact create req --title "Search Result Filtering" --summary "Search results support explicit filtering by supported criteria."
 ```
 
-### `ef validate`
+### `spec validate`
 
 Validates the current project snapshot (or, with `--scope transition`, an
 explicit Git transition) and reports deterministic diagnostics.
 
 ```bash
-ef validate
+spec validate
 ```
 
-### `ef query lookup <artifact-id>`
+### `spec query lookup <artifact-id>`
 
-Looks up one Artifact by its exact identity, one of several `ef query`
+Looks up one Artifact by its exact identity, one of several `spec query`
 subcommands (`list`, `search`, `relations`, `trace`, `impact`, `history`,
 `resolve-current`).
 
 ```bash
-ef query lookup REQ-031
+spec query lookup REQ-031
 ```
 
-### `ef resource read <owner-id> <location>`
+### `spec resource read <owner-id> <location>`
 
 Reads the raw bytes of one Resource owned by the given Artifact, writing
 exactly the file content to stdout.
 
 ```bash
-ef resource read REQ-031 diagrams/flow.svg
+spec resource read REQ-031 diagrams/flow.svg
 ```
 
 ## Exit Codes
@@ -95,17 +94,17 @@ exactly one stable JSON result object to stdout for scripting and CI.
 
 ## Agent Skills
 
-This package ships two [Agent Skills](https://github.com/DevilTea/deviltea-labs/tree/main/packages/ef/skills)
+This package ships two [Agent Skills](https://github.com/DevilTea/deviltea-labs/tree/main/packages/spec-tool/skills)
 that sequence the CLI for common workflows without reimplementing its logic:
 
-- **`author-engineering-files`** — initializes a project, discovers context
+- **`author-engineering-files`** — initializes a Spec project, discovers context
   with staged read-only queries, creates draft Artifacts, plans CHG-backed
   transitions for active content, and validates the result.
 - **`review-engineering-change`** — reviews a proposed engineering change with
   read-only transition validation, impact and history queries, and
   explanation of the resulting deterministic diagnostics.
 
-Installing `@deviltea/ef` does not install or mutate an agent's Skill
+Installing `@deviltea/spec-tool` does not install or mutate an agent's Skill
 directory. The Skill directories ship in the npm tarball and the GitHub
 repository under `skills/`; install them with an existing compatible Skill
 installer for your agent, for example the [`skills`](https://skills.sh/) CLI:
@@ -117,54 +116,54 @@ npx skills add DevilTea/deviltea-labs \
 ```
 
 This clones the repository and copies the two Skills (which live under
-`packages/ef/skills/` in this monorepo) into your agent's Skill directory;
+`packages/spec-tool/skills/` in this monorepo) into your agent's Skill directory;
 add `-g` to install them globally instead of into the current project.
 
 ### Repository workflow adoption
 
-The Skills activate for EF-specific requests, but only repository-level
+The Skills activate for specification-maintenance requests, but only repository-level
 instructions can guarantee that a generic request (e.g. "add feature X")
 first enters the EF lifecycle. Adapt this harness-neutral snippet into your
 repository's instruction file (`AGENTS.md`, `CLAUDE.md`, or equivalent):
 
 ```text
 When asked to make an engineering change to this repository:
-1. Discover EF context (does `.engineering/` exist, and what does it say)
+1. Discover Spec context (does `.engineering/` exist, and what does it say)
    before writing code.
-2. When applicable, draft or update the engineering intent in EF first
+2. When applicable, draft or update the engineering intent in Spec first
    (PROJECT/PRD/REQ/ADR/POL) — see the `author-engineering-files` Skill.
 3. Implement the change.
 4. Record a CHG (or other authoritative effect) for the change — see
    `author-engineering-files`.
-5. Run `ef validate --scope snapshot` on the working tree.
+5. Run `spec validate --scope snapshot` on the working tree.
 6. Validate the integration boundary of the candidate commit(s)
-   (`ef validate --scope transition|bootstrap|range`) before the
+   (`spec validate --scope transition|bootstrap|range`) before the
    integration ref advances — see the `review-engineering-change` Skill.
 7. Integrate only after validation succeeds.
 ```
 
 ## Full Specification
 
-The complete EF Core v1 ontology, lifecycle, validation, query, and CLI
+The retained EF Core v1 ontology, lifecycle, validation, query, and CLI
 contract are specified in
-[`docs/ef-core/`](https://github.com/DevilTea/deviltea-labs/tree/main/packages/ef/docs/ef-core),
-starting with the [Overview](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/docs/ef-core/00-overview.md)
-and the [CLI Contract](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/docs/ef-core/13-cli-contract.md).
+[`docs/ef-core/`](https://github.com/DevilTea/deviltea-labs/tree/main/packages/spec-tool/docs/ef-core),
+starting with the [Overview](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/docs/ef-core/00-overview.md)
+and the [CLI Contract](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/docs/ef-core/13-cli-contract.md).
 
-For a worked example wiring `ef validate --scope range` into CI so a whole
+For a worked example wiring `spec validate --scope range` into CI so a whole
 candidate range is validated while it is still unpublished, before the
 integration ref advances, see the
-[GitHub Actions integration-range recipe](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/docs/planning/03-ci-recipe-github-actions-range-validation.md).
+[GitHub Actions integration-range recipe](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/docs/planning/03-ci-recipe-github-actions-range-validation.md).
 
 ## License
 
-[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/ef/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
+[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
 
 <!-- Badges -->
 
-[npm-version-src]: https://img.shields.io/npm/v/@deviltea/ef?style=flat&colorA=080f12&colorB=1fa669
-[npm-version-href]: https://npmjs.com/package/@deviltea/ef
-[npm-downloads-src]: https://img.shields.io/npm/dm/@deviltea/ef?style=flat&colorA=080f12&colorB=1fa669
-[npm-downloads-href]: https://npmjs.com/package/@deviltea/ef
+[npm-version-src]: https://img.shields.io/npm/v/@deviltea/spec-tool?style=flat&colorA=080f12&colorB=1fa669
+[npm-version-href]: https://npmjs.com/package/@deviltea/spec-tool
+[npm-downloads-src]: https://img.shields.io/npm/dm/@deviltea/spec-tool?style=flat&colorA=080f12&colorB=1fa669
+[npm-downloads-href]: https://npmjs.com/package/@deviltea/spec-tool
 [license-src]: https://img.shields.io/github/license/DevilTea/deviltea-labs.svg?style=flat&colorA=080f12&colorB=1fa669
 [license-href]: https://github.com/DevilTea/deviltea-labs/blob/main/LICENSE

@@ -1154,7 +1154,7 @@ describe('validateRange', () => {
 	})
 
 	// -------------------------------------------------------------------------
-	// 31. Cross-consistency with ef query history
+	// 31. Cross-consistency with spec query history
 	// -------------------------------------------------------------------------
 
 	it('a range that validates clean is later walked by computeHistory over the same commits without reporting untrusted-data', async () => {

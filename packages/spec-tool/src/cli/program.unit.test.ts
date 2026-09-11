@@ -162,7 +162,7 @@ describe('runCli', () => {
 			.toBe(2)
 	})
 
-	it('rejects --project on ef version (not a project command): exit 2', async () => {
+	it('rejects --project on spec version (not a project command): exit 2', async () => {
 		const outcome = await runCli(['version', '--project', root], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(2)
@@ -170,7 +170,7 @@ describe('runCli', () => {
 
 	// ---- JSON transport guarantee ------------------------------------------------
 
-	it('produces exactly one JSON object followed by one LF for ef version --format json', async () => {
+	it('produces exactly one JSON object followed by one LF for spec version --format json', async () => {
 		const outcome = await runCli(['version', '--format', 'json'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(0)
@@ -183,7 +183,7 @@ describe('runCli', () => {
 			.toEqual({ schema: 'ef/version-result@1', version: '9.9.9', ef_core_major: 1 })
 	})
 
-	it('produces exactly one JSON object followed by one LF for ef validate --format json', async () => {
+	it('produces exactly one JSON object followed by one LF for spec validate --format json', async () => {
 		await setupProject()
 		execFileSync('git', ['-C', root, 'add', '-A'])
 		execFileSync('git', ['-C', root, 'commit', '-q', '-m', 'bootstrap'], { env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } })
@@ -201,7 +201,7 @@ describe('runCli', () => {
 			.toBe(true)
 	})
 
-	it('produces exactly one JSON object followed by one LF for ef query lookup --format json', async () => {
+	it('produces exactly one JSON object followed by one LF for spec query lookup --format json', async () => {
 		await setupProject()
 		const outcome = await runCli(['query', 'lookup', 'PROJECT', '--format', 'json'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -265,7 +265,7 @@ Text.
 
 	// ---- Mutation authorization matrix through the full CLI ----------------------
 
-	it('ef artifact create req --dry-run --format json returns a complete unapplied plan, exit 0', async () => {
+	it('spec artifact create req --dry-run --format json returns a complete unapplied plan, exit 0', async () => {
 		await setupProject()
 		const outcome = await runCli(['artifact', 'create', 'req', '--title', 'T', '--summary', 'S', '--dry-run', '--format', 'json'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -275,7 +275,7 @@ Text.
 			.toMatchObject({ complete: true, applied: false, dry_run: true })
 	})
 
-	it('ef artifact create req --format json without --yes or --dry-run exits 2 (JSON implies --no-input)', async () => {
+	it('spec artifact create req --format json without --yes or --dry-run exits 2 (JSON implies --no-input)', async () => {
 		await setupProject()
 		const outcome = await runCli(['artifact', 'create', 'req', '--title', 'T', '--summary', 'S', '--format', 'json'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -287,7 +287,7 @@ Text.
 			.toBe(false)
 	})
 
-	it('ef artifact create req --yes --format json applies the plan, exit 0', async () => {
+	it('spec artifact create req --yes --format json applies the plan, exit 0', async () => {
 		await setupProject()
 		const outcome = await runCli(['artifact', 'create', 'req', '--title', 'T', '--summary', 'S', '--yes', '--format', 'json'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -298,9 +298,9 @@ Text.
 		await expect(fs.stat(path.join(root, '.engineering/req/REQ-001.md'))).resolves.toBeTruthy()
 	})
 
-	// ---- ef init through the full CLI (target selection, value collection) ------
+	// ---- spec init through the full CLI (target selection, value collection) ------
 
-	it('ef init --no-input without --yes or --dry-run declines: exit 2, not applied', async () => {
+	it('spec init --no-input without --yes or --dry-run declines: exit 2, not applied', async () => {
 		const outcome = await runCli([
 			'init',
 			'--no-input',
@@ -328,7 +328,7 @@ Text.
 			.toBe(false)
 	})
 
-	it('ef init --yes --format json applies a full initialization plan, exit 0', async () => {
+	it('spec init --yes --format json applies a full initialization plan, exit 0', async () => {
 		const outcome = await runCli([
 			'init',
 			'--yes',
@@ -357,9 +357,9 @@ Text.
 		await expect(fs.stat(path.join(root, '.engineering', 'ef.yaml'))).resolves.toBeTruthy()
 	})
 
-	// ---- ef query list: request-builder rejection routed through both formats ---
+	// ---- spec query list: request-builder rejection routed through both formats ---
 
-	it('ef query list with valid options routes to the application layer and succeeds, exit 0', async () => {
+	it('spec query list with valid options routes to the application layer and succeeds, exit 0', async () => {
 		await setupProject()
 		const outcome = await runCli(['query', 'list', '--resource-normative', 'true', '--format', 'json'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -369,7 +369,7 @@ Text.
 			.toBe(true)
 	})
 
-	it('ef query list --resource-normative <bogus> --format json returns an incomplete EF-QRY-002 result, exit 2', async () => {
+	it('spec query list --resource-normative <bogus> --format json returns an incomplete EF-QRY-002 result, exit 2', async () => {
 		await setupProject()
 		const outcome = await runCli(['query', 'list', '--resource-normative', 'maybe', '--format', 'json'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -381,7 +381,7 @@ Text.
 			.toBe('EF-QRY-002')
 	})
 
-	it('ef query list --resource-normative <bogus> in human mode renders indented JSON, exit 2', async () => {
+	it('spec query list --resource-normative <bogus> in human mode renders indented JSON, exit 2', async () => {
 		await setupProject()
 		const outcome = await runCli(['query', 'list', '--resource-normative', 'maybe'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -398,7 +398,7 @@ Text.
 	// fallback -- `query`'s own Command has no .action(), so Commander's
 	// exitOverride rejects before any leaf action can call setOutcome.)
 
-	it('ef query with no subcommand rejects as invalid invocation via Commander\'s own exitOverride: exit 2', async () => {
+	it('spec query with no subcommand rejects as invalid invocation via Commander\'s own exitOverride: exit 2', async () => {
 		const outcome = await runCli(['query'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(2)
@@ -421,9 +421,9 @@ Text.
 			.toContain('boom-execIn')
 	})
 
-	// ---- ef help / ef version ------------------------------------------------------
+	// ---- spec help / spec version ------------------------------------------------------
 
-	it('ef help exits 0 with non-empty human text', async () => {
+	it('spec help exits 0 with non-empty human text', async () => {
 		const outcome = await runCli(['help'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(0)
@@ -431,19 +431,19 @@ Text.
 			.toBeGreaterThan(0)
 	})
 
-	it('ef help <unknown> exits 2', async () => {
+	it('spec help <unknown> exits 2', async () => {
 		const outcome = await runCli(['help', 'bogus'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(2)
 	})
 
-	it('ef help validate (an existing topic) exits 0', async () => {
+	it('spec help validate (an existing topic) exits 0', async () => {
 		const outcome = await runCli(['help', 'validate'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(0)
 	})
 
-	it('ef help validate mentions the range scope', async () => {
+	it('spec help validate mentions the range scope', async () => {
 		const outcome = await runCli(['help', 'validate'], { cwd: root }, ctx())
 		expect(outcome.stdout)
 			.toContain('range')
@@ -475,7 +475,7 @@ Text.
 			.toBe('')
 	})
 
-	it('ef version --format human prints the version for people, exit 0', async () => {
+	it('spec version --format human prints the version for people, exit 0', async () => {
 		const outcome = await runCli(['version'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(0)
@@ -485,7 +485,7 @@ Text.
 
 	// ---- -h / --help (13-cli-contract.md "Version and Help") -------------------
 
-	it('ef -h and ef --help both produce exactly ef help\'s general text, exit 0', async () => {
+	it('spec -h and spec --help both produce exactly spec help\'s general text, exit 0', async () => {
 		const general = await runCli(['help'], { cwd: root }, ctx())
 		const short = await runCli(['-h'], { cwd: root }, ctx())
 		const long = await runCli(['--help'], { cwd: root }, ctx())
@@ -500,7 +500,7 @@ Text.
 		}
 	})
 
-	it('ef init -h and ef init --help both produce exactly ef help init\'s text, exit 0', async () => {
+	it('spec init -h and spec init --help both produce exactly spec help init\'s text, exit 0', async () => {
 		const topic = await runCli(['help', 'init'], { cwd: root }, ctx())
 		const short = await runCli(['init', '-h'], { cwd: root }, ctx())
 		const long = await runCli(['init', '--help'], { cwd: root }, ctx())
@@ -513,7 +513,7 @@ Text.
 		}
 	})
 
-	it('ef artifact create --help succeeds without the required <type> argument and matches ef help "artifact create"', async () => {
+	it('spec artifact create --help succeeds without the required <type> argument and matches spec help "artifact create"', async () => {
 		const topic = await runCli(['help', 'artifact', 'create'], { cwd: root }, ctx())
 		const outcome = await runCli(['artifact', 'create', '--help'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -522,7 +522,7 @@ Text.
 			.toBe(topic.stdout)
 	})
 
-	it('ef artifact -h (group command, no leaf selected) falls back to the general help text', async () => {
+	it('spec artifact -h (group command, no leaf selected) falls back to the general help text', async () => {
 		const general = await runCli(['help'], { cwd: root }, ctx())
 		const outcome = await runCli(['artifact', '-h'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -531,7 +531,7 @@ Text.
 			.toBe(general.stdout)
 	})
 
-	it('ef validate -h matches ef help validate\'s text, exit 0', async () => {
+	it('spec validate -h matches spec help validate\'s text, exit 0', async () => {
 		const topic = await runCli(['help', 'validate'], { cwd: root }, ctx())
 		const outcome = await runCli(['validate', '-h'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -540,7 +540,7 @@ Text.
 			.toBe(topic.stdout)
 	})
 
-	it('ef query -h matches ef help query\'s text, exit 0', async () => {
+	it('spec query -h matches spec help query\'s text, exit 0', async () => {
 		const topic = await runCli(['help', 'query'], { cwd: root }, ctx())
 		const outcome = await runCli(['query', '-h'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -549,7 +549,7 @@ Text.
 			.toBe(topic.stdout)
 	})
 
-	it('ef query lookup --help (no query-lookup-specific topic) falls back to the ef query topic text', async () => {
+	it('spec query lookup --help (no query-lookup-specific topic) falls back to the spec query topic text', async () => {
 		const topic = await runCli(['help', 'query'], { cwd: root }, ctx())
 		const outcome = await runCli(['query', 'lookup', '--help'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -558,7 +558,7 @@ Text.
 			.toBe(topic.stdout)
 	})
 
-	it('ef resource read --help succeeds without either required argument and matches ef help "resource read"', async () => {
+	it('spec resource read --help succeeds without either required argument and matches spec help "resource read"', async () => {
 		const topic = await runCli(['help', 'resource', 'read'], { cwd: root }, ctx())
 		const outcome = await runCli(['resource', 'read', '--help'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -567,7 +567,7 @@ Text.
 			.toBe(topic.stdout)
 	})
 
-	it('ef version --help matches ef help version\'s text, exit 0', async () => {
+	it('spec version --help matches spec help version\'s text, exit 0', async () => {
 		const topic = await runCli(['help', 'version'], { cwd: root }, ctx())
 		const outcome = await runCli(['version', '--help'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -576,7 +576,7 @@ Text.
 			.toBe(topic.stdout)
 	})
 
-	it('ef help --help matches ef help help\'s text, exit 0', async () => {
+	it('spec help --help matches spec help help\'s text, exit 0', async () => {
 		const topic = await runCli(['help', 'help'], { cwd: root }, ctx())
 		const outcome = await runCli(['help', '--help'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
@@ -597,7 +597,7 @@ Text.
 		}
 	})
 
-	it('ef help <unknown-topic> is still an invocation failure (unaffected by -h/--help), exit 2', async () => {
+	it('spec help <unknown-topic> is still an invocation failure (unaffected by -h/--help), exit 2', async () => {
 		const outcome = await runCli(['help', 'bogus'], { cwd: root }, ctx())
 		expect(outcome.exitCode)
 			.toBe(2)

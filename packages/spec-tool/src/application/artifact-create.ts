@@ -1,5 +1,5 @@
 /**
- * `ef artifact create <type>` plan/apply (13-cli-contract.md "Draft Artifact
+ * `spec artifact create <type>` plan/apply (13-cli-contract.md "Draft Artifact
  * Creation", "Filesystem Write Safety" / "Draft Artifact hard-link
  * publication"; 02-identity.md Allocation; 08-artifact-schemas.md required
  * H2 skeletons per type).
@@ -407,7 +407,7 @@ export function computeCreatePlan(input: ComputeCreatePlanInput): ComputeCreateP
 			ok: false,
 			reason: 'invalid-type',
 			message: type === 'project'
-				? 'PROJECT is created only by \'ef init\', not \'ef artifact create\'.'
+				? 'PROJECT is created only by \'spec init\', not \'spec artifact create\'.'
 				: `Unsupported artifact type token '${type}'; expected one of: prd, req, adr, pol, chg.`,
 		}
 	}

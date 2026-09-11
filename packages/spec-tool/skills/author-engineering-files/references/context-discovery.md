@@ -4,7 +4,7 @@ Governing spec: `13-cli-contract.md` § Context Composition and § Query
 Commands; `10-query-and-trace.md` § Context Composition.
 
 EF Core v1 has no bundle-context command (there is no `context` subcommand
-under `ef`). Context is composed explicitly,
+under `spec`). Context is composed explicitly,
 in stages, so no hidden traversal, automatic identity resolution, or
 implicit Resource loading ever happens:
 
@@ -24,7 +24,7 @@ needs.
 Nearly every task starts here:
 
 ```bash
-ef query lookup PROJECT --projection full --format json --no-input
+spec query lookup PROJECT --projection full --format json --no-input
 ```
 
 `found: false` here means no EF project exists yet -> return to the
@@ -42,17 +42,17 @@ task. Do not read the whole `.engineering/` tree by hand instead.
 
 ```bash
 # Structured filters (repeat a filter flag for OR/AND per its documented semantics)
-ef query list --type req --status active --format json --no-input
-ef query list --tag-any search --tag-any filtering --format json --no-input
-ef query list --relation-type derived-from --relation-target PRD-012 --format json --no-input
+spec query list --type req --status active --format json --no-input
+spec query list --tag-any search --tag-any filtering --format json --no-input
+spec query list --relation-type derived-from --relation-target PRD-012 --format json --no-input
 
 # Literal text search (at least one term; multiple terms AND at Artifact scope)
-ef query search filtering --format json --no-input
-ef query search filtering search --case-sensitive --format json --no-input
+spec query search filtering --format json --no-input
+spec query search filtering search --case-sensitive --format json --no-input
 
 # Potential-impact traversal from a root that is about to change
-ef query impact REQ-031 --max-depth 3 --format json --no-input
-ef query impact REQ-031 --max-depth 3 --resolve-current --format json --no-input
+spec query impact REQ-031 --max-depth 3 --format json --no-input
+spec query impact REQ-031 --max-depth 3 --resolve-current --format json --no-input
 ```
 
 `--offset`/`--limit` paginate `list`/`search`; omit `--limit` to mean "all
@@ -67,7 +67,7 @@ Only when the task concerns "the current version of X" and X might have been
 superseded:
 
 ```bash
-ef query resolve-current REQ-031 --format json --no-input
+spec query resolve-current REQ-031 --format json --no-input
 ```
 
 `resolve-current` is the only query that resolves supersession implicitly.
@@ -77,7 +77,7 @@ not silently follow `superseded-by`.
 ## Stage 3 - load full context for exactly the selected IDs
 
 ```bash
-ef query lookup REQ-070 --projection full --format json --no-input
+spec query lookup REQ-070 --projection full --format json --no-input
 ```
 
 `--projection` defaults to `full` (summary + Markdown `body`). Call this once
@@ -93,7 +93,7 @@ Resource bytes are never bundled into any query result. After Stage 3 shows
 you the owner's `resources[]` descriptors, read exactly the one you need:
 
 ```bash
-ef resource read REQ-070 .engineering/resources/REQ-070/search-filter.schema.json
+spec resource read REQ-070 .engineering/resources/REQ-070/search-filter.schema.json
 ```
 
 This command has no `--format` flag and prints raw bytes on success with no
@@ -105,10 +105,10 @@ neither should this Skill.
 ## Other read-only query shapes, used when the task needs them
 
 ```bash
-ef query relations REQ-031 --direction incoming --format json --no-input
-ef query relations REQ-031 --direction both --type derived-from --format json --no-input
-ef query trace PRD-012 --type derived-from --direction incoming --max-depth 4 --format json --no-input
-ef query history REQ-031 --format json --no-input
+spec query relations REQ-031 --direction incoming --format json --no-input
+spec query relations REQ-031 --direction both --type derived-from --format json --no-input
+spec query trace PRD-012 --type derived-from --direction incoming --max-depth 4 --format json --no-input
+spec query history REQ-031 --format json --no-input
 ```
 
 `relations`, `trace`, `impact`, `history`, and `resolve-current` all require

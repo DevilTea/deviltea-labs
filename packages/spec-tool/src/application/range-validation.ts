@@ -22,7 +22,7 @@
  * `query-history.ts` already reuses for its own first-parent walk), or
  * EF-STATE REMOVAL (present -> absent, `EF-VAL-013`, which stops the walk).
  * This makes the boundary set this module evaluates IDENTICAL to the set
- * `ef query history`'s first-parent walk later consumes: a range that
+ * `spec query history`'s first-parent walk later consumes: a range that
  * validates as complete and valid cannot later be reported as untrusted
  * authoritative history by that walk over the same published commits.
  *

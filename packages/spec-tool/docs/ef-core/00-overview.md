@@ -417,11 +417,11 @@ transitive graph context are never loaded automatically.
 EF Core v1 keeps the CLI deliberately small:
 
 ```text
-ef init
-ef artifact create
-ef validate
-ef query
-ef resource read
+spec init
+spec artifact create
+spec validate
+spec query
+spec resource read
 ```
 
 `init` creates a new EF project, while `artifact create` creates only new draft

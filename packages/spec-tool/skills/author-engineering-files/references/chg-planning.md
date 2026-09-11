@@ -39,11 +39,11 @@ have to be) for:
 - `draft -> retired`;
 - creating, editing, or retiring a draft CHG;
 - the atomic project bootstrap state, before its first authoritative
-  integration - `ef init`'s own output plus any initial draft/active
+  integration - `spec init`'s own output plus any initial draft/active
   knowledge authored per `references/existing-project-bootstrap.md`;
 - pre-integration provisional-ID collision repair.
 
-When unsure whether a target is "active," check its `status` with `ef query
+When unsure whether a target is "active," check its `status` with `spec query
 lookup <id> --projection summary --format json --no-input` (see
 `references/context-discovery.md`) before deciding.
 
@@ -52,12 +52,12 @@ lookup <id> --projection summary --format json --no-input` (see
 1. Create the draft CHG file:
 
    ```bash
-   ef artifact create chg \
+   spec artifact create chg \
      --title "<text>" \
      --summary "<text>" \
      --format json --no-input --dry-run
    # then, after human confirmation:
-   ef artifact create chg \
+   spec artifact create chg \
      --title "<text>" \
      --summary "<text>" \
      --format json --no-input --yes
@@ -138,10 +138,10 @@ target.
 
 ## What this Skill does not do
 
-- It does not publish, commit, or move any branch ref. `ef validate` (next
+- It does not publish, commit, or move any branch ref. `spec validate` (next
   step) never authorizes or performs publication; that boundary belongs to
   the human/CI integration operation described in `13-cli-contract.md` §
-  Engineering Transaction Boundary, outside this Skill and outside the `ef`
+  Engineering Transaction Boundary, outside this Skill and outside the `spec`
   CLI itself.
 - It does not decide for the human whether a rationale is adequate or a
   verification claim is true - those are attestations, not something

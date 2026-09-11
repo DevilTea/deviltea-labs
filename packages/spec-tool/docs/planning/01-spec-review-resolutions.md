@@ -64,7 +64,7 @@ location is not beneath its owner's managed Resource directory") in
 `06-resources.md` and the registry. `EF-RES-007` remains scoped to root escape
 and path normalization.
 
-### 5. `ef resource read` failure exit codes were unmapped
+### 5. `spec resource read` failure exit codes were unmapped
 
 `13-cli-contract.md` listed five preconditions but mapped no failure class to
 exit `1` versus exit `2`, and the surrounding contracts provided conflicting

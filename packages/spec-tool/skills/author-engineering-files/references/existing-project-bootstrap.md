@@ -11,15 +11,15 @@ behavior, docs, tests, CI, Git history - but has never used EF: no
 When the state is ambiguous, ask the human which case applies; never equate
 "no `.engineering/`" with "init and bootstrap immediately."
 
-This is a workflow over the existing `ef` commands only. There is no import,
+This is a workflow over the existing `spec` commands only. There is no import,
 migration, repository-analysis, edit, or activation command in the CLI, and
 this Skill never pretends otherwise: repository interpretation happens here,
-in the Agent workflow; `ef` stays the deterministic primitive and validator.
+in the Agent workflow; `spec` stays the deterministic primitive and validator.
 
 ## Step 0 - confirm first-time adoption
 
 - The target is exactly an existing Git worktree root.
-- `ef query lookup PROJECT --format json --no-input` finds no project
+- `spec query lookup PROJECT --format json --no-input` finds no project
   (`found: false`, or discovery fails because no `.engineering/` exists),
   and the human confirms no authoritative EF history exists elsewhere for
   this repository.
@@ -27,10 +27,10 @@ in the Agent workflow; `ef` stays the deterministic primitive and validator.
   guess or default it. Bootstrap validation (Step 8) will prove no prior
   `.engineering/ef.yaml` exists in that ref's history at validation time; if
   EF history already exists there, bootstrap is the wrong workflow entirely.
-- Resumption: if a prior session already ran `ef init` (local
+- Resumption: if a prior session already ran `spec init` (local
   `.engineering/` exists) but the candidate has never been integrated, this
   workflow resumes at the appropriate later step (Step 5-8) instead of
-  starting over; never rerun `ef init` in that case. Resumption requires
+  starting over; never rerun `spec init` in that case. Resumption requires
   the same proof as elsewhere: a valid completed local EF project (a
   partial `.engineering/` - e.g. `ef.yaml` absent or an init marker left
   behind - is EF-VAL-012 / incomplete initialization; stop and surface it
@@ -59,7 +59,7 @@ reading is staged and bounded - never "read every file":
    history, issues, and PRs only when they materially clarify intent or a
    historical decision.
 
-This phase is strictly read-only: no file edits, no `ef` mutations. Its
+This phase is strictly read-only: no file edits, no `spec` mutations. Its
 license expires the moment the first authoritative EF state is integrated -
 after that, the staged queries in `references/context-discovery.md` answer
 EF questions, and repository archaeology is never again a substitute for
@@ -93,13 +93,13 @@ not an EF file format and never gets written into Artifact bodies as-is.
 ## Step 3 - human-confirmed initial knowledge inventory
 
 Propose one complete inventory and let the human accept, edit, or reject
-every entry before any `ef` mutation runs. Use the existing Artifact
+every entry before any `spec` mutation runs. Use the existing Artifact
 semantics:
 
 - **PROJECT** - vision, scope, non-goals, context, accepted terminology.
   PROJECT is special: exactly one exists, it is always `active`, and it is
-  created only by `ef init` in Step 4 - never by `ef artifact create`. The
-  draft/active status boundary below, and the `ef artifact create` loop in
+  created only by `spec init` in Step 4 - never by `spec artifact create`. The
+  draft/active status boundary below, and the `spec artifact create` loop in
   Step 5, apply only to PRD/REQ/ADR/POL entries.
 - **Terminology candidates** - recurring or domain-specific terms surfaced by
   Step 1 archaeology (README/docs prose, code and API identifiers, tests,
@@ -140,7 +140,7 @@ entry:
 If the human additionally accepts PROJECT relations (PROJECT's only allowed
 outgoing relation type is `references` - see the type table in
 `references/draft-authoring.md`) or PROJECT-owned Resources, these do not go
-through the loop above: `ef init` has no flags for relations or Resources.
+through the loop above: `spec init` has no flags for relations or Resources.
 Step 4 materializes PROJECT-owned Resources by direct edit; PROJECT
 `references` relations are deferred to Step 5, after the ID allocator
 issues their targets' IDs.
@@ -159,11 +159,11 @@ issues their targets' IDs.
 
 ## Step 4 - initialize EF
 
-Reuse only the `ef init` procedure from `references/project-init.md`: its
+Reuse only the `spec init` procedure from `references/project-init.md`: its
 preconditions to confirm with the human, and its `--dry-run` plan -> human
 confirmation -> identical command with `--yes` sequence, using the confirmed
 integration ref and the human-accepted PROJECT content from the inventory -
-including any Terminology candidates accepted in Step 3, passed as `ef
+including any Terminology candidates accepted in Step 3, passed as `spec
 init`'s `--terminology` Markdown table (`references/project-init.md`). Doing
 so puts the accepted glossary into the initial PROJECT state directly, so
 that filling the table does not routinely require an immediate post-bootstrap
@@ -193,8 +193,8 @@ whose IDs do not exist until the Step 5 allocator issues them.
 On a resumed session, before creating anything: inventory the existing
 local candidate state with read-only queries, for example:
 
-- `ef query list --format json --no-input`
-- `ef query lookup <id> --projection summary --format json --no-input`
+- `spec query list --format json --no-input`
+- `spec query lookup <id> --projection summary --format json --no-input`
   for a specific entry
 
 Then re-establish, with the human, the mapping from accepted inventory
@@ -217,14 +217,14 @@ one of `prd`, `req`, `adr`, `pol` - never `chg` during bootstrap, and
 PROJECT is never created this way:
 
 ```bash
-ef artifact create <type> \
+spec artifact create <type> \
   --title "<text>" \
   --summary "<text>" \
   --format json \
   --no-input \
   --dry-run
 # show the plan; after human confirmation, identical command with --yes:
-ef artifact create <type> \
+spec artifact create <type> \
   --title "<text>" \
   --summary "<text>" \
   --format json \
@@ -257,7 +257,7 @@ bootstrap state.
 ## Step 6 - validate the complete working tree
 
 ```bash
-ef validate --scope snapshot --format json --no-input
+spec validate --scope snapshot --format json --no-input
 ```
 
 Run the fix-reverify loop from `references/validation-and-diagnostics.md`
@@ -267,7 +267,7 @@ until the complete initial graph is valid.
 
 Have the human (or their ordinary Git tooling) create exactly one commit
 containing the complete candidate `.engineering/` tree.
-`ef validate --scope bootstrap` resolves the configured integration ref
+`spec validate --scope bootstrap` resolves the configured integration ref
 fresh when it runs, so place the candidate against the ref's state as
 observed immediately before building it, not against any earlier
 observation: if the ref resolves at that moment, the candidate's first
@@ -309,7 +309,7 @@ transaction boundary of `13-cli-contract.md` stays outside it.
 ## Step 8 - bootstrap-validate the exact commit
 
 ```bash
-ef validate --scope bootstrap --proposed <full-commit-oid> --format json --no-input
+spec validate --scope bootstrap --proposed <full-commit-oid> --format json --no-input
 ```
 
 Report `complete`, `valid`, `counts`, `exit_code`, and every diagnostic to

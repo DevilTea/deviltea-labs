@@ -2588,7 +2588,7 @@ describe('applyInitPlan', () => {
 		})
 	})
 
-	// Issue #7 P1: a SUCCESSFUL `ef init`, followed by committing the bootstrap
+	// Issue #7 P1: a SUCCESSFUL `spec init`, followed by committing the bootstrap
 	// and later rolling back to the pre-init commit (`git reset --hard`), must
 	// leave no EF-created residue -- neither a canonical Artifact/Resource
 	// directory (never planned at all, per `computeInitPlan`) nor the

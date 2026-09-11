@@ -46,7 +46,7 @@ export function renderValidationHuman(json: ValidationResultJson, useColor: bool
 	const statusText = json.valid ? color(useColor, '32', 'valid') : color(useColor, '31', 'invalid')
 	const completeness = json.complete ? 'complete' : 'incomplete'
 	const lines = [
-		`ef validate --scope ${json.scope}: ${statusText} (${completeness})`,
+		`spec validate --scope ${json.scope}: ${statusText} (${completeness})`,
 		`errors=${json.counts.error} warnings=${json.counts.warning} info=${json.counts.info}`,
 		...renderDiagnostics(json.diagnostics, useColor),
 	]
@@ -60,7 +60,7 @@ export function renderMutationHuman(json: MutationResultJson, useColor: boolean)
 			? color(useColor, '36', 'planned (dry run)')
 			: color(useColor, '33', 'not applied')
 	const lines = [
-		`ef ${json.kind}: ${statusText}`,
+		`spec ${json.kind}: ${statusText}`,
 		...json.changes.map(change => `  ${change.action} ${change.path}`),
 		...renderDiagnostics(json.diagnostics, useColor),
 	]
@@ -72,5 +72,5 @@ export function renderQueryHuman(json: Record<string, unknown>): string {
 }
 
 export function renderVersionHuman(version: string): string {
-	return `ef ${version}\n`
+	return `spec ${version}\n`
 }

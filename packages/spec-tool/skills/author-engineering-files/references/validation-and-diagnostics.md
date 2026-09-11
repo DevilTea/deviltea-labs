@@ -9,7 +9,7 @@ After any authoring session that touched the working tree (a new draft, a
 draft edit, or a CHG-backed active change), run:
 
 ```bash
-ef validate --scope snapshot --format json --no-input
+spec validate --scope snapshot --format json --no-input
 ```
 
 `--scope` defaults to `snapshot` if omitted, but pass it explicitly for
@@ -77,7 +77,7 @@ line, column, code):
      decision (e.g. an ambiguous relation target, a genuinely disputed
      rationale) - ask instead.
 4. After fixing every diagnostic you can address directly, re-run the exact
-   same `ef validate` command (same scope and flags) and re-read the new
+   same `spec validate` command (same scope and flags) and re-read the new
    result. Do not assume a fix worked without re-running.
 5. Repeat until `exit_code` is `0`, or the remaining diagnostics require a
    human decision this Skill has surfaced and is waiting on.
@@ -97,7 +97,7 @@ baseline, then advancing `integration_ref` atomically to that commit. Follow
 this order; do not skip or reorder a step:
 
 1. Finish authoring in the working tree and drive it to
-   `ef validate --scope snapshot --format json --no-input` `exit_code: 0`
+   `spec validate --scope snapshot --format json --no-input` `exit_code: 0`
    (the loop above).
 2. Create the candidate commit (for example `git commit`) WITHOUT moving the
    authoritative `integration_ref` (for example `refs/heads/main`). The
@@ -108,7 +108,7 @@ this order; do not skip or reorder a step:
    `--scope transition` (an EF state already exists):
 
    ```bash
-   ef validate --scope transition \
+   spec validate --scope transition \
      --baseline <trusted-baseline-oid> \
      --proposed <candidate-commit-oid> \
      --strict --format json --no-input
@@ -117,7 +117,7 @@ this order; do not skip or reorder a step:
    or, for a repository's very first EF state:
 
    ```bash
-   ef validate --scope bootstrap \
+   spec validate --scope bootstrap \
      --proposed <candidate-commit-oid> \
      --format json --no-input
    ```
@@ -173,7 +173,7 @@ each commit one at a time with repeated `--scope transition`/`--scope
 bootstrap` calls:
 
 ```bash
-ef validate --scope range \
+spec validate --scope range \
   --baseline <trusted-range-baseline-oid> \
   --proposed <proposed-tip-commit-oid> \
   --format json --no-input
@@ -192,8 +192,8 @@ The same JSON contract backs editor and CI use, so the identical command is
 safe to suggest there too:
 
 ```bash
-ef validate --scope snapshot --format json --no-input
-ef query lookup REQ-031 --projection full --format json
+spec validate --scope snapshot --format json --no-input
+spec query lookup REQ-031 --projection full --format json
 ```
 
 CI transition checks use `--scope transition --baseline <oid> --proposed

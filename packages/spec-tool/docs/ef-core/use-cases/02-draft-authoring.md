@@ -10,7 +10,7 @@ valid type (`prd`, `req`, `adr`, `pol`, or `chg`), title, and summary.
 
 **Main flow:**
 
-1. The author runs `ef artifact create <type>`.
+1. The author runs `spec artifact create <type>`.
 2. EF allocates the next provisional type-scoped numeric ID after the greatest
    authoritative or current provisional number visible in the working graph,
    without filling gaps.

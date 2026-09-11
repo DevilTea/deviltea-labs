@@ -2,7 +2,7 @@
 /**
  * Packed-package consumer smoke test (docs/planning/00-implementation-decisions.md
  * "Testing and Verification": "installing the output of `pnpm pack` and
- * invoking the installed `ef` binary"; "exact stdout, stderr, JSON shape,
+ * invoking the installed `spec` binary"; "exact stdout, stderr, JSON shape,
  * trailing newline, and exit-code assertions"; "byte-for-byte `resource
  * read` assertions"; "CI execution on Ubuntu, macOS, and Windows with
  * supported Node.js versions").
@@ -10,7 +10,7 @@
  * Plain Node.js script, no test framework: packs the current working tree
  * with `pnpm pack`, installs the resulting tarball into a clean throwaway
  * npm consumer project (the way a real downstream consumer would), and
- * exercises the installed `ef` binary end to end. Every assertion is exact
+ * exercises the installed `spec` binary end to end. Every assertion is exact
  * -- byte-level for the raw-transport failure cases, full JSON-shape for the
  * JSON envelopes -- rather than a loose "it ran" smoke check, per the linked
  * decisions doc.
@@ -19,7 +19,7 @@
  * script in `package.json` runs `pnpm build` first); this script only packs
  * and consumes the existing build output.
  *
- * When the `EF_SMOKE_TARBALL` environment variable is set to an absolute
+ * When the `SPEC_SMOKE_TARBALL` environment variable is set to an absolute
  * path, that tarball is installed directly and the internal build+pack step
  * is skipped. CI uses this to build and pack the package once on Node.js 24
  * and reuse the resulting tarball for the packed-consumer runs on every
@@ -69,7 +69,7 @@ function truncateForDetail(text) {
 	return `${text.slice(0, MAX_OUTPUT_DETAIL_BYTES)}... [truncated, ${text.length} chars total]`
 }
 
-/** Full stdout/stderr (truncated) for a `runCli`/`runEf` result, appended to assertion failure details so a failing CI run shows the actual JSON diagnostics instead of just "expected/got". */
+/** Full stdout/stderr (truncated) for a `runCli`/`runSpec` result, appended to assertion failure details so a failing CI run shows the actual JSON diagnostics instead of just "expected/got". */
 function describeCliResult(result) {
 	return `stdout=${JSON.stringify(truncateForDetail(result.stdout.toString('utf8')))} stderr=${JSON.stringify(truncateForDetail(result.stderr.toString('utf8')))}`
 }
@@ -129,9 +129,9 @@ function runSetupCliTool(command, args, options = {}) {
 	return runSetup(command, args, options)
 }
 
-/** Runs an `ef` invocation under test; never throws -- exit code and output are the assertions' subject, not a script-level failure. */
-function runEf(efBinary, args, options = {}) {
-	return spawnSync(efBinary, args, {
+/** Runs a `spec` invocation under test; never throws -- exit code and output are the assertions' subject, not a script-level failure. */
+function runSpec(specBinary, args, options = {}) {
+	return spawnSync(specBinary, args, {
 		cwd: options.cwd,
 		encoding: 'buffer',
 		env: { ...process.env, ...options.env },
@@ -149,23 +149,23 @@ function parseJsonOrUndefined(buffer) {
 }
 
 function main() {
-	const temporaryDirectory = mkdtempSync(join(tmpdir(), 'deviltea-ef-smoke-'))
+	const temporaryDirectory = mkdtempSync(join(tmpdir(), 'deviltea-spec-smoke-'))
 
 	try {
 		// ---- Obtain a tarball of the build output -------------------------------
 		//
-		// `EF_SMOKE_TARBALL` (an absolute path), when set, skips the internal
+		// `SPEC_SMOKE_TARBALL` (an absolute path), when set, skips the internal
 		// build+pack step and installs that tarball directly. CI packs once on
 		// Node.js 24 and reuses the tarball across every OS/Node.js matrix leg.
 
-		const suppliedTarballPath = process.env.EF_SMOKE_TARBALL
+		const suppliedTarballPath = process.env.SPEC_SMOKE_TARBALL
 		let tarballPath
 
 		if (suppliedTarballPath) {
 			if (!isAbsolute(suppliedTarballPath))
-				throw new Error(`EF_SMOKE_TARBALL must be an absolute path, got: ${suppliedTarballPath}`)
+				throw new Error(`SPEC_SMOKE_TARBALL must be an absolute path, got: ${suppliedTarballPath}`)
 			if (!existsSync(suppliedTarballPath))
-				throw new Error(`EF_SMOKE_TARBALL does not exist: ${suppliedTarballPath}`)
+				throw new Error(`SPEC_SMOKE_TARBALL does not exist: ${suppliedTarballPath}`)
 			tarballPath = suppliedTarballPath
 		}
 		else {
@@ -186,28 +186,28 @@ function main() {
 		runSetupCliTool(npm, ['install', tarballPath], { cwd: consumerDirectory })
 
 		// The installed binary is a POSIX shell script plus a `.cmd` shim on
-		// Windows (`node_modules/.bin/ef.cmd`); `spawnSync` with `shell: false`
+		// Windows (`node_modules/.bin/spec.cmd`); `spawnSync` with `shell: false`
 		// cannot execute a `.cmd` shim directly (it is not a native executable),
 		// so on Windows the CLI is invoked directly through Node.js against the
 		// installed package's entry point instead. The shim file's existence is
 		// still asserted so packaging regressions that drop the generated bin
 		// shim are caught on every platform.
 
-		const efBinaryName = process.platform === 'win32' ? 'ef.cmd' : 'ef'
-		const efBinaryShim = join(consumerDirectory, 'node_modules', '.bin', efBinaryName)
-		assert('installed ef binary exists', existsSync(efBinaryShim), `expected binary at ${efBinaryShim}`)
+		const specBinaryName = process.platform === 'win32' ? 'spec.cmd' : 'spec'
+		const specBinaryShim = join(consumerDirectory, 'node_modules', '.bin', specBinaryName)
+		assert('installed spec binary exists', existsSync(specBinaryShim), `expected binary at ${specBinaryShim}`)
 
-		const efEntryPoint = join(consumerDirectory, 'node_modules', '@deviltea', 'ef', 'dist', 'cli.mjs')
-		const efBinary = process.platform === 'win32' ? process.execPath : efBinaryShim
-		const efBinaryArgsPrefix = process.platform === 'win32' ? [efEntryPoint] : []
+		const specEntryPoint = join(consumerDirectory, 'node_modules', '@deviltea', 'spec-tool', 'dist', 'cli.mjs')
+		const specBinary = process.platform === 'win32' ? process.execPath : specBinaryShim
+		const specBinaryArgsPrefix = process.platform === 'win32' ? [specEntryPoint] : []
 
-		/** Invokes the installed `ef` binary under test with the platform-appropriate launcher. */
+		/** Invokes the installed `spec` binary under test with the platform-appropriate launcher. */
 		function runCli(args, options = {}) {
-			return runEf(efBinary, [...efBinaryArgsPrefix, ...args], options)
+			return runSpec(specBinary, [...specBinaryArgsPrefix, ...args], options)
 		}
 
 		const installedPackageJson = JSON.parse(readFileSync(
-			join(consumerDirectory, 'node_modules', '@deviltea', 'ef', 'package.json'),
+			join(consumerDirectory, 'node_modules', '@deviltea', 'spec-tool', 'package.json'),
 			'utf8',
 		))
 
@@ -215,7 +215,7 @@ function main() {
 		// "Agent Skills": "Skills ship in the npm tarball ... under the same
 		// release tag as the CLI.") ------------------------------------------
 
-		const installedSkillsDirectory = join(consumerDirectory, 'node_modules', '@deviltea', 'ef', 'skills')
+		const installedSkillsDirectory = join(consumerDirectory, 'node_modules', '@deviltea', 'spec-tool', 'skills')
 		assert('installed package ships skills/', existsSync(installedSkillsDirectory), `expected ${installedSkillsDirectory}`)
 		for (const skillName of ['author-engineering-files', 'review-engineering-change']) {
 			const skillFile = join(installedSkillsDirectory, skillName, 'SKILL.md')
@@ -226,7 +226,7 @@ function main() {
 			assert('installed package ships the existing-project bootstrap reference', existsSync(brownfieldReference), `expected ${brownfieldReference}`)
 		}
 
-		// ---- (a) ef version --format json --------------------------------------
+		// ---- (a) spec version --format json --------------------------------------
 
 		{
 			const result = runCli(['version', '--format', 'json'], { cwd: consumerDirectory })
@@ -243,8 +243,8 @@ function main() {
 			assertEqual('version: version matches installed package.json', parsed?.version, installedPackageJson.version, describeCliResult(result))
 		}
 
-		// ---- (b) ef help / ef -h / ef --help (13-cli-contract.md "Version and
-		// Help": "-h"/"--help" are aliases of "ef help [command]" on every
+		// ---- (b) spec help / spec -h / spec --help (13-cli-contract.md "Version and
+		// Help": "-h"/"--help" are aliases of "spec help [command]" on every
 		// command and subcommand of the installed binary, always exit 0, and
 		// are never wrapped in the JSON envelope even with --format json.) -----
 
@@ -256,11 +256,11 @@ function main() {
 
 			const shortFlagResult = runCli(['-h'], { cwd: consumerDirectory })
 			assertEqual('-h: exit code', shortFlagResult.status, 0, describeCliResult(shortFlagResult))
-			assertEqual('-h: stdout matches ef help', shortFlagResult.stdout.toString('utf8'), helpStdout, describeCliResult(shortFlagResult))
+			assertEqual('-h: stdout matches spec help', shortFlagResult.stdout.toString('utf8'), helpStdout, describeCliResult(shortFlagResult))
 
 			const longFlagResult = runCli(['--help'], { cwd: consumerDirectory })
 			assertEqual('--help: exit code', longFlagResult.status, 0, describeCliResult(longFlagResult))
-			assertEqual('--help: stdout matches ef help', longFlagResult.stdout.toString('utf8'), helpStdout, describeCliResult(longFlagResult))
+			assertEqual('--help: stdout matches spec help', longFlagResult.stdout.toString('utf8'), helpStdout, describeCliResult(longFlagResult))
 
 			// A subcommand's own -h/--help must also succeed, even though this
 			// installed binary has no project at `consumerDirectory` for "version"
@@ -276,7 +276,7 @@ function main() {
 		const projectDirectory = join(temporaryDirectory, 'project')
 		mkdirSync(projectDirectory)
 		runSetup(git, ['init', '--initial-branch=main'], { cwd: projectDirectory })
-		runSetup(git, ['config', 'user.email', 'ef-smoke@example.com'], { cwd: projectDirectory })
+		runSetup(git, ['config', 'user.email', 'spec-smoke@example.com'], { cwd: projectDirectory })
 		runSetup(git, ['config', 'user.name', 'EF Smoke Test'], { cwd: projectDirectory })
 
 		// A pre-EF commit on `main` (the configured `integration_ref`), kept as
@@ -288,7 +288,7 @@ function main() {
 		const preEfOid = runSetup(git, ['rev-parse', 'HEAD'], { cwd: projectDirectory }).stdout.trim()
 		runSetup(git, ['checkout', '-b', 'incoming'], { cwd: projectDirectory })
 
-		// ---- (c) ef init --------------------------------------------------------
+		// ---- (c) spec init --------------------------------------------------------
 
 		{
 			const result = runCli([
@@ -324,7 +324,7 @@ function main() {
 		runSetup(git, ['add', '-A'], { cwd: projectDirectory })
 		runSetup(git, ['commit', '-m', 'bootstrap EF state'], { cwd: projectDirectory })
 
-		// ---- (d) ef artifact create req ------------------------------------------
+		// ---- (d) spec artifact create req ------------------------------------------
 
 		{
 			const result = runCli([
@@ -354,7 +354,7 @@ function main() {
 		runSetup(git, ['commit', '-m', 'add REQ-001'], { cwd: projectDirectory })
 		const secondEfOid = runSetup(git, ['rev-parse', 'HEAD'], { cwd: projectDirectory }).stdout.trim()
 
-		// ---- (e) ef validate --scope snapshot ------------------------------------
+		// ---- (e) spec validate --scope snapshot ------------------------------------
 
 		{
 			const result = runCli(['validate', '--scope', 'snapshot', '--format', 'json'], { cwd: projectDirectory })
@@ -365,7 +365,7 @@ function main() {
 			assertEqual('validate snapshot: valid', parsed?.valid, true, describeCliResult(result))
 		}
 
-		// ---- (e2) ef validate --scope range --------------------------------------
+		// ---- (e2) spec validate --scope range --------------------------------------
 		//
 		// Real Git objects over a real multi-commit first-parent range (a
 		// BOOTSTRAP boundary followed by an ordinary TRANSITION boundary),
@@ -397,7 +397,7 @@ function main() {
 			assertEqual('validate range: expected_ref_oid', parsed?.expected_ref_oid, preEfOid, describeCliResult(result))
 		}
 
-		// ---- (f) ef resource read failure (byte-level) ---------------------------
+		// ---- (f) spec resource read failure (byte-level) ---------------------------
 
 		{
 			const result = runCli(['resource', 'read', 'REQ-999', 'x'], { cwd: projectDirectory })

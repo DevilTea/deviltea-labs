@@ -4,7 +4,7 @@
 
 **User Story:** As an engineer, I want exact and filtered discovery of known Artifacts so I can select trustworthy context before loading full details.
 
-**Main flow:** Use `ef query lookup <id>` with summary/full projection for one exact ID, or `ef query list` with exact type/status/schema/tag/relation/Resource filters and optional offset/limit. Select matching summary IDs explicitly.
+**Main flow:** Use `spec query lookup <id>` with summary/full projection for one exact ID, or `spec query list` with exact type/status/schema/tag/relation/Resource filters and optional offset/limit. Select matching summary IDs explicitly.
 
 **Success assertions:** Lookup returns the exact historical Artifact, never an automatic replacement; lists sort by Artifact ID before pagination; filter categories combine with AND while documented repeated values retain OR/AND semantics; empty lookup/list outcomes are complete normal results.
 
@@ -17,7 +17,7 @@ incomplete with no partial data.
 
 **User Story:** As a researcher, I want deterministic full-text discovery so I can find candidate knowledge without hidden relevance judgments.
 
-**Main flow:** Run `ef query search <term>...`, optionally case-sensitive. EF NFC-normalizes terms and searchable text, case-folds by default, requires every term to match the same Artifact, and reports stable source matches.
+**Main flow:** Run `spec query search <term>...`, optionally case-sensitive. EF NFC-normalizes terms and searchable text, case-folds by default, requires every term to match the same Artifact, and reports stable source matches.
 
 **Success assertions:** Search includes title, summary, tags, Markdown body, Resource location, and Resource description; results sort by ID; pagination is per Artifact; a match reports its original scalar/line with stable field priority and source coordinates when available.
 
@@ -27,7 +27,7 @@ incomplete with no partial data.
 
 **User Story:** As a reviewer, I want to navigate exact graph edges and bounded transitive dependencies so I can understand provenance without accidental graph expansion.
 
-**Main flow:** Use `ef query relations <id>` with outgoing/incoming/both and optional types; or use `ef query trace <root>... --type ... --direction ... --max-depth ...`. EF returns canonical source/type/target edges and a bounded BFS subgraph.
+**Main flow:** Use `spec query relations <id>` with outgoing/incoming/both and optional types; or use `spec query trace <root>... --type ... --direction ... --max-depth ...`. EF returns canonical source/type/target edges and a bounded BFS subgraph.
 
 **Success assertions:** Incoming edges retain stored direction rather than being renamed; trace roots are depth 0, nodes retain shortest depth, cyclic references do not loop, and selected edges/nodes have stable ordering.
 
@@ -39,7 +39,7 @@ necessary graph produces an incomplete result with no partial data.
 
 **User Story:** As a change planner, I want to resolve a legacy Artifact or inspect potential downstream review candidates so I can act on current truth without losing history.
 
-**Main flow:** Use `ef query resolve-current <id>` for the exact replacement subgraph and all active leaves. For possible impact, use `ef query impact <root>... --max-depth <n>` and opt into references, non-current candidates, or root resolution only when needed.
+**Main flow:** Use `spec query resolve-current <id>` for the exact replacement subgraph and all active leaves. For possible impact, use `spec query impact <root>... --max-depth <n>` and opt into references, non-current candidates, or root resolution only when needed.
 
 **Success assertions:** Active PRD, REQ, ADR, and POL Artifacts resolve to
 themselves; PROJECT resolves to itself; superseded knowledge resolves to all
@@ -53,7 +53,7 @@ candidates and keeps roots as context depth-0 nodes.
 
 **User Story:** As an auditor, I want the lifecycle/effect and aggregate-file history of an exact Artifact so I can reconstruct when and how it changed.
 
-**Main flow:** Run `ef query history <id>`. EF materializes the complete
+**Main flow:** Run `spec query history <id>`. EF materializes the complete
 configured authoritative first-parent history, gathers incoming completed CHG
 effects, and finds commits changing the Artifact aggregate: its Markdown file
 and owned Resources, plus `.engineering/ef.yaml` and
@@ -73,7 +73,7 @@ and owned Resources, plus `.engineering/ef.yaml` and
 2. Use list, literal search, or impact to discover summaries.
 3. Select exact IDs; resolve current only when requested.
 4. Load chosen full Artifacts.
-5. Read one selected local Resource with `ef resource read <owner-id> <location>`.
+5. Read one selected local Resource with `spec resource read <owner-id> <location>`.
 
 **Success assertions:** Resource read verifies exact owner, descriptor, ownership, local managed path, existence, and readability, then emits exactly raw file bytes; query JSON never includes Resource bytes.
 

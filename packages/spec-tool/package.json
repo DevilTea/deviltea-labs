@@ -1,24 +1,25 @@
 {
-	"name": "@deviltea/ef",
+	"name": "@deviltea/spec-tool",
 	"type": "module",
 	"publishConfig": {
 		"access": "public"
 	},
 	"version": "0.0.2",
+	"description": "Git-native engineering specification maintenance and collaboration tool.",
 	"author": "DevilTea <ch19980814@gmail.com>",
 	"license": "MIT",
-	"homepage": "https://github.com/DevilTea/deviltea-labs/tree/main/packages/ef#readme",
+	"homepage": "https://github.com/DevilTea/deviltea-labs/tree/main/packages/spec-tool#readme",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/DevilTea/deviltea-labs.git",
-		"directory": "packages/ef"
+		"directory": "packages/spec-tool"
 	},
 	"bugs": {
 		"url": "https://github.com/DevilTea/deviltea-labs/issues"
 	},
 	"keywords": [],
 	"bin": {
-		"ef": "./dist/cli.mjs"
+		"spec": "./dist/cli.mjs"
 	},
 	"files": [
 		"dist",
@@ -33,7 +34,7 @@
 		"check": "pnpm test && pnpm test:package && pnpm lint",
 		"dev": "tsdown --watch",
 		"lint": "eslint .",
-		"test": "pnpm --workspace-root exec vitest run --root packages/ef --config vitest.config.ts",
+		"test": "pnpm --workspace-root exec vitest run --root packages/spec-tool --config vitest.config.ts",
 		"test:package": "pnpm build && node test/package-smoke.mjs",
 		"typecheck": "pnpm typecheck:package && pnpm typecheck:test",
 		"typecheck:package": "tsc --project ./tsconfig.package.json --noEmit",

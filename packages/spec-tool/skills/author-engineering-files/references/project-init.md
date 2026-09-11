@@ -6,23 +6,23 @@ Initialization.
 ## When this applies
 
 Run this only when no `.engineering/` project exists yet for the target Git
-worktree. If discovery already finds a project (an `ef query lookup PROJECT
---format json` call returns `found: true`), do not run `ef init` again - it
+worktree. If discovery already finds a project (an `spec query lookup PROJECT
+--format json` call returns `found: true`), do not run `spec init` again - it
 refuses to overwrite or merge with an existing `.engineering` path and exits
 `1` as a domain rejection.
 
 For an established (brownfield) codebase adopting EF for the first time,
-this file covers only the `ef init` step: Step 4 of
+this file covers only the `spec init` step: Step 4 of
 `references/existing-project-bootstrap.md` delegates here for that step
 only, then resumes at its own Step 5. That file sequences repository
 archaeology and the human-confirmed initial knowledge inventory around the
-`ef init` step covered here.
+`spec init` step covered here.
 
 ## Preconditions to confirm with the human first
 
 - The target directory is exactly a Git worktree root (not an arbitrary
   subdirectory).
-- The full local integration branch ref, e.g. `refs/heads/main` - `ef init`
+- The full local integration branch ref, e.g. `refs/heads/main` - `spec init`
   requires the complete `refs/heads/...` form, not a short branch name, and
   this ref becomes immutable after bootstrap. Never guess or default this;
   confirm it explicitly even if a branch is already checked out.
@@ -33,7 +33,7 @@ archaeology and the human-confirmed initial knowledge inventory around the
   the human confirm or edit it.
 - Optionally, a `--terminology` Markdown table of accepted terms. Only
   include terms the human has explicitly approved; when in doubt, omit the
-  flag entirely and let `ef init` emit the canonical empty Terminology table
+  flag entirely and let `spec init` emit the canonical empty Terminology table
   (header row, zero data rows) for the human to fill in later as a draft
   edit. For brownfield adoption, accepted terms come from the terminology
   candidates proposed in Step 3 of `references/existing-project-bootstrap.md`
@@ -47,7 +47,7 @@ archaeology and the human-confirmed initial knowledge inventory around the
 Non-interactive invocation, run in two steps:
 
 ```bash
-ef init \
+spec init \
   --title "<text>" \
   --summary "<text>" \
   --vision "<markdown>" \
@@ -68,7 +68,7 @@ ef init \
    `--dry-run` replaced by `--yes`:
 
    ```bash
-   ef init \
+   spec init \
      --title "<text>" \
      --summary "<text>" \
      --vision "<markdown>" \
@@ -96,13 +96,13 @@ for envelope field order rules that also apply to PROJECT).
 
 ## After `init` reports `applied: true`
 
-`ef init` only publishes files to the working tree - it does not commit, and
+`spec init` only publishes files to the working tree - it does not commit, and
 it never updates any branch ref itself.
 
 If this is brownfield adoption and initial PRD/REQ/ADR/POL knowledge still
 needs capturing, do not commit or bootstrap-validate the init-only tree yet:
 return to Step 5 of `references/existing-project-bootstrap.md` (do not
-re-enter that workflow from the top, and do not run `ef init` again) and
+re-enter that workflow from the top, and do not run `spec init` again) and
 produce one complete candidate initial EF state first.
 
 Otherwise (greenfield, nothing further to capture), tell the human the next
@@ -113,7 +113,7 @@ UC-001/UC-043:
 2. Validate it as a bootstrap:
 
    ```bash
-   ef validate --scope bootstrap --proposed <full-commit-oid> --format json --no-input
+   spec validate --scope bootstrap --proposed <full-commit-oid> --format json --no-input
    ```
 
 3. Only a conforming integration operation outside this Skill's scope
@@ -125,10 +125,10 @@ UC-001/UC-043:
 
 - Never pass a short branch name (`main`) as `--integration-ref`; it must be
   the full `refs/heads/...` ref, and there is no hard-coded default.
-- Never retry `ef init` against a directory where a previous attempt may have
+- Never retry `spec init` against a directory where a previous attempt may have
   left a partial `.engineering/` (with or without an initialization marker).
   That state is a domain finding, not something this Skill repairs - surface
   it to the human as `EF-VAL-012` / an incomplete initialization and stop.
 - Never write `--terminology` rows that the human has not approved.
-- `ef init` never runs `git init`, clones anything, or touches unrelated
+- `spec init` never runs `git init`, clones anything, or touches unrelated
   project files.

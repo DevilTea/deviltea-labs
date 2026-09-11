@@ -3,7 +3,7 @@
  * claim-and-complete protocol" step 2; 11-filesystem-and-config.md "Runtime
  * and Derived State").
  *
- * A conforming `ef init` claims `.engineering` with exactly one non-recursive
+ * A conforming `spec init` claims `.engineering` with exactly one non-recursive
  * directory creation. This module distinguishes the domain-relevant
  * already-exists outcome (a concurrent race or a pre-existing path that must
  * never be overwritten or merged with) from any other failure, and -- because

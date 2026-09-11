@@ -6,7 +6,7 @@ Governing use cases: UC-040-UC-045, UC-064. Governing specs:
 ## Command shape
 
 ```text
-ef validate [--scope snapshot|transition|bootstrap|range]
+spec validate [--scope snapshot|transition|bootstrap|range]
   --baseline <full-commit-oid>
   --proposed <full-commit-oid>
   --strict
@@ -59,7 +59,7 @@ steps still matters for a correct review:
 ## Reviewing a proposed transition (the primary review command)
 
 ```bash
-ef validate \
+spec validate \
   --scope transition \
   --baseline <full-baseline-commit-oid> \
   --proposed <full-proposed-commit-oid> \
@@ -107,7 +107,7 @@ Authoritative CI runs, and this Skill should reproduce for an equivalent
 review, exactly:
 
 ```bash
-ef validate \
+spec validate \
   --scope transition \
   --baseline <full-commit-oid> \
   --proposed <full-commit-oid> \
@@ -123,7 +123,7 @@ mode. It does not require caches and never publishes.
 ## Reviewing the current tree without a transition (snapshot)
 
 ```bash
-ef validate --scope snapshot --format json --no-input
+spec validate --scope snapshot --format json --no-input
 ```
 
 Use this only to check that the current on-disk tree is internally valid
@@ -134,7 +134,7 @@ CHG is legal - see "Snapshot vs. transition" in `SKILL.md`.
 ## Reviewing a first-time bootstrap
 
 ```bash
-ef validate --scope bootstrap --proposed <full-commit-oid> --format json --no-input
+spec validate --scope bootstrap --proposed <full-commit-oid> --format json --no-input
 ```
 
 `--baseline` is invalid in bootstrap scope. Use this only when the requester
@@ -145,7 +145,7 @@ review.
 ## Reviewing a multi-commit range
 
 ```bash
-ef validate --scope range \
+spec validate --scope range \
   --baseline <full-range-baseline-commit-oid> \
   --proposed <full-proposed-commit-oid> \
   --format json --no-input

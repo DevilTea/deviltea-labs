@@ -113,8 +113,8 @@ Exit Codes), with priority `3 > 2 > 1 > 0`:
 | `2` | The requested operation could not complete (invalid invocation, discovery failure, unavailable baseline/proposed commit, missing required input) |
 | `3` | Internal implementation failure |
 
-For `ef query *`, exit is simply `0` when `complete: true` and `2` when
+For `spec query *`, exit is simply `0` when `complete: true` and `2` when
 `complete: false` - query has no separate validity/warnings axis. For
-`ef validate`, `exit_code` in the JSON envelope always matches the process
+`spec validate`, `exit_code` in the JSON envelope always matches the process
 exit status; report both the JSON fields and the exit code together, and
 never round exit `1` (a real domain rejection) down to "looks fine."

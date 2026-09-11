@@ -19,13 +19,13 @@ editor.
 EF Core v1 defines these commands:
 
 ```text
-ef init
-ef artifact create
-ef validate
-ef query
-ef resource read
-ef version
-ef help
+spec init
+spec artifact create
+spec validate
+spec query
+spec resource read
+spec version
+spec help
 ```
 
 Implementations MUST NOT assign incompatible behavior to these command paths.
@@ -43,7 +43,7 @@ Commands that operate on a project accept:
 --project <project-root>
 ```
 
-When omitted, [Filesystem and Configuration](11-filesystem-and-config.md) upward discovery applies except for `ef init`, whose
+When omitted, [Filesystem and Configuration](11-filesystem-and-config.md) upward discovery applies except for `spec init`, whose
 target-selection rule is defined below. There is no process-global or
 user-global current-project state.
 
@@ -76,7 +76,7 @@ silently ignored.
 ## Project Initialization
 
 ```text
-ef init
+spec init
 ```
 
 `init` initializes EF in an existing Git worktree root. It does not execute
@@ -133,7 +133,7 @@ filesystem publication. It also verifies that the configured local integration
 branch has no `.engineering/ef.yaml` path anywhere in its existing first-parent
 history. This local mutation check does not authorize Git publication: after
 the candidate is committed, authoritative admission requires explicit
-commit-bound `ef validate --scope bootstrap --proposed <full-commit-oid>`.
+commit-bound `spec validate --scope bootstrap --proposed <full-commit-oid>`.
 When `--terminology` is omitted, initialization emits the required PROJECT
 `## Terminology` table with its canonical header and no data rows. When the
 option is present, its value MUST produce a structurally valid canonical table;
@@ -144,7 +144,7 @@ term entry, and MUST NOT invent project terms.
 ## Draft Artifact Creation
 
 ```text
-ef artifact create <type>
+spec artifact create <type>
 ```
 
 The Core v1 type tokens are:
@@ -157,7 +157,7 @@ pol
 chg
 ```
 
-PROJECT is created only by `ef init`.
+PROJECT is created only by `spec init`.
 
 Creation:
 
@@ -185,7 +185,7 @@ provided because issued authoritative files are never physically deleted.
 ## Validation Command
 
 ```text
-ef validate [--scope snapshot|transition|bootstrap|range]
+spec validate [--scope snapshot|transition|bootstrap|range]
 ```
 
 The default scope is `snapshot`.
@@ -334,14 +334,14 @@ between those two OIDs.
 Query commands map one-to-one to the [Query and Trace](10-query-and-trace.md) query kinds:
 
 ```text
-ef query lookup
-ef query list
-ef query search
-ef query relations
-ef query trace
-ef query impact
-ef query history
-ef query resolve-current
+spec query lookup
+spec query list
+spec query search
+spec query relations
+spec query trace
+spec query impact
+spec query history
+spec query resolve-current
 ```
 
 Every JSON query response is the existing `ef/query-result@1` envelope. Query
@@ -350,7 +350,7 @@ commands are read-only and never include Resource file bytes.
 ### Lookup
 
 ```text
-ef query lookup <artifact-id> [--projection summary|full]
+spec query lookup <artifact-id> [--projection summary|full]
 ```
 
 The default projection is `full`. Lookup is exact and does not resolve
@@ -359,7 +359,7 @@ supersession. `found: false` is a complete normal result and exits `0`.
 ### List
 
 ```text
-ef query list [filters] [--offset <n>] [--limit <n>]
+spec query list [filters] [--offset <n>] [--limit <n>]
 ```
 
 Stable filter options are:
@@ -384,7 +384,7 @@ omitting `--limit` represents JSON `null` and returns all matches.
 ### Search
 
 ```text
-ef query search <term>... [--case-sensitive] [--offset <n>] [--limit <n>]
+spec query search <term>... [--case-sensitive] [--offset <n>] [--limit <n>]
 ```
 
 At least one term is required. Multiple terms use [Query and Trace](10-query-and-trace.md) Artifact-scope AND
@@ -393,7 +393,7 @@ semantics. Search remains normalized literal search without relevance scoring.
 ### Direct relations
 
 ```text
-ef query relations <artifact-id>
+spec query relations <artifact-id>
   [--direction outgoing|incoming|both]
   [--type <relation-type>]...
 ```
@@ -404,7 +404,7 @@ type.
 ### Trace
 
 ```text
-ef query trace <root-id>...
+spec query trace <root-id>...
   --type <relation-type>...
   --direction outgoing|incoming|both
   --max-depth <n>
@@ -416,7 +416,7 @@ are explicit; the CLI does not guess traversal policy.
 ### Impact
 
 ```text
-ef query impact <root-id>...
+spec query impact <root-id>...
   --max-depth <n>
   [--include-references]
   [--include-non-current]
@@ -428,7 +428,7 @@ At least one root is required. Every option retains its [Query and Trace](10-que
 ### History
 
 ```text
-ef query history <artifact-id>
+spec query history <artifact-id>
 ```
 
 History is exact and requires complete configured authoritative first-parent
@@ -438,7 +438,7 @@ fallback.
 ### Current resolution
 
 ```text
-ef query resolve-current <artifact-id>
+spec query resolve-current <artifact-id>
 ```
 
 This is the only query command that resolves supersession. Other commands do
@@ -452,7 +452,7 @@ incomplete query envelope with no partial data and exits `2`.
 ## Resource Reading
 
 ```text
-ef resource read <owner-id> <location>
+spec resource read <owner-id> <location>
 ```
 
 The command reads one explicitly selected local Resource. It first verifies
@@ -491,7 +491,7 @@ with [Validation and Integrity](09-validation.md).
 
 ## Context Composition
 
-EF Core v1 defines no separate `ef context` command. Explicit staged composition
+EF Core v1 defines no separate `spec context` command. Explicit staged composition
 uses:
 
 ```text
@@ -622,7 +622,7 @@ protocols:
 
 ### Initialization claim-and-complete protocol
 
-`ef init` MUST use this protocol:
+`spec init` MUST use this protocol:
 
 1. compute and validate the complete initialization plan in memory;
 2. atomically claim `.engineering` with one non-recursive directory creation;
@@ -672,7 +672,7 @@ rejection and exits `1` without modifying that path.
 
 ### Draft Artifact hard-link publication
 
-`ef artifact create` MUST:
+`spec artifact create` MUST:
 
 1. acquire an implementation-local advisory writer lock, if used;
 2. compute the complete plan and provisional identity;
@@ -751,7 +751,7 @@ The validation command does not publish or authorize publication by itself.
 A conforming integration operation uses the validated result, verifies the
 proposed commit's OID, first parent, and tree, and performs the [Filesystem and Configuration](11-filesystem-and-config.md) atomic
 compare-and-swap branch update. Core v1 defines those publication obligations
-without adding an `ef integrate` command.
+without adding an `spec integrate` command.
 
 ## Exit Codes
 
@@ -794,7 +794,7 @@ Authoritative CI MUST provide the current target-branch tip as `--baseline` and
 the exact candidate commit as `--proposed`, and SHOULD run:
 
 ```text
-ef validate \
+spec validate \
   --scope transition \
   --baseline <full-commit-oid> \
   --proposed <full-commit-oid> \
@@ -807,7 +807,7 @@ When the candidate may add more than one new first-parent commit, CI SHOULD
 instead run:
 
 ```text
-ef validate \
+spec validate \
   --scope range \
   --baseline <full-commit-oid> \
   --proposed <full-commit-oid> \
@@ -836,8 +836,8 @@ plugin API.
 Editors use stable commands such as:
 
 ```text
-ef validate --scope snapshot --format json --no-input
-ef query lookup REQ-031 --projection full --format json
+spec validate --scope snapshot --format json --no-input
+spec query lookup REQ-031 --projection full --format json
 ```
 
 [Validation and Integrity](09-validation.md) diagnostic paths, line and column positions, fields, sections, and
@@ -846,8 +846,8 @@ background processes, and editor adapters are outside Core v1.
 
 ## Version and Help
 
-`ef version --format human` prints the implementation version for people.
-`ef version --format json` returns:
+`spec version --format human` prints the implementation version for people.
+`spec version --format json` returns:
 
 ```json
 {
@@ -859,7 +859,7 @@ background processes, and editor adapters are outside Core v1.
 
 All keys are required. The example implementation version is illustrative.
 
-`ef help` and `ef help <command>` are human-facing, read-only, non-project
+`spec help` and `spec help <command>` are human-facing, read-only, non-project
 commands and exit `0` when the requested help topic exists. An unrecognized
 `<command>` value is an invocation failure and exits `2`.
 
@@ -867,7 +867,7 @@ Every command and subcommand additionally accepts the aliases `-h` and
 `--help`. Recognizing either alias for an already-selected command produces
 the human help text for that exact command path when one is documented,
 otherwise the text for its nearest documented ancestor command path, and
-otherwise the same general text as bare `ef help`; it always exits `0`. This
+otherwise the same general text as bare `spec help`; it always exits `0`. This
 applies even when the selected command's own required arguments or mandatory
 options are missing or invalid: `-h`/`--help` is recognized before argument
 count, mandatory-option, and unresolved-subcommand-selection checks for that

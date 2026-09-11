@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The `ef` CLI entry point (13-cli-contract.md; 00-implementation-decisions.md
+ * The `spec` CLI entry point (13-cli-contract.md; 00-implementation-decisions.md
  * "The four Core exit codes are mapped only at the CLI boundary").
  *
  * This is the ONLY place `process.exit()` is called. `./cli/program.ts`'s
@@ -9,7 +9,7 @@
  * result's bytes to the real process streams and terminates with its exit
  * code.
  *
- * The version reported by `ef version` is read from this package's own
+ * The version reported by `spec version` is read from this package's own
  * `package.json`, resolved relative to *this* file's `import.meta.url`. This
  * only works reliably because `src/cli.ts` sits exactly one directory below
  * the package root in source, and `tsdown` builds it to `dist/cli.mjs`,

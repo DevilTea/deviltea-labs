@@ -428,7 +428,7 @@ describe('runInitCommand', () => {
 	it('suggests the resolved target root\'s current branch, not the CWD\'s, when --project points to a different worktree (two-worktree regression)', async () => {
 		// 13-cli-contract.md "Project Initialization": interactive init MAY
 		// suggest the currently checked-out branch _of the target_, and MUST
-		// display the full `refs/heads/...` value. With `ef init --project B`
+		// display the full `refs/heads/...` value. With `spec init --project B`
 		// invoked while CWD is A, the branch-suggestion probe must run
 		// against resolved target root B, not process CWD A -- otherwise A's
 		// branch name could be suggested and persisted into B's
@@ -669,7 +669,7 @@ describe('runInitCommand', () => {
 	// `applyInitPlan` wiring by mocking the real `open()` call itself: the
 	// marker's own handle is genuinely written exactly as production code
 	// does, but its `close` is made to reject, downgrading an otherwise fully
-	// successful `ef init` from exit `0` to exit `3`.
+	// successful `spec init` from exit `0` to exit `3`.
 	it('exits 3 (applied:true, complete:false, cleanup-failed, EF-VAL-008) -- never applied:false, never exit 2, never a plain success -- when a tracked file\'s handle close() fails', async () => {
 		openMock.mockImplementation(async (...args: Parameters<typeof realFns.open>) => {
 			const [target] = args as [string]

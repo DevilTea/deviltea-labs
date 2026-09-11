@@ -1,7 +1,7 @@
 /**
  * Initialization nonce generation (13-cli-contract.md "Initialization
  * claim-and-complete protocol"). The nonce is runtime state, never
- * authoritative, and proves ownership of an in-progress `ef init` claim once
+ * authoritative, and proves ownership of an in-progress `spec init` claim once
  * the marker file exists.
  */
 

@@ -2,7 +2,7 @@
  * 00-implementation-decisions.md: "Tests or static checks must verify that
  * commands and flags referenced by Skills exist in the matching CLI version."
  *
- * This scans every `.md` file under `skills/` for `ef ...` invocations --
+ * This scans every `.md` file under `skills/` for `spec ...` invocations --
  * inside fenced code blocks and inline code spans -- and checks every parsed
  * command path and `--flag` against the *actual* Commander program built by
  * `buildProgram` (src/cli/program.ts), never a hand-maintained mirror of it.
@@ -11,9 +11,9 @@
  *
  * Parsing approach: within one fenced block or one inline code span, full
  * comment-only lines (`#...`) are dropped first. Remaining lines are read one
- * at a time, tracking an "open" statement: a literal `ef` token anywhere on a
+ * at a time, tracking an "open" statement: a literal `spec` token anywhere on a
  * line always starts a fresh statement (discarding any prose lead-in on that
- * same line, e.g. "-> references/project-init.md (ef init)"); a line whose
+ * same line, e.g. "-> references/project-init.md (spec init)"); a line whose
  * first token is a bare `--flag` continues the currently open statement even
  * with no trailing `\` (the "Command shape" block in `validation-recipes.md`
  * lists its flags one per indented line with no backslashes); a trailing `\`
@@ -21,13 +21,13 @@
  * line starts with (ordinary `bash` line continuation); any other line closes
  * the currently open statement before it is processed. This means two
  * sequential one-line invocations in the same fenced block, and a one-line
- * aside mentioning `ef init` inside otherwise unrelated prose, are each read
+ * aside mentioning `spec init` inside otherwise unrelated prose, are each read
  * as independent, correctly-bounded statements.
  *
  * Each statement's leading words are then walked down the live command tree.
  * A bracket/angle-bracket placeholder (`<id>`, `*`, `...`, an `a|b` choice
  * list) stops path-descent without failing, since it marks a value slot or a
- * deliberately generic mention (for example "every `ef ... --format json`
+ * deliberately generic mention (for example "every `spec ... --format json`
  * result") rather than an invented command segment. Once a leaf command (one
  * with no further subcommands) is reached, every following non-flag token is
  * treated as a positional argument value (an example ID, a type token, a
@@ -112,7 +112,7 @@ interface RawInvocation {
 	statement: string[]
 }
 
-/** Strip a leading/trailing wrapper (brackets, punctuation, quotes) a token may carry from surrounding prose or shell syntax, e.g. `(ef` -> `ef`, `init)` -> `init`, `"<text>"` -> `<text>`. */
+/** Strip a leading/trailing wrapper (brackets, punctuation, quotes) a token may carry from surrounding prose or shell syntax, e.g. `(spec` -> `spec`, `init)` -> `init`, `"<text>"` -> `<text>`. */
 function unwrap(token: string): string {
 	let value = token
 	while (value.length > 0 && '([{"\''.includes(value[0]!))
@@ -160,7 +160,7 @@ function statementsFromLines(lines: string[]): string[][] {
 			current = null
 
 		for (const token of tokens) {
-			if (token === 'ef') {
+			if (token === 'spec') {
 				current = [token]
 				statements.push(current)
 				continue
@@ -237,7 +237,7 @@ function checkStatement(root: Map<string, CliNode>, statement: string[]): string
 	let children = root
 	let matchedNode: CliNode | undefined
 	const matchedPath: string[] = []
-	let i = 1 // statement[0] is always the literal 'ef' token
+	let i = 1 // statement[0] is always the literal 'spec' token
 
 	for (; i < statement.length; i++) {
 		const token = statement[i]!
@@ -250,7 +250,7 @@ function checkStatement(root: Map<string, CliNode>, statement: string[]): string
 		}
 		const next = children.get(token)
 		if (!next) {
-			errors.push(`unknown command segment '${token}' in 'ef ${[...matchedPath, token].join(' ')}'`)
+			errors.push(`unknown command segment '${token}' in 'spec ${[...matchedPath, token].join(' ')}'`)
 			return errors
 		}
 		matchedNode = next
@@ -259,7 +259,7 @@ function checkStatement(root: Map<string, CliNode>, statement: string[]): string
 	}
 
 	// No real command segment was ever matched: the statement is a generic
-	// mention (e.g. "ef ... --format json") with nothing specific to check
+	// mention (e.g. "spec ... --format json") with nothing specific to check
 	// flags against.
 	if (!matchedNode)
 		return errors
@@ -270,7 +270,7 @@ function checkStatement(root: Map<string, CliNode>, statement: string[]): string
 			continue
 		const flagName = token.split('=')[0]!
 		if (!matchedNode.options.has(flagName))
-			errors.push(`unknown flag '${flagName}' for 'ef ${matchedPath.join(' ')}'`)
+			errors.push(`unknown flag '${flagName}' for 'spec ${matchedPath.join(' ')}'`)
 	}
 
 	return errors
@@ -278,7 +278,7 @@ function checkStatement(root: Map<string, CliNode>, statement: string[]): string
 
 // ---- Tests ------------------------------------------------------------------
 
-describe('skill references match the ef CLI contract', () => {
+describe('skill references match the spec CLI contract', () => {
 	it('finds the skills directory to scan', () => {
 		expect(fs.existsSync(skillsDir), `expected a skills directory at ${skillsDir}`)
 			.toBe(true)
@@ -305,12 +305,12 @@ describe('skill references match the ef CLI contract', () => {
 
 	const allInvocations = markdownFiles.flatMap(file => extractInvocations(path.relative(skillsDir, file), fs.readFileSync(file, 'utf8')))
 
-	it('extracts at least one `ef ...` invocation from the Skills', () => {
+	it('extracts at least one `spec ...` invocation from the Skills', () => {
 		expect(allInvocations.length)
 			.toBeGreaterThan(0)
 	})
 
-	it('every `ef ...` command path and flag referenced by a Skill exists in the CLI contract', () => {
+	it('every `spec ...` command path and flag referenced by a Skill exists in the CLI contract', () => {
 		const failures: string[] = []
 		for (const invocation of allInvocations) {
 			for (const error of checkStatement(root, invocation.statement))

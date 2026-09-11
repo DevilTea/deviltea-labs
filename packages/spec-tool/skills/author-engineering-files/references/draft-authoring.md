@@ -17,8 +17,8 @@ Before creating anything, confirm the type matches the kind of knowledge
 | `pol` | POL | A recurring cross-cutting engineering rule |
 | `chg` | CHG | Provenance/rationale/effects of one engineering transaction |
 
-PROJECT is never created with `ef artifact create` - it exists only from
-`ef init` (see `references/project-init.md`).
+PROJECT is never created with `spec artifact create` - it exists only from
+`spec init` (see `references/project-init.md`).
 
 If a candidate requirement, decision, or policy statement is not already an
 explicit human decision, do not silently pick one. Present 2-3 concrete
@@ -27,7 +27,7 @@ options and let the human choose before you write the file.
 ## Creating the draft
 
 ```bash
-ef artifact create req \
+spec artifact create req \
   --title "Search Result Filtering" \
   --summary "Search results must support filtering by supported criteria." \
   --format json \
@@ -40,7 +40,7 @@ envelope (`changes[]` path, the `artifact` summary with its allocated ID).
 Only after confirmation, re-run with `--yes` in place of `--dry-run`:
 
 ```bash
-ef artifact create req \
+spec artifact create req \
   --title "Search Result Filtering" \
   --summary "Search results must support filtering by supported criteria." \
   --format json \
@@ -61,7 +61,7 @@ collision is a domain rejection (exit `1`), not something to retry with a
 different flag.
 
 There is no `edit` (or delete, activate, retire, supersede) subcommand under
-`ef artifact`. Once the file exists, open it directly and edit YAML frontmatter and
+`spec artifact`. Once the file exists, open it directly and edit YAML frontmatter and
 Markdown body with ordinary file edits. Draft edits need no CHG (UC-018) -
 right up until the moment the Artifact's content is active; see
 `references/chg-planning.md` for that boundary.
@@ -145,8 +145,8 @@ other active content change.
 
 ## Terminology ordering (PROJECT)
 
-PROJECT's `Terminology` table has no `ef artifact create` step - it is
-authored by direct file edit, either via `ef init`'s `--terminology`
+PROJECT's `Terminology` table has no `spec artifact create` step - it is
+authored by direct file edit, either via `spec init`'s `--terminology`
 Markdown table (`references/project-init.md`) or, once PROJECT is active, a
 CHG-backed edit (`references/chg-planning.md`). The same canonical-order
 discipline as tags and relations above applies: canonical `Term` cells MUST

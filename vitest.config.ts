@@ -14,6 +14,7 @@ export default defineConfig({
 			// configuration product and is covered by consumer contracts instead.
 			include: [
 				'packages/ef/src/**/*.ts',
+				'packages/spec-tool/src/**/*.ts',
 				'packages/eslint-config/src/**/*.ts',
 				'packages/tiny-state-machine/src/**/*.ts',
 				'packages/tiny-state-machine-vue/src/**/*.ts',

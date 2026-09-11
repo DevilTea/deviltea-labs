@@ -5,14 +5,14 @@ Status: Accepted
 ## Purpose
 
 This document evaluates the P2 backlog item "evaluate manifest-driven batch
-Artifact creation" raised by the first real-world adoption of `@deviltea/ef`
+Artifact creation" raised by the first real-world adoption of `@deviltea/spec-tool`
 (brownfield adoption of `maple-pod/maple-pod.github.io`, 2026-08-10). It is
 planning input, not an authorization to implement. Per the adoption issue's
 "Suggested implementation / PR order," this item is explicitly deferred until
 semantics and additional adoption evidence justify it.
 
 The accepted EF Core specifications remain normative. Every proposal below is
-a compatibility sketch against the existing `ef artifact create` plan/apply
+a compatibility sketch against the existing `spec artifact create` plan/apply
 protocol and the existing Mutation Planning and Authorization contract
 (`13-cli-contract.md`), not a new committed contract.
 
@@ -24,9 +24,9 @@ and 1 POL bootstrapped alongside), each authored through the same repeated
 sequence:
 
 ```text
-ef artifact create <type> --dry-run
+spec artifact create <type> --dry-run
 → inspect/confirm
-→ ef artifact create <type> --yes
+→ spec artifact create <type> --yes
 ```
 
 This is mechanically verbose but each step is cheap; the friction reported was
@@ -43,11 +43,11 @@ existing per-Artifact loop is acceptable once Skill orchestration removes the
 human-attention cost (see "What would justify revisiting this decision"
 below). None of that is known yet.
 
-## How `ef artifact create` works today (grounding facts)
+## How `spec artifact create` works today (grounding facts)
 
-Read from `packages/ef/src/application/artifact-create.ts`,
-`packages/ef/src/cli/commands/artifact-create.ts`,
-`packages/ef/src/cli/mutation-authorization.ts`, and `02-identity.md`
+Read from `packages/spec-tool/src/application/artifact-create.ts`,
+`packages/spec-tool/src/cli/commands/artifact-create.ts`,
+`packages/spec-tool/src/cli/mutation-authorization.ts`, and `02-identity.md`
 "Allocation":
 
 - **Plan/apply split.** `computeCreatePlan` is pure and operates over an
@@ -56,7 +56,7 @@ Read from `packages/ef/src/application/artifact-create.ts`,
   directory chain, and a full `ContentGenerationWitness` (config bytes,
   `PROJECT.md` bytes, and the complete visible Artifact ID set) immediately
   before publication — not merely at plan time.
-- **One Artifact per invocation.** Each `ef artifact create <type>` call
+- **One Artifact per invocation.** Each `spec artifact create <type>` call
   allocates exactly one ID and publishes exactly one file via
   create-if-absent hard link. There is no existing multi-file mutation plan
   or multi-file apply step anywhere in Core v1.
@@ -211,7 +211,7 @@ nothing else.** This is the load-bearing design constraint, not a detail:
   arbitrary frontmatter/body content per entry would need the full body
   schema surface (`08-artifact-schemas.md`) exposed through manifest
   parsing, effectively duplicating what a human/Skill-driven edit-then-
-  `ef validate --scope snapshot` cycle already does today, with none of that
+  `spec validate --scope snapshot` cycle already does today, with none of that
   cycle's incremental feedback.
 
 A manifest is therefore proposed to remain exactly as narrow as N repeated

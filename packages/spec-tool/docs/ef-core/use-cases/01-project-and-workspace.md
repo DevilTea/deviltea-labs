@@ -13,7 +13,7 @@ state in its first-parent history.
 
 **Main flow:**
 
-1. The maintainer runs `ef init`. In non-interactive mode they supply
+1. The maintainer runs `spec init`. In non-interactive mode they supply
    `--title`, `--summary`, `--vision`, `--project-scope`, `--non-goals`, and
    `--context`, plus an explicit full local `--integration-ref`.
 2. EF plans a single new `.engineering/` directory, including canonical

@@ -3,7 +3,7 @@
 Governing use cases: UC-050-UC-055. Governing specs: `13-cli-contract.md` §
 Query Commands and § Resource Reading, `10-query-and-trace.md`.
 
-All `ef query <kind>` commands are read-only and return the same
+All `spec query <kind>` commands are read-only and return the same
 `ef/query-result@1` envelope (`schema`, `kind`, `complete`, `data`,
 `diagnostics`). Prefer `--format json --no-input` for every recipe below so
 the result is a single parseable object.
@@ -17,18 +17,18 @@ a partial answer as usable evidence.
 ## Lookup an exact Artifact
 
 ```bash
-ef query lookup <artifact-id> --projection summary|full --format json --no-input
+spec query lookup <artifact-id> --projection summary|full --format json --no-input
 ```
 
 The default projection is `full`. Lookup is exact and does not resolve
-supersession - use `ef query resolve-current` first if the review needs the
+supersession - use `spec query resolve-current` first if the review needs the
 current replacement instead of the exact historical ID named by the
 requester.
 
 ## List by filter
 
 ```bash
-ef query list \
+spec query list \
   --type <value> \
   --status <value> \
   --schema <value> \
@@ -53,7 +53,7 @@ match.
 ## Search literal text
 
 ```bash
-ef query search <term>... --case-sensitive --offset <n> --limit <n> --format json --no-input
+spec query search <term>... --case-sensitive --offset <n> --limit <n> --format json --no-input
 ```
 
 At least one term is required. Multiple terms use AND semantics against the
@@ -64,7 +64,7 @@ description, not for judging relevance.
 ## Inspect direct relations
 
 ```bash
-ef query relations <artifact-id> --direction outgoing|incoming|both --type <relation-type> --format json --no-input
+spec query relations <artifact-id> --direction outgoing|incoming|both --type <relation-type> --format json --no-input
 ```
 
 Direction defaults to `both`. Repeat `--type` to restrict to specific
@@ -76,7 +76,7 @@ actually exist as declared) - never infer an edge that isn't returned.
 ## Trace a bounded subgraph
 
 ```bash
-ef query trace <root-id>... --type <relation-type>... --direction outgoing|incoming|both --max-depth <n> --format json --no-input
+spec query trace <root-id>... --type <relation-type>... --direction outgoing|incoming|both --max-depth <n> --format json --no-input
 ```
 
 At least one root and one `--type` are required; direction and `--max-depth`
@@ -87,7 +87,7 @@ REQ a PRD's `derived-from` chain reaches) bounded to a caller-chosen depth.
 ## Estimate impact
 
 ```bash
-ef query impact <root-id>... --max-depth <n> --include-references --include-non-current --resolve-current --format json --no-input
+spec query impact <root-id>... --max-depth <n> --include-references --include-non-current --resolve-current --format json --no-input
 ```
 
 At least one root is required; `--max-depth` is required. `--include-references`,
@@ -100,7 +100,7 @@ change is required or as mutation authorization.
 ## Resolve current truth
 
 ```bash
-ef query resolve-current <artifact-id> --format json --no-input
+spec query resolve-current <artifact-id> --format json --no-input
 ```
 
 The only query kind that resolves supersession. Use it to check a
@@ -112,7 +112,7 @@ knowledge resolve to an empty set. CHG current resolution is unsupported.
 ## Retrieve engineering and Git history
 
 ```bash
-ef query history <artifact-id> --format json --no-input
+spec query history <artifact-id> --format json --no-input
 ```
 
 Requires complete configured authoritative first-parent integration history.
@@ -126,7 +126,7 @@ substitute a partial history.
 ## Read one selected local Resource
 
 ```bash
-ef resource read <owner-id> <location>
+spec resource read <owner-id> <location>
 ```
 
 Reads exactly the raw bytes of one local Resource declared by `<owner-id>` at

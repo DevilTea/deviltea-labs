@@ -1,6 +1,6 @@
 /**
  * Structural checks over the Skill markdown tree that complement
- * `skill-references.unit.test.ts` (which proves every `ef ...` mention
+ * `skill-references.unit.test.ts` (which proves every `spec ...` mention
  * matches the live CLI contract):
  *
  * 1. Reference reachability: every `references/*.md` file that ships with a
@@ -10,7 +10,7 @@
  *    links to (or a link to a deleted file) is dead weight the Agent will
  *    never load.
  * 2. Mutation examples show the plan first: in `author-engineering-files`,
- *    any documented `ef init` / `ef artifact create` invocation carrying
+ *    any documented `spec init` / `spec artifact create` invocation carrying
  *    `--yes` must be preceded, earlier in the same file, by the identical
  *    invocation carrying `--dry-run` instead — same tokens, in the same
  *    order, once `--dry-run`/`--yes` are stripped from both. Matching only on
@@ -51,12 +51,12 @@ function listMarkdownFiles(dir: string): string[] {
 	return files
 }
 
-// ---- `ef ...` statement extraction, ordered by document position ----------
+// ---- `spec ...` statement extraction, ordered by document position ----------
 //
 // A simplified sibling of the extractor in `skill-references.unit.test.ts`:
 // it only needs fenced code blocks (every dry-run/--yes example lives in
 // one), drops full-line `#` comments, starts a fresh statement at each
-// literal `ef` token, and continues a statement across a trailing `\` or a
+// literal `spec` token, and continues a statement across a trailing `\` or a
 // following line whose first token is a `--flag`.
 
 interface OrderedStatement {
@@ -90,7 +90,7 @@ function statementsFromLines(lines: string[]): string[][] {
 			current = null
 
 		for (const token of tokens) {
-			if (token === 'ef') {
+			if (token === 'spec') {
 				current = [token]
 				statements.push(current)
 				continue
@@ -206,9 +206,9 @@ describe('author-engineering-files mutation examples plan before applying', () =
 	})
 
 	it('pairs on the full normalized invocation, not just the command family', () => {
-		const dryRun = ['ef', 'init', '--title', '"<text>"', '--dry-run']
-		const identicalYes = ['ef', 'init', '--title', '"<text>"', '--yes']
-		const differentYes = ['ef', 'init', '--title', '"<other>"', '--yes']
+		const dryRun = ['spec', 'init', '--title', '"<text>"', '--dry-run']
+		const identicalYes = ['spec', 'init', '--title', '"<text>"', '--yes']
+		const differentYes = ['spec', 'init', '--title', '"<other>"', '--yes']
 
 		expect(findUnauthorizedYesStatements([dryRun, identicalYes]))
 			.toEqual([])
@@ -262,7 +262,7 @@ describe('existing-project bootstrap reference honors the bootstrap contract', (
 //
 // Structural (not prose) checks that the brownfield inventory step actually
 // asks for Terminology candidates, that the accepted candidates are wired
-// into the `ef init` call rather than left for a routine post-bootstrap CHG,
+// into the `spec init` call rather than left for a routine post-bootstrap CHG,
 // and that the canonical Terminology row-ordering rule (and its diagnostics)
 // is stated in the authoring reference. These pin the *shape* of the
 // guidance (heading present, section mentions the concept, `--terminology`
@@ -290,7 +290,7 @@ describe('brownfield bootstrap inventory covers Terminology candidates', () => {
 			.toBe(true)
 	})
 
-	it('step 4 (initialize EF) wires accepted Terminology into the ef init call', () => {
+	it('step 4 (initialize EF) wires accepted Terminology into the spec init call', () => {
 		const step4 = sectionBody(text, '## Step 4')
 		expect(step4.includes('--terminology'), 'Step 4 never passes accepted terms via --terminology')
 			.toBe(true)

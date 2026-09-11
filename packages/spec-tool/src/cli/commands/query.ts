@@ -1,5 +1,5 @@
 /**
- * `ef query <kind>` execution (13-cli-contract.md "Query Commands";
+ * `spec query <kind>` execution (13-cli-contract.md "Query Commands";
  * 10-query-and-trace.md "Stable Query Result Envelope").
  *
  * The query kind is already known by the time this handler runs (it is

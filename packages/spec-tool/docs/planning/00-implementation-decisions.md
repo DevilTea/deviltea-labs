@@ -19,12 +19,12 @@ the specification before the affected runtime behavior is implemented.
 
 ## Product and Package Boundary
 
-- The npm package name is `@deviltea/ef`.
-- The installed executable name is `ef`.
+- The npm package name is `@deviltea/spec-tool`.
+- The installed executable name is `spec`.
 - The package is ESM-only and is built with `tsdown` for the Node.js platform,
   targeting ES2022.
 - The package exposes the executable through
-  `bin: { "ef": "./dist/cli.mjs" }` and retains a Node.js shebang.
+	`bin: { "spec": "./dist/cli.mjs" }` and retains a Node.js shebang.
 - Published CLI runtime support matches the workspace baseline:
   `^22.14.0 || ^24.0.0`.
 - Development and package builds use Node.js
@@ -109,7 +109,7 @@ path.
   locale-sensitive collation.
 - Text readers preserve original bytes long enough to diagnose BOM, invalid
   UTF-8, CRLF, missing final newline, and Unicode normalization violations.
-- `ef resource read` writes the selected Resource as raw bytes without text
+- `spec resource read` writes the selected Resource as raw bytes without text
   decoding or an added newline.
 
 ## Git Execution
@@ -171,7 +171,7 @@ such as `update-ref` with both expected old and proposed new OIDs.
 
 The accepted Core contract uses two distinct portable publication protocols.
 
-`ef init` uses atomic path ownership rather than pretending that portable
+`spec init` uses atomic path ownership rather than pretending that portable
 Node.js can atomically publish a populated directory. It claims `.engineering`
 with non-recursive `mkdir`, creates the runtime directory and Core-defined nonce
 marker, creates and validates the planned contents, and removes the marker last.
@@ -183,7 +183,7 @@ repairs or deletes it. The live invocation may clean up after its exclusive
 `mkdir`; after marker creation it must also prove ownership by matching the
 nonce. A restarted process never cleans the claim automatically.
 
-`ef artifact create` writes and validates a complete temporary file on the same
+`spec artifact create` writes and validates a complete temporary file on the same
 filesystem, then uses `node:fs` hard-link creation to publish the canonical path
 with no-replace semantics. The implementation must capability-test this behavior
 on supported platforms and filesystems. If hard-link publication is unavailable,
@@ -223,7 +223,7 @@ Follow the workspace conventions:
 
 Contract and platform testing must include:
 
-- installing the output of `pnpm pack` and invoking the installed `ef` binary;
+- installing the output of `pnpm pack` and invoking the installed `spec` binary;
 - exact stdout, stderr, JSON shape, trailing newline, and exit-code assertions;
 - byte-for-byte `resource read` assertions;
 - SHA-1 and SHA-256 Git fixtures;
@@ -275,7 +275,7 @@ It must:
 Skill source lives under:
 
 ```text
-packages/ef/skills/
+packages/spec-tool/skills/
 ├── author-engineering-files/
 └── review-engineering-change/
 ```
@@ -286,7 +286,7 @@ disclosure rather than expanding the primary `SKILL.md` body.
 
 Skills ship in the npm tarball and the GitHub repository under the same release
 tag as the CLI. Installing the npm CLI does not implicitly install or mutate an
-agent's Skill directory. Core v1 does not add an `ef skill install` command;
+agent's Skill directory. Core v1 does not add an `spec skill install` command;
 users install the Skill directories through an existing compatible Skill
 installer.
 

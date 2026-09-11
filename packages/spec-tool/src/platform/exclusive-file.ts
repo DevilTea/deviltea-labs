@@ -3,7 +3,7 @@
  * (13-cli-contract.md "Initialization claim-and-complete protocol").
  *
  * `createExclusive` is the general create-exclusive (`wx`) primitive used for
- * every planned `ef init` file and for `.engineering/.tmp/init-state.json`.
+ * every planned `spec init` file and for `.engineering/.tmp/init-state.json`.
  * `writeInitMarker` / `readInitMarker` layer the exact marker shape and its
  * ownership-proving `nonce` on top of it.
  *

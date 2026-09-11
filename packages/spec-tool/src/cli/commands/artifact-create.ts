@@ -1,11 +1,11 @@
 /**
- * `ef artifact create <type>` (13-cli-contract.md "Draft Artifact Creation",
+ * `spec artifact create <type>` (13-cli-contract.md "Draft Artifact Creation",
  * "Mutation Planning and Authorization", "Draft Artifact hard-link
  * publication").
  *
- * Unlike `ef init`, this is an ordinary project command: project resolution
+ * Unlike `spec init`, this is an ordinary project command: project resolution
  * uses `../project-context.ts`'s standard upward discovery
- * (13-cli-contract.md "Common Options"), not `ef init`'s worktree-root-only
+ * (13-cli-contract.md "Common Options"), not `spec init`'s worktree-root-only
  * rule.
  *
  * Exit-code/diagnostic-code choices mirror `./init.ts`'s documented
@@ -119,7 +119,7 @@ export async function runArtifactCreateCommand(options: ArtifactCreateCommandOpt
 			return earlyFailure(options, 2, 'EF-VAL-001', `Missing required non-interactive value(s): ${missing.join(', ')}.`)
 	}
 	else {
-		deps.prompts.intro(`ef artifact create ${options.type}`)
+		deps.prompts.intro(`spec artifact create ${options.type}`)
 		if (title === undefined || title.trim().length === 0) {
 			const value = await deps.prompts.text({ message: 'Title' })
 			if (value === undefined) {
@@ -171,7 +171,7 @@ export async function runArtifactCreateCommand(options: ArtifactCreateCommandOpt
 		return earlyFailure(options, 2, 'EF-VAL-001', 'Mutation authorization is required: supply --dry-run or --yes in non-interactive mode.')
 
 	if (classification === 'needs-confirmation') {
-		const preview: MutationPlanPreview = { title: `ef artifact create ${options.type}`, lines: plan.changes.map(c => `${c.action} ${c.path}`) }
+		const preview: MutationPlanPreview = { title: `spec artifact create ${options.type}`, lines: plan.changes.map(c => `${c.action} ${c.path}`) }
 		const confirmed = await deps.prompts.confirmMutation(preview)
 		if (!confirmed)
 			return mutationOutcome(options, 2, { complete: false, applied: false, dryRun: false, changes: plan.changes, artifact, diagnostics: [] })

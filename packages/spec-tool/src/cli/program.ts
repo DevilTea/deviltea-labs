@@ -86,33 +86,33 @@ function FORMAT_OPTION() {
 }
 
 const HELP_TOPICS: Record<string, string> = {
-	'init': 'ef init: initialize EF in an existing Git worktree root.',
-	'artifact create': 'ef artifact create <type>: create a new draft Artifact (prd|req|adr|pol|chg).',
-	'validate': 'ef validate [--scope snapshot|transition|bootstrap|range]: validate the EF project state.',
-	'query': 'ef query <lookup|list|search|relations|trace|impact|history|resolve-current>: read-only queries.',
-	'resource read': 'ef resource read <owner-id> <location>: read one explicitly selected local Resource.',
-	'version': 'ef version: print the implementation version.',
-	'help': 'ef help [command]: show this help, or help for one command.',
+	'init': 'spec init: initialize Spec in an existing Git worktree root.',
+	'artifact create': 'spec artifact create <type>: create a new draft Artifact (prd|req|adr|pol|chg).',
+	'validate': 'spec validate [--scope snapshot|transition|bootstrap|range]: validate the Spec project state.',
+	'query': 'spec query <lookup|list|search|relations|trace|impact|history|resolve-current>: read-only queries.',
+	'resource read': 'spec resource read <owner-id> <location>: read one explicitly selected local Resource.',
+	'version': 'spec version: print the implementation version.',
+	'help': 'spec help [command]: show this help, or help for one command.',
 }
 
 const GENERAL_HELP = [
-	'ef -- a thin CLI over Git-native EF files.',
+	'spec -- a Git-native engineering specification maintenance and collaboration tool.',
 	'',
 	'Commands:',
-	'  ef init',
-	'  ef artifact create <type>',
-	'  ef validate',
-	'  ef query <lookup|list|search|relations|trace|impact|history|resolve-current>',
-	'  ef resource read <owner-id> <location>',
-	'  ef version',
-	'  ef help',
+	'  spec init',
+	'  spec artifact create <type>',
+	'  spec validate',
+	'  spec query <lookup|list|search|relations|trace|impact|history|resolve-current>',
+	'  spec resource read <owner-id> <location>',
+	'  spec version',
+	'  spec help',
 	'',
 	'Every command and subcommand also accepts -h / --help.',
 ].join('\n')
 
 /**
  * The full command path leading to `command` (e.g. `['artifact', 'create']`
- * for `ef artifact create <type>`), excluding the root `ef` program itself
+ * for `spec artifact create <type>`), excluding the root `spec` program itself
  * (13-cli-contract.md "Version and Help").
  */
 function commandPathWords(command: Command): string[] {
@@ -128,7 +128,7 @@ function commandPathWords(command: Command): string[] {
 /**
  * Resolves `-h`/`--help` text for an already-recognized command path: the
  * exact `HELP_TOPICS` entry for the full path, then each shorter prefix,
- * then `GENERAL_HELP`. Unlike the explicit `ef help <command>` lookup below
+ * then `GENERAL_HELP`. Unlike the explicit `spec help <command>` lookup below
  * (which fails with an unknown-topic invocation error), this always
  * succeeds because it is only ever reached for a command Commander itself
  * already resolved.
@@ -155,7 +155,7 @@ function resolveHelpTopicWithFallback(words: readonly string[]): string {
  *
  * Commander also calls `outputHelp` with `{ error: true }` for its own
  * "invalid invocation, show help" fallback (an unmatched group command, or a
- * bare `ef` with no recognized subcommand) -- that path is a genuine
+ * bare `spec` with no recognized subcommand) -- that path is a genuine
  * pre-envelope invocation failure, not a `-h`/`--help` request, so it is left
  * alone here (no `setOutcome` call) and allowed to keep throwing through to
  * `runCli`'s ordinary `CommanderError` handling.
@@ -171,12 +171,12 @@ function attachHelp(command: Command, setOutcome: (outcome: CommandOutcome) => v
 }
 
 /**
- * Build the full `ef` Commander program without parsing or executing
+ * Build the full `spec` Commander program without parsing or executing
  * anything. This is the single source of truth for the command surface
  * (subcommand names and their `Option`s): `runCli` below parses `argv`
  * against the program this returns, and `skill-references.unit.test.ts`
  * introspects `program.commands` / `command.options` from this same
- * builder to check every `ef ...` invocation documented in `skills/` against
+ * builder to check every `spec ...` invocation documented in `skills/` against
  * the real, live command definitions -- never a hand-maintained string list.
  *
  * `executor`, `prompts`, and `context.version` are only reached once an
@@ -184,7 +184,7 @@ function attachHelp(command: Command, setOutcome: (outcome: CommandOutcome) => v
  * commands/options (never calling `parseAsync`) may pass placeholder values.
  */
 export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExecutor, prompts: Prompts, setOutcome: (outcome: CommandOutcome) => void): Command {
-	const program = new Command('ef')
+	const program = new Command('spec')
 	program.exitOverride()
 	program.configureOutput({ writeOut: () => {}, writeErr: () => {}, outputError: () => {} })
 	attachHelp(program, setOutcome)
@@ -208,7 +208,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 		return applyCommandDefaults(program.command(`${name}${argsUsage ? ` ${argsUsage}` : ''}`))
 	}
 
-	// ---- ef init ----------------------------------------------------------------
+	// ---- spec init ----------------------------------------------------------------
 
 	sub('init')
 		.addOption(new Option('--project <project-root>'))
@@ -248,7 +248,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 			}, { cwd: io.cwd, executor, prompts }))
 		})
 
-	// ---- ef artifact create <type> -----------------------------------------------
+	// ---- spec artifact create <type> -----------------------------------------------
 
 	const artifact = sub('artifact')
 	applyCommandDefaults(artifact.command('create <type>'))
@@ -276,7 +276,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 			}, { cwd: io.cwd, executor, prompts }))
 		})
 
-	// ---- ef validate --------------------------------------------------------------
+	// ---- spec validate --------------------------------------------------------------
 
 	sub('validate')
 		.addOption(new Option('--project <project-root>'))
@@ -305,7 +305,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 			}, { cwd: io.cwd, executor }))
 		})
 
-	// ---- ef query <kind> ----------------------------------------------------------
+	// ---- spec query <kind> ----------------------------------------------------------
 
 	const query = sub('query')
 
@@ -419,7 +419,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 			setOutcome(await runQuery(buildResolveCurrentRequest({ id: artifactId }), opts))
 		})
 
-	// ---- ef resource read <owner-id> <location> ------------------------------------
+	// ---- spec resource read <owner-id> <location> ------------------------------------
 
 	const resource = sub('resource')
 	applyCommandDefaults(resource.command('read <owner-id> <location>'))
@@ -430,7 +430,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 			setOutcome(await runResourceReadCommand(ownerId, location, { project: opts.project }, { cwd: io.cwd, executor }))
 		})
 
-	// ---- ef version ---------------------------------------------------------------
+	// ---- spec version ---------------------------------------------------------------
 
 	sub('version')
 		.addOption(FORMAT_OPTION())
@@ -438,7 +438,7 @@ export function buildProgram(io: CliIO, context: RunCliContext, executor: GitExe
 			setOutcome(runVersionCommand({ format: opts.format, version: context.version }))
 		})
 
-	// ---- ef help [command] ---------------------------------------------------------
+	// ---- spec help [command] ---------------------------------------------------------
 
 	sub('help', '[command...]')
 		.action(async (commandWords: string[]) => {

@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { main } from './cli'
 
 describe('main', () => {
-	it('resolves this package\'s own real version for ef version --format json', async () => {
+	it('resolves this package\'s own real version for spec version --format json', async () => {
 		const packageJson = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
 
 		const outcome = await main(['version', '--format', 'json'])

@@ -1,5 +1,5 @@
 /**
- * `ef validate` (13-cli-contract.md "Validation Command"; 09-validation.md
+ * `spec validate` (13-cli-contract.md "Validation Command"; 09-validation.md
  * "Validation Scopes", "Bootstrap exception").
  *
  * Scope, `--baseline`/`--proposed` applicability, and `--format` are already
@@ -10,10 +10,10 @@
  * input failures MUST use that incomplete command envelope."
  *
  * Project resolution uses ordinary upward discovery
- * (`../project-context.ts`) for every scope, not `ef init`'s
+ * (`../project-context.ts`) for every scope, not `spec init`'s
  * worktree-root-only rule: 13-cli-contract.md's "Common Options" section
- * carves out only `ef init` from upward discovery. In practice, a bootstrap
- * candidate is validated only after a local `ef init` has already populated
+ * carves out only `spec init` from upward discovery. In practice, a bootstrap
+ * candidate is validated only after a local `spec init` has already populated
  * the working tree (13-cli-contract.md "Project Initialization"), so ordinary
  * discovery finds real `.engineering` content even though that content is not
  * yet authoritative.
