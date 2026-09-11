@@ -21,3 +21,5 @@ README files are the canonical documentation and are rendered here directly.
   for tiny-state-machine.
 - [`@deviltea/ef`](./ef) — file-based, Git-native engineering knowledge system
   and CLI.
+- [`@deviltea/spec-tool`](./spec-tool) — Git-native engineering specification
+  maintenance and collaboration tool.

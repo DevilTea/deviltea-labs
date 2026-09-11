@@ -10,6 +10,7 @@ on:
       - 'tiny-state-machine@*'
       - 'tiny-state-machine-vue@*'
       - 'ef@*'
+      - 'spec-tool@*'
 
 permissions:
   contents: read

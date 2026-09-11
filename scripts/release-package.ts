@@ -10,6 +10,10 @@ const packages = {
 		directory: 'packages/ef',
 		name: '@deviltea/ef',
 	},
+	'spec-tool': {
+		directory: 'packages/spec-tool',
+		name: '@deviltea/spec-tool',
+	},
 	'eslint-config': {
 		directory: 'packages/eslint-config',
 		name: '@deviltea/eslint-config',
