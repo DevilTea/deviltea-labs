@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Packed-package consumer smoke test (docs/planning/00-implementation-decisions.md
+ * Packed-package consumer smoke test for the published package contract.
  * "Testing and Verification": "installing the output of `pnpm pack` and
  * invoking the installed `spec` binary"; "exact stdout, stderr, JSON shape,
  * trailing newline, and exit-code assertions"; "byte-for-byte `resource
@@ -211,7 +211,7 @@ function main() {
 			'utf8',
 		))
 
-		// ---- Skills ship in the npm tarball (00-implementation-decisions.md
+		// ---- Skills ship in the npm tarball ---------------------------------------
 		// "Agent Skills": "Skills ship in the npm tarball ... under the same
 		// release tag as the CLI.") ------------------------------------------
 

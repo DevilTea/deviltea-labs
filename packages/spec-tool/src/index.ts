@@ -1,6 +1,7 @@
 /**
  * Spec's initial EF-compatible implementation does not promise a supported JavaScript library API
- * (docs/planning/00-implementation-decisions.md "Product and Package
+ * (package public API; see docs/README.md for design authority).
+ * Historical implementation notes previously described the product/package
  * Boundary": "EF v1 promises the CLI and its documented machine-readable
  * contracts. It does not initially expose a supported JavaScript library
  * API."). The Spec CLI (`src/cli.ts`, `src/cli/*`) and its stable JSON envelopes

@@ -182,7 +182,6 @@ spec validate --scope range \
 Like every other step in the lifecycle above, this never requires moving
 `integration_ref` to validate: the ref only advances after this reports
 `exit_code: 0`, and only via the same conditional ref update from step 4. See
-`docs/planning/03-ci-recipe-github-actions-range-validation.md` for the full
 CI recipe: candidate selection for a required `pull_request`/`merge_group`
 check, and the operation-start ref capture that check depends on.
 

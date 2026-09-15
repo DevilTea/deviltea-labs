@@ -297,8 +297,8 @@ before acting further:
   explicit. Only once the working tree reflects the authoritative EF
   state, reconcile whatever of the preserved intent is still wanted
   through the established-EF workflow: context discovery via
-  `references/context-discovery.md`, then CHG-backed transitions via
-  `references/chg-planning.md`. Never keep re-parenting the candidate to
+  `references/context-discovery.md`, then the current validator-enforced
+  inherited active-content transition behavior. Never keep re-parenting the candidate to
   chase the bootstrap exception.
 - If the ref or its history cannot be inspected, the operation is
   incomplete - never assume eligibility.
@@ -339,7 +339,7 @@ before first authoritative EF integration:
 after first authoritative EF integration:
   the bootstrap exception is gone
   active/PROJECT/control-file/Resource changes require the normal
-  CHG-backed transition rules in references/chg-planning.md
+  current inherited CHG-backed transition rules enforced by validation
 ```
 
 "We are documenting existing behavior" is never again a reason to skip a

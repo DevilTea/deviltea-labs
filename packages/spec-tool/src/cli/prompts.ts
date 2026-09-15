@@ -3,7 +3,7 @@
  * prompts to stderr"; "Mutation Planning and Authorization": "the CLI
  * displays the plan and requests confirmation").
  *
- * `@clack/prompts` (00-implementation-decisions.md's mandated interactive
+ * `@clack/prompts` (current inherited interactive implementation
  * library) renders unconditionally to `process.stdout` and reads
  * unconditionally from `process.stdin`; its public API has no injectable
  * output stream (unlike the lower-level `@clack/core` primitives it wraps,

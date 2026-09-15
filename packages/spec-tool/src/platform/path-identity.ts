@@ -2,7 +2,7 @@
  * Canonical path comparison for cross-source path equality
  * (11-filesystem-and-config.md "Project Discovery": "verify that the
  * candidate root is exactly the Git worktree root that directly contains
- * `.engineering`"; 00-implementation-decisions.md "Git Execution").
+ * `.engineering`"; inherited EF implementation behavior).
  *
  * Project discovery and `spec init`'s target-selection rule both compare a
  * path Git reported (`rev-parse --show-toplevel`) against a path this

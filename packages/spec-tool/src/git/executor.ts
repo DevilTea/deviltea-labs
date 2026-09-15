@@ -1,5 +1,5 @@
 /**
- * Git process executor (00-implementation-decisions.md, "Git Execution").
+ * Git process executor for the inherited implementation.
  *
  * The sole boundary that spawns the `git` executable. It never passes
  * user-controlled arbitrary Git options, always uses `shell: false` with an

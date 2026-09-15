@@ -7,11 +7,26 @@
 [![License][license-src]][license-href]
 
 Spec is a Git-native engineering specification maintenance and collaboration
-tool. It maintains authoritative engineering knowledge, decision history, and
-provenance as Markdown files with structured YAML frontmatter under
-`.engineering/`. The initial implementation retains the existing EF Core
-Artifact ontology (PROJECT, PRD, REQ, ADR, POL, CHG) and deterministic,
-read-only-by-default behavior while the new product boundary is designed.
+tool. The current package is still an inherited EF implementation and therefore
+still uses `.engineering/` and parts of the EF Core ontology at runtime while
+the Spec-native MVP is being implemented. Shipped behavior is not itself the
+product-design authority.
+
+## Design Authority
+
+The highest-authority design record for Spec / `@deviltea/spec-tool` / `spec` is
+[GitHub Discussion #65 — `spec-tool: canonical design discussion`](https://github.com/DevilTea/deviltea-labs/discussions/65).
+
+When sources disagree, use this precedence:
+
+1. Current accepted direction in Discussion #65.
+2. Shipped code and tests, as evidence of current implementation behavior only.
+3. `docs/ef-core/`, retained as inherited EF implementation/history reference.
+4. Historical issues and archived design material, including #63 and #11.
+
+Standalone planning documents are intentionally not maintained in this package.
+New exploration, alternatives, and accepted design decisions belong in
+Discussion #65. See the [repository-level authority note](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/docs/README.md) for the same precedence in the package tree.
 
 ## Installation
 
@@ -94,8 +109,10 @@ exactly one stable JSON result object to stdout for scripting and CI.
 
 ## Agent Skills
 
-This package ships two [Agent Skills](https://github.com/DevilTea/deviltea-labs/tree/main/packages/spec-tool/skills)
-that sequence the CLI for common workflows without reimplementing its logic:
+This package currently ships two inherited [Agent Skills](https://github.com/DevilTea/deviltea-labs/tree/main/packages/spec-tool/skills)
+that sequence the shipped CLI without reimplementing its logic. They describe
+current operational behavior, not canonical product design; Discussion #65 wins
+on any design conflict:
 
 - **`author-engineering-files`** — initializes a Spec project, discovers context
   with staged read-only queries, creates draft Artifacts, plans CHG-backed
@@ -119,41 +136,13 @@ This clones the repository and copies the two Skills (which live under
 `packages/spec-tool/skills/` in this monorepo) into your agent's Skill directory;
 add `-g` to install them globally instead of into the current project.
 
-### Repository workflow adoption
 
-The Skills activate for specification-maintenance requests, but only repository-level
-instructions can guarantee that a generic request (e.g. "add feature X")
-first enters the EF lifecycle. Adapt this harness-neutral snippet into your
-repository's instruction file (`AGENTS.md`, `CLAUDE.md`, or equivalent):
+## Current Implementation Reference
 
-```text
-When asked to make an engineering change to this repository:
-1. Discover Spec context (does `.engineering/` exist, and what does it say)
-   before writing code.
-2. When applicable, draft or update the engineering intent in Spec first
-   (PROJECT/PRD/REQ/ADR/POL) — see the `author-engineering-files` Skill.
-3. Implement the change.
-4. Record a CHG (or other authoritative effect) for the change — see
-   `author-engineering-files`.
-5. Run `spec validate --scope snapshot` on the working tree.
-6. Validate the integration boundary of the candidate commit(s)
-   (`spec validate --scope transition|bootstrap|range`) before the
-   integration ref advances — see the `review-engineering-change` Skill.
-7. Integrate only after validation succeeds.
-```
-
-## Full Specification
-
-The retained EF Core v1 ontology, lifecycle, validation, query, and CLI
-contract are specified in
-[`docs/ef-core/`](https://github.com/DevilTea/deviltea-labs/tree/main/packages/spec-tool/docs/ef-core),
-starting with the [Overview](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/docs/ef-core/00-overview.md)
-and the [CLI Contract](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/docs/ef-core/13-cli-contract.md).
-
-For a worked example wiring `spec validate --scope range` into CI so a whole
-candidate range is validated while it is still unpublished, before the
-integration ref advances, see the
-[GitHub Actions integration-range recipe](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/docs/planning/03-ci-recipe-github-actions-range-validation.md).
+The retained [`docs/ef-core/`](https://github.com/DevilTea/deviltea-labs/tree/main/packages/spec-tool/docs/ef-core)
+describes the inherited EF behavior that much of the current implementation
+still follows. It is useful when working on shipped code, but it is not the
+canonical Spec product model and yields to Discussion #65 whenever they differ.
 
 ## License
 

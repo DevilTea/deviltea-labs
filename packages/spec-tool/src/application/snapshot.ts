@@ -14,7 +14,7 @@
  * or from a materialized Git commit tree, so `validateSnapshot` never needs
  * to know which source produced it.
  *
- * Both loaders return a typed result rather than throwing (00-implementation-decisions.md:
+ * Both loaders return a typed result rather than throwing (inherited implementation contract:
  * "Domain and application code return typed results and do not call
  * `process.exit()`").
  */

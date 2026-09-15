@@ -1,5 +1,5 @@
 /**
- * 00-implementation-decisions.md: "Tests or static checks must verify that
+ * Static contract: tests verify that
  * commands and flags referenced by Skills exist in the matching CLI version."
  *
  * This scans every `.md` file under `skills/` for `spec ...` invocations --
