@@ -16,8 +16,17 @@ When these sources conflict, the higher-precedence source wins.
 
 Standalone planning documents are intentionally not maintained in this package. New design exploration, alternatives, and accepted decisions belong in Discussion #65 so there is one canonical continuation point.
 
+## Spec-native implementation
+
+The current MVP is rooted at `.spec/` and uses the Spec-native UUIDv7/kind
+model. It does not read or migrate `.engineering/` workspaces. The core slice
+currently provides `spec init`, `spec validate`, and `spec version`; artifact
+CRUD, query, lifecycle mutation, relation mutation, and Resource mutation are
+later slices.
+
 ## Inherited EF Core documentation
 
-`docs/ef-core/` is kept temporarily because much of the copied implementation still follows it and its deterministic parsing/validation rules remain useful implementation reference material.
-
-It is **not** the canonical Spec product model. In particular, copied EF assumptions about identity, workspace layout, target/version workflow, Git authority boundaries, implementation linkage, and change transactions may be superseded by Discussion #65 before the implementation is updated.
+`docs/ef-core/` is retained as historical EF implementation reference. It is
+**not** the Spec product model. Its assumptions about identity, workspace
+layout, lifecycle orchestration, Git authority, implementation linkage, and
+change transactions must not be imported into Spec runtime behavior.

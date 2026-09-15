@@ -1,441 +1,92 @@
 #!/usr/bin/env node
-/**
- * Packed-package consumer smoke test for the published package contract.
- * "Testing and Verification": "installing the output of `pnpm pack` and
- * invoking the installed `spec` binary"; "exact stdout, stderr, JSON shape,
- * trailing newline, and exit-code assertions"; "byte-for-byte `resource
- * read` assertions"; "CI execution on Ubuntu, macOS, and Windows with
- * supported Node.js versions").
- *
- * Plain Node.js script, no test framework: packs the current working tree
- * with `pnpm pack`, installs the resulting tarball into a clean throwaway
- * npm consumer project (the way a real downstream consumer would), and
- * exercises the installed `spec` binary end to end. Every assertion is exact
- * -- byte-level for the raw-transport failure cases, full JSON-shape for the
- * JSON envelopes -- rather than a loose "it ran" smoke check, per the linked
- * decisions doc.
- *
- * Assumes `pnpm build` has already produced `dist/` (the `test:package`
- * script in `package.json` runs `pnpm build` first); this script only packs
- * and consumes the existing build output.
- *
- * When the `SPEC_SMOKE_TARBALL` environment variable is set to an absolute
- * path, that tarball is installed directly and the internal build+pack step
- * is skipped. CI uses this to build and pack the package once on Node.js 24
- * and reuse the resulting tarball for the packed-consumer runs on every
- * supported OS and Node.js version, instead of rebuilding per matrix leg.
- */
+
+/* Packed-consumer smoke test for the Spec-native CLI contract. */
 
 import { spawnSync } from 'node:child_process'
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-} from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import process from 'node:process'
 
-const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-const git = process.platform === 'win32' ? 'git.exe' : 'git'
-
-/** @type {{ name: string, ok: boolean, detail: string }[]} */
+const packageTool = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+const npmTool = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const temporaryDirectory = mkdtempSync(join(tmpdir(), 'deviltea-spec-smoke-'))
 const results = []
 
 function record(name, ok, detail = '') {
 	results.push({ name, ok, detail })
 }
 
-function assert(name, condition, detail = '') {
+function setup(command, args, cwd) {
+	const result = spawnSync(command, args, { cwd, encoding: 'utf8', env: process.env, maxBuffer: 10 * 1024 * 1024, shell: process.platform === 'win32' })
+	if (result.status !== 0)
+		throw new Error(`${command} ${args.join(' ')} failed\n${result.stdout}\n${result.stderr}`)
+}
+
+function run(binary, args, cwd) {
+	return spawnSync(binary, args, { cwd, encoding: 'utf8', env: process.env, maxBuffer: 10 * 1024 * 1024, shell: process.platform === 'win32' })
+}
+
+function check(name, condition, detail = '') {
 	record(name, Boolean(condition), condition ? '' : detail)
 }
 
-function assertEqual(name, actual, expected, context = '') {
-	const ok = Object.is(actual, expected)
-	const detail = ok ? '' : `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}${context ? ` | ${context}` : ''}`
-	record(name, ok, detail)
-}
-
-const MAX_OUTPUT_DETAIL_BYTES = 4000
-
-/** Truncates `text` to a reasonable length for a failure detail line, so a huge stream doesn't flood CI logs while still being complete enough to diagnose a JSON-shape or exit-code mismatch. */
-function truncateForDetail(text) {
-	if (text.length <= MAX_OUTPUT_DETAIL_BYTES)
-		return text
-	return `${text.slice(0, MAX_OUTPUT_DETAIL_BYTES)}... [truncated, ${text.length} chars total]`
-}
-
-/** Full stdout/stderr (truncated) for a `runCli`/`runSpec` result, appended to assertion failure details so a failing CI run shows the actual JSON diagnostics instead of just "expected/got". */
-function describeCliResult(result) {
-	return `stdout=${JSON.stringify(truncateForDetail(result.stdout.toString('utf8')))} stderr=${JSON.stringify(truncateForDetail(result.stderr.toString('utf8')))}`
-}
-
-/** Runs a setup command; throws with full diagnostic output on failure. Setup failures are environment problems, not smoke-test findings, so they abort the run instead of being recorded as findings. */
-function runSetup(command, args, options = {}) {
-	const result = spawnSync(command, args, {
-		cwd: options.cwd,
-		encoding: 'utf8',
-		env: { ...process.env, ...options.env },
-		maxBuffer: 10 * 1024 * 1024,
-		shell: options.shell,
-	})
-	if (result.status !== 0) {
-		throw new Error([
-			`Setup command failed: ${command} ${args.join(' ')}`,
-			result.error?.message,
-			result.stdout,
-			result.stderr,
-		].filter(Boolean)
-			.join('\n'))
+try {
+	const supplied = process.env.SPEC_SMOKE_TARBALL
+	let tarball
+	if (supplied) {
+		if (!isAbsolute(supplied) || !existsSync(supplied))
+			throw new Error('SPEC_SMOKE_TARBALL must be an existing absolute path')
+		tarball = supplied
 	}
-	return result
-}
-
-/**
- * Quotes a single argument for inclusion in the `cmd.exe` command line that
- * `spawnSync` builds when `shell: true` (see `runSetupCliTool` below): Node
- * assembles that command line as `[file, ...args].join(' ')` with no
- * per-argument quoting of its own (`windowsVerbatimArguments` is set so Node
- * does not add any), so an argument containing whitespace must be
- * pre-quoted here or it silently splits into multiple `cmd.exe` tokens. None
- * of the arguments this script passes to `npm`/`pnpm` currently contain a
- * space or a double quote (they are literal flags or `mkdtempSync`-derived
- * paths), so this is a defensive no-op in practice today.
- */
-function quoteForWindowsShell(arg) {
-	return /[\s"]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg
-}
-
-/**
- * Runs `npm` or `pnpm` as a setup step. On Windows these resolve to `.cmd`
- * shims (a batch file cannot be the target of `CreateProcess` directly); as
- * of the CVE-2024-27980 fix (Node.js 18.20.2 / 20.12.2 / 21.7.2 and every
- * later release, which covers every Node.js version supported by this
- * package's `engines` field), `child_process.spawnSync` on Windows refuses
- * to execute a `.cmd`/`.bat` file unless `shell: true` is set, failing
- * instead with `EINVAL`
- * (https://nodejs.org/api/child_process.html#spawning-bat-and-cmd-files-on-windows).
- * `git` and `node` are native `.exe` binaries and are unaffected by this, so
- * only `npm`/`pnpm` invocations are routed through this wrapper; they still
- * run without a shell on POSIX, matching prior behavior exactly.
- */
-function runSetupCliTool(command, args, options = {}) {
-	if (process.platform === 'win32')
-		return runSetup(command, args.map(quoteForWindowsShell), { ...options, shell: true })
-	return runSetup(command, args, options)
-}
-
-/** Runs a `spec` invocation under test; never throws -- exit code and output are the assertions' subject, not a script-level failure. */
-function runSpec(specBinary, args, options = {}) {
-	return spawnSync(specBinary, args, {
-		cwd: options.cwd,
-		encoding: 'buffer',
-		env: { ...process.env, ...options.env },
-		maxBuffer: 10 * 1024 * 1024,
-	})
-}
-
-function parseJsonOrUndefined(buffer) {
-	try {
-		return JSON.parse(buffer.toString('utf8'))
-	}
-	catch {
-		return undefined
-	}
-}
-
-function main() {
-	const temporaryDirectory = mkdtempSync(join(tmpdir(), 'deviltea-spec-smoke-'))
-
-	try {
-		// ---- Obtain a tarball of the build output -------------------------------
-		//
-		// `SPEC_SMOKE_TARBALL` (an absolute path), when set, skips the internal
-		// build+pack step and installs that tarball directly. CI packs once on
-		// Node.js 24 and reuses the tarball across every OS/Node.js matrix leg.
-
-		const suppliedTarballPath = process.env.SPEC_SMOKE_TARBALL
-		let tarballPath
-
-		if (suppliedTarballPath) {
-			if (!isAbsolute(suppliedTarballPath))
-				throw new Error(`SPEC_SMOKE_TARBALL must be an absolute path, got: ${suppliedTarballPath}`)
-			if (!existsSync(suppliedTarballPath))
-				throw new Error(`SPEC_SMOKE_TARBALL does not exist: ${suppliedTarballPath}`)
-			tarballPath = suppliedTarballPath
-		}
-		else {
-			runSetupCliTool(pnpm, ['pack', '--pack-destination', temporaryDirectory])
-
-			const tarballName = readdirSync(temporaryDirectory)
-				.find(fileName => fileName.endsWith('.tgz'))
-			if (!tarballName)
-				throw new Error('pnpm pack did not produce a tarball')
-			tarballPath = join(temporaryDirectory, tarballName)
-		}
-
-		// ---- Install the tarball into a clean npm consumer project -------------
-
-		const consumerDirectory = join(temporaryDirectory, 'consumer')
-		mkdirSync(consumerDirectory)
-		runSetupCliTool(npm, ['init', '--yes'], { cwd: consumerDirectory })
-		runSetupCliTool(npm, ['install', tarballPath], { cwd: consumerDirectory })
-
-		// The installed binary is a POSIX shell script plus a `.cmd` shim on
-		// Windows (`node_modules/.bin/spec.cmd`); `spawnSync` with `shell: false`
-		// cannot execute a `.cmd` shim directly (it is not a native executable),
-		// so on Windows the CLI is invoked directly through Node.js against the
-		// installed package's entry point instead. The shim file's existence is
-		// still asserted so packaging regressions that drop the generated bin
-		// shim are caught on every platform.
-
-		const specBinaryName = process.platform === 'win32' ? 'spec.cmd' : 'spec'
-		const specBinaryShim = join(consumerDirectory, 'node_modules', '.bin', specBinaryName)
-		assert('installed spec binary exists', existsSync(specBinaryShim), `expected binary at ${specBinaryShim}`)
-
-		const specEntryPoint = join(consumerDirectory, 'node_modules', '@deviltea', 'spec-tool', 'dist', 'cli.mjs')
-		const specBinary = process.platform === 'win32' ? process.execPath : specBinaryShim
-		const specBinaryArgsPrefix = process.platform === 'win32' ? [specEntryPoint] : []
-
-		/** Invokes the installed `spec` binary under test with the platform-appropriate launcher. */
-		function runCli(args, options = {}) {
-			return runSpec(specBinary, [...specBinaryArgsPrefix, ...args], options)
-		}
-
-		const installedPackageJson = JSON.parse(readFileSync(
-			join(consumerDirectory, 'node_modules', '@deviltea', 'spec-tool', 'package.json'),
-			'utf8',
-		))
-
-		// ---- Skills ship in the npm tarball ---------------------------------------
-		// "Agent Skills": "Skills ship in the npm tarball ... under the same
-		// release tag as the CLI.") ------------------------------------------
-
-		const installedSkillsDirectory = join(consumerDirectory, 'node_modules', '@deviltea', 'spec-tool', 'skills')
-		assert('installed package ships skills/', existsSync(installedSkillsDirectory), `expected ${installedSkillsDirectory}`)
-		for (const skillName of ['author-engineering-files', 'review-engineering-change']) {
-			const skillFile = join(installedSkillsDirectory, skillName, 'SKILL.md')
-			assert(`installed package ships skills/${skillName}/SKILL.md`, existsSync(skillFile), `expected ${skillFile}`)
-		}
-		{
-			const brownfieldReference = join(installedSkillsDirectory, 'author-engineering-files', 'references', 'existing-project-bootstrap.md')
-			assert('installed package ships the existing-project bootstrap reference', existsSync(brownfieldReference), `expected ${brownfieldReference}`)
-		}
-
-		// ---- (a) spec version --format json --------------------------------------
-
-		{
-			const result = runCli(['version', '--format', 'json'], { cwd: consumerDirectory })
-			const stdoutText = result.stdout.toString('utf8')
-			const newlineCount = (stdoutText.match(/\n/g) ?? []).length
-			const isExactlyOneJsonLine = stdoutText.endsWith('\n') && newlineCount === 1
-			const parsed = parseJsonOrUndefined(result.stdout)
-
-			assertEqual('version: exit code', result.status, 0, describeCliResult(result))
-			assert('version: stdout is exactly one JSON object plus one trailing LF', isExactlyOneJsonLine, `stdout=${JSON.stringify(stdoutText)}`)
-			assert('version: stdout parses as JSON', parsed !== undefined, `stdout=${JSON.stringify(stdoutText)}`)
-			assertEqual('version: schema', parsed?.schema, 'ef/version-result@1', describeCliResult(result))
-			assertEqual('version: ef_core_major', parsed?.ef_core_major, 1, describeCliResult(result))
-			assertEqual('version: version matches installed package.json', parsed?.version, installedPackageJson.version, describeCliResult(result))
-		}
-
-		// ---- (b) spec help / spec -h / spec --help (13-cli-contract.md "Version and
-		// Help": "-h"/"--help" are aliases of "spec help [command]" on every
-		// command and subcommand of the installed binary, always exit 0, and
-		// are never wrapped in the JSON envelope even with --format json.) -----
-
-		{
-			const helpResult = runCli(['help'], { cwd: consumerDirectory })
-			assertEqual('help: exit code', helpResult.status, 0, describeCliResult(helpResult))
-			const helpStdout = helpResult.stdout.toString('utf8')
-			assert('help: stdout is non-empty', helpStdout.length > 0, describeCliResult(helpResult))
-
-			const shortFlagResult = runCli(['-h'], { cwd: consumerDirectory })
-			assertEqual('-h: exit code', shortFlagResult.status, 0, describeCliResult(shortFlagResult))
-			assertEqual('-h: stdout matches spec help', shortFlagResult.stdout.toString('utf8'), helpStdout, describeCliResult(shortFlagResult))
-
-			const longFlagResult = runCli(['--help'], { cwd: consumerDirectory })
-			assertEqual('--help: exit code', longFlagResult.status, 0, describeCliResult(longFlagResult))
-			assertEqual('--help: stdout matches spec help', longFlagResult.stdout.toString('utf8'), helpStdout, describeCliResult(longFlagResult))
-
-			// A subcommand's own -h/--help must also succeed, even though this
-			// installed binary has no project at `consumerDirectory` for "version"
-			// to read (it needs none) and even when combined with --format json --
-			// help wins and stays a plain human envelope, per the contract above.
-			const subcommandHelpResult = runCli(['version', '--help', '--format', 'json'], { cwd: consumerDirectory })
-			assertEqual('version --help --format json: exit code', subcommandHelpResult.status, 0, describeCliResult(subcommandHelpResult))
-			assert('version --help --format json: stdout is not a JSON envelope', parseJsonOrUndefined(subcommandHelpResult.stdout) === undefined, describeCliResult(subcommandHelpResult))
-		}
-
-		// ---- Temp Git repo for the project-mutation assertions ------------------
-
-		const projectDirectory = join(temporaryDirectory, 'project')
-		mkdirSync(projectDirectory)
-		runSetup(git, ['init', '--initial-branch=main'], { cwd: projectDirectory })
-		runSetup(git, ['config', 'user.email', 'spec-smoke@example.com'], { cwd: projectDirectory })
-		runSetup(git, ['config', 'user.name', 'EF Smoke Test'], { cwd: projectDirectory })
-
-		// A pre-EF commit on `main` (the configured `integration_ref`), kept as
-		// the trusted range baseline below. The bootstrap and follow-up EF
-		// commits are made on a separate branch so `main` stays at this OID --
-		// exactly the real-world shape range scope validates: a multi-commit
-		// push landing before its integration ref is fast-forwarded to it.
-		runSetup(git, ['commit', '--allow-empty', '-m', 'pre-EF baseline'], { cwd: projectDirectory })
-		const preEfOid = runSetup(git, ['rev-parse', 'HEAD'], { cwd: projectDirectory }).stdout.trim()
-		runSetup(git, ['checkout', '-b', 'incoming'], { cwd: projectDirectory })
-
-		// ---- (c) spec init --------------------------------------------------------
-
-		{
-			const result = runCli([
-				'init',
-				'--yes',
-				'--format',
-				'json',
-				'--title',
-				'T',
-				'--summary',
-				'S',
-				'--vision',
-				'V',
-				'--project-scope',
-				'P',
-				'--non-goals',
-				'N',
-				'--context',
-				'C',
-				'--integration-ref',
-				'refs/heads/main',
-			], { cwd: projectDirectory })
-			const parsed = parseJsonOrUndefined(result.stdout)
-
-			assertEqual('init: exit code', result.status, 0, describeCliResult(result))
-			assert('init: parses as JSON', parsed !== undefined, describeCliResult(result))
-			assertEqual('init: applied', parsed?.applied, true, describeCliResult(result))
-			assert('init: .engineering/ef.yaml exists', existsSync(join(projectDirectory, '.engineering', 'ef.yaml')), describeCliResult(result))
-		}
-
-		// The bootstrap commit: the first commit whose `.engineering` tree entry
-		// is present, used below as one endpoint of the validated range.
-		runSetup(git, ['add', '-A'], { cwd: projectDirectory })
-		runSetup(git, ['commit', '-m', 'bootstrap EF state'], { cwd: projectDirectory })
-
-		// ---- (d) spec artifact create req ------------------------------------------
-
-		{
-			const result = runCli([
-				'artifact',
-				'create',
-				'req',
-				'--yes',
-				'--format',
-				'json',
-				'--title',
-				'R',
-				'--summary',
-				'S',
-			], { cwd: projectDirectory })
-			const parsed = parseJsonOrUndefined(result.stdout)
-
-			assertEqual('artifact create req: exit code', result.status, 0, describeCliResult(result))
-			assert('artifact create req: parses as JSON', parsed !== undefined, describeCliResult(result))
-			assertEqual('artifact create req: applied', parsed?.applied, true, describeCliResult(result))
-			assert('artifact create req: .engineering/req/REQ-001.md exists', existsSync(join(projectDirectory, '.engineering', 'req', 'REQ-001.md')), describeCliResult(result))
-		}
-
-		// The second EF-bearing commit: a transition boundary (REQ-001 added)
-		// after the bootstrap boundary, giving the range below two real
-		// first-parent boundaries to walk over actual Git objects.
-		runSetup(git, ['add', '-A'], { cwd: projectDirectory })
-		runSetup(git, ['commit', '-m', 'add REQ-001'], { cwd: projectDirectory })
-		const secondEfOid = runSetup(git, ['rev-parse', 'HEAD'], { cwd: projectDirectory }).stdout.trim()
-
-		// ---- (e) spec validate --scope snapshot ------------------------------------
-
-		{
-			const result = runCli(['validate', '--scope', 'snapshot', '--format', 'json'], { cwd: projectDirectory })
-			const parsed = parseJsonOrUndefined(result.stdout)
-
-			assertEqual('validate snapshot: exit code', result.status, 0, describeCliResult(result))
-			assert('validate snapshot: parses as JSON', parsed !== undefined, describeCliResult(result))
-			assertEqual('validate snapshot: valid', parsed?.valid, true, describeCliResult(result))
-		}
-
-		// ---- (e2) spec validate --scope range --------------------------------------
-		//
-		// Real Git objects over a real multi-commit first-parent range (a
-		// BOOTSTRAP boundary followed by an ordinary TRANSITION boundary),
-		// validated in one call from the pre-EF baseline through the tip -- the
-		// case a fake Git executor in the unit tests cannot exercise.
-
-		{
-			const result = runCli([
-				'validate',
-				'--scope',
-				'range',
-				'--baseline',
-				preEfOid,
-				'--proposed',
-				secondEfOid,
-				'--format',
-				'json',
-			], { cwd: projectDirectory })
-			const parsed = parseJsonOrUndefined(result.stdout)
-
-			assertEqual('validate range: exit code', result.status, 0, describeCliResult(result))
-			assert('validate range: parses as JSON', parsed !== undefined, describeCliResult(result))
-			assertEqual('validate range: scope', parsed?.scope, 'range', describeCliResult(result))
-			assertEqual('validate range: complete', parsed?.complete, true, describeCliResult(result))
-			assertEqual('validate range: valid', parsed?.valid, true, describeCliResult(result))
-			assertEqual('validate range: baseline_oid', parsed?.baseline_oid, preEfOid, describeCliResult(result))
-			assertEqual('validate range: proposed_oid', parsed?.proposed_oid, secondEfOid, describeCliResult(result))
-			assertEqual('validate range: integration_ref', parsed?.integration_ref, 'refs/heads/main', describeCliResult(result))
-			assertEqual('validate range: expected_ref_oid', parsed?.expected_ref_oid, preEfOid, describeCliResult(result))
-		}
-
-		// ---- (f) spec resource read failure (byte-level) ---------------------------
-
-		{
-			const result = runCli(['resource', 'read', 'REQ-999', 'x'], { cwd: projectDirectory })
-
-			assertEqual('resource read failure: exit code', result.status, 2, describeCliResult(result))
-			assertEqual('resource read failure: stdout byte length', result.stdout.length, 0, describeCliResult(result))
-		}
-
-		// ---- (g) unknown command --------------------------------------------------
-
-		{
-			const result = runCli(['nope', '--format', 'json'], { cwd: projectDirectory })
-
-			assertEqual('unknown command: exit code', result.status, 2, describeCliResult(result))
-			assertEqual('unknown command: stdout byte length', result.stdout.length, 0, describeCliResult(result))
-		}
-	}
-	finally {
-		rmSync(temporaryDirectory, { force: true, recursive: true })
+	else {
+		setup(packageTool, ['pack', '--pack-destination', temporaryDirectory], process.cwd())
+		const name = readdirSync(temporaryDirectory)
+			.find(item => item.endsWith('.tgz'))
+		if (!name)
+			throw new Error('pnpm pack did not produce a tarball')
+		tarball = join(temporaryDirectory, name)
 	}
 
-	// ---- Report ---------------------------------------------------------------
+	const consumer = join(temporaryDirectory, 'consumer')
+	mkdirSync(consumer)
+	setup(npmTool, ['init', '--yes'], consumer)
+	setup(npmTool, ['install', tarball], consumer)
+	const binary = join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? 'spec.cmd' : 'spec')
+	check('installed spec binary exists', existsSync(binary), binary)
 
-	const failed = results.filter(r => !r.ok)
+	const version = run(binary, ['version', '--format', 'json'], consumer)
+	const versionJson = JSON.parse(version.stdout)
+	check('version exits successfully', version.status === 0)
+	check('version uses Spec schema', versionJson.schema === 'spec/version-result@1')
 
-	for (const r of results) {
-		process.stdout.write(`${r.ok ? 'ok  ' : 'FAIL'} - ${r.name}\n`)
-		if (!r.ok)
-			process.stdout.write(`     ${r.detail}\n`)
-	}
+	const project = join(temporaryDirectory, 'project')
+	mkdirSync(project)
+	const init = run(binary, ['init', '--format', 'json', '--no-input', '--title', 'Smoke'], project)
+	const initJson = JSON.parse(init.stdout)
+	check('init exits successfully', init.status === 0, init.stderr)
+	check('init reports applied', initJson.ok === true && initJson.applied === true, init.stdout)
+	check('config has exact MVP bytes', readFileSync(join(project, '.spec', 'config.yaml'), 'utf8') === 'schema: spec/config@1\n')
+	const projectFiles = readdirSync(join(project, '.spec', 'projects'))
+	check('init creates one UUIDv7 project file', projectFiles.length === 1 && /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.md$/i.test(projectFiles[0] ?? ''))
 
-	if (failed.length > 0) {
-		process.stdout.write(`\n${failed.length}/${results.length} assertion(s) failed.\n`)
-		process.exitCode = 1
-		return
-	}
+	const validate = run(binary, ['validate', '--format', 'json', '--no-input'], project)
+	const validateJson = JSON.parse(validate.stdout)
+	check('validate exits successfully', validate.status === 0, validate.stderr)
+	check('validate accepts initialized workspace', validateJson.schema === 'spec/validation-result@1' && validateJson.valid === true, validate.stdout)
+	check('legacy EF root is not created', !existsSync(join(project, '.engineering')))
+}
+finally {
+	rmSync(temporaryDirectory, { force: true, recursive: true })
+}
 
+const failed = results.filter(result => !result.ok)
+for (const result of results)
+	process.stdout.write(`${result.ok ? 'ok  ' : 'FAIL'} - ${result.name}${result.detail ? `: ${result.detail}` : ''}\n`)
+if (failed.length > 0) {
+	process.stdout.write(`\n${failed.length}/${results.length} assertion(s) failed.\n`)
+	process.exitCode = 1
+}
+else {
 	process.stdout.write(`\nAll ${results.length} assertions passed.\n`)
 }
-
-main()
