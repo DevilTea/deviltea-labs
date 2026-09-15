@@ -9,7 +9,7 @@
  * not itself touch the filesystem or spawn Git. Both filesystem existence and
  * the Git worktree-association question are injected, so tests can supply a
  * fake for isolated cases and a real Git-backed implementation for
- * integration cases (00-implementation-decisions.md "inject the git
+ * integration cases (the Git executor is injected so repository behavior
  * interface so tests can pass a fake where real git is unnecessary").
  */
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * The `spec` CLI entry point (13-cli-contract.md; 00-implementation-decisions.md
+ * The `spec` CLI entry point (inherited EF CLI contract; see docs/README.md for authority).
  * "The four Core exit codes are mapped only at the CLI boundary").
  *
  * This is the ONLY place `process.exit()` is called. `./cli/program.ts`'s

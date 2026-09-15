@@ -1,6 +1,6 @@
 /**
  * Typed Git plumbing adapter over {@link GitExecutor}
- * (00-implementation-decisions.md, "Git Execution"; trusted-transition
+ * (current inherited Git execution and trusted-transition
  * baseline and bootstrap-ref conditions in 11-filesystem-and-config.md;
  * atomicity in 07-change-transactions.md).
  *
@@ -504,7 +504,7 @@ export interface GitCapabilities {
 
 /**
  * Detect required Git capabilities at runtime rather than trusting a version
- * string alone (00-implementation-decisions.md). Without `root`, only Git's
+ * string alone. Without `root`, only Git's
  * availability and reported version are known; the plumbing-flag checks
  * require an actual repository to run against, so they report `false`
  * (not probed) until a root is supplied.

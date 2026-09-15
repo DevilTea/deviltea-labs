@@ -5,6 +5,8 @@ description: Author and maintain EF Core engineering files (PROJECT, PRD, REQ, A
 
 # Author Engineering Files
 
+> Authority note: this Skill documents the currently shipped inherited EF behavior. It is not a Spec design authority. GitHub Discussion #65 is canonical when design and implementation differ.
+
 `spec` is the deterministic ground truth for EF Core state. This Skill is a
 workflow layer over it: it sequences the existing `spec init`, `spec artifact
 create`, `spec validate`, `spec query *`, and `spec resource read` commands. It
@@ -34,8 +36,9 @@ its shape or assume a result without executing the command.
    state is integrated, any change to *active* content - frontmatter, body,
    tags, relations, Resources, `ef.yaml`, `.gitignore` - requires a
    CHG-backed Git transition, including a one-word typo fix. There is no CLI
-   edit, lifecycle, or CHG-completion command: you author these changes
-   directly as files. See `references/chg-planning.md`. Single exception:
+   edit, lifecycle, or CHG-completion command in the inherited implementation:
+   these changes are authored directly as files and checked by the shipped
+   validator. This is current behavior, not future Spec design. Single exception:
    during first-time bootstrap, before any authoritative EF integration,
    accepted initial content may be edited directly with no CHG - see
    `references/existing-project-bootstrap.md`.
@@ -102,7 +105,7 @@ its shape or assume a result without executing the command.
 
 3. What is being authored?
    new draft PRD/REQ/ADR/POL/CHG        -> references/draft-authoring.md
-   change to ALREADY-active content      -> references/chg-planning.md
+   change to ALREADY-active content      -> follow current validator-enforced inherited CHG rules
    (draft body edits on an existing draft file are just direct edits - no CLI
    command exists for editing, so open the file and edit it)
 
@@ -127,9 +130,6 @@ its shape or assume a result without executing the command.
 - `references/draft-authoring.md` - `spec artifact create <type>`, required
   envelope fields, per-type required body headings, relation ontology,
   Resource attachment, and PROJECT Terminology row ordering.
-- `references/chg-planning.md` - when a CHG is required vs. optional, effect
-  classification (`introduces`/`modifies`/`retires`), completed/retired CHG
-  body requirements, and why there is no CLI command for this step.
 - `references/validation-and-diagnostics.md` - `spec validate` scopes and
   flags, the JSON envelope, the four exit codes, and the diagnostic
   read-fix-reverify loop.

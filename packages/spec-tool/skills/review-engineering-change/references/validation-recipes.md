@@ -161,7 +161,6 @@ published to it) and the result is invalid if that assertion does not hold.
 A complete range result's diagnostics MAY carry `commit_oid`, attributing a
 finding to the one candidate commit it was found at; see
 `references/diagnostics.md`. See
-`docs/planning/03-ci-recipe-github-actions-range-validation.md` for the full
 CI recipe: candidate selection for a required `pull_request`/`merge_group`
 check, and the operation-start ref capture that check depends on.
 

@@ -62,9 +62,9 @@ different flag.
 
 There is no `edit` (or delete, activate, retire, supersede) subcommand under
 `spec artifact`. Once the file exists, open it directly and edit YAML frontmatter and
-Markdown body with ordinary file edits. Draft edits need no CHG (UC-018) -
-right up until the moment the Artifact's content is active; see
-`references/chg-planning.md` for that boundary.
+Markdown body with ordinary file edits. Draft edits need no CHG (UC-018) under the currently shipped inherited EF
+behavior. Active-content mutation rules are enforced by the current validator;
+they are implementation behavior rather than the canonical future Spec design.
 
 ## Filling in the envelope
 
@@ -102,7 +102,7 @@ core sections.
 | REQ | Requirement, Rationale, Acceptance Criteria |
 | ADR | Context, Decision, Alternatives, Consequences |
 | POL | Policy, Scope, Rationale, Compliance |
-| CHG (draft) | no fixed required headings yet; see `references/chg-planning.md` for the four sections required at completion/retirement |
+| CHG (draft) | no fixed required headings yet; completed/retired CHG uses Rationale, Sources, Changes, Verification in the inherited implementation |
 
 `Success Criteria` (PRD), `Acceptance Criteria` (REQ), and `Compliance` (POL)
 each need at least one non-empty Markdown list item once the Artifact is
@@ -127,7 +127,7 @@ Relations are entries `{ type, target }`, sorted by `(type, target)`, target
 an exact same-project ID, no self-edges, no duplicate pairs. `introduces`,
 `modifies`, and `retires` are written only by a CHG describing a real
 transaction - never write them by hand on a non-CHG file, and never write
-them speculatively on a draft CHG (see `references/chg-planning.md`).
+them speculatively on a draft CHG under the inherited implementation rules.
 Incoming relations are always derived by query, never stored on the target.
 
 ## Resources (UC-015)
@@ -148,7 +148,7 @@ other active content change.
 PROJECT's `Terminology` table has no `spec artifact create` step - it is
 authored by direct file edit, either via `spec init`'s `--terminology`
 Markdown table (`references/project-init.md`) or, once PROJECT is active, a
-CHG-backed edit (`references/chg-planning.md`). The same canonical-order
+CHG-backed edit under the inherited implementation rules. The same canonical-order
 discipline as tags and relations above applies: canonical `Term` cells MUST
 use Unicode NFC, MUST be unique after trimming surrounding whitespace, and
 MUST be sorted by the trimmed plain-text UTF-8 byte sequence - ordering
