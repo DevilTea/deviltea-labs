@@ -26,8 +26,7 @@ When sources disagree, use this precedence:
 
 Standalone planning documents are intentionally not maintained in this package.
 New exploration, alternatives, and accepted design decisions belong in
-Discussion #65. See [`docs/README.md`](docs/README.md) for the repository-level
-authority note.
+Discussion #65. See the [repository-level authority note](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/docs/README.md) for the same precedence in the package tree.
 
 ## Installation
 
