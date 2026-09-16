@@ -4,8 +4,8 @@
 
 Spec is a Git-native engineering specification maintenance tool. The
 Spec-native MVP stores one workspace under `.spec/`; it does not read, migrate,
-or provide compatibility mode for `.engineering/` EF workspaces. Existing EF
-workspaces remain the responsibility of `@deviltea/ef`.
+or provide compatibility mode for `.engineering/` EF workspaces. Existing
+`.engineering/` workspaces are outside Spec's supported format.
 
 The product-design authority is [GitHub Discussion #65 — `spec-tool: canonical design discussion`](https://github.com/DevilTea/deviltea-labs/discussions/65).
 The retained `docs/ef-core/` tree is implementation history only.

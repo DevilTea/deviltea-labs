@@ -9,7 +9,6 @@ on:
       - 'vue-temp-var@*'
       - 'tiny-state-machine@*'
       - 'tiny-state-machine-vue@*'
-      - 'ef@*'
       - 'spec-tool@*'
 
 permissions:

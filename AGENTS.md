@@ -20,7 +20,7 @@ pnpm check
 
 ## Releasing
 
-Releases are driven locally: `pnpm release <package> <release>` bumps the package and opens its release pull request with auto-merge enabled, and `pnpm release:tag <package>` pushes the annotated tag after that pull request merges. Only the tag push triggers publishing, which happens exclusively in `publish.yml` via npm Trusted Publishing. Both commands push to `origin` and the second one publishes to npm, so never run them without an explicit instruction to release. See [docs/migration/release-cutover.md](docs/migration/release-cutover.md).
+Established-package releases are driven locally: `pnpm release <package> <release>` bumps the package and opens its release pull request with auto-merge enabled, and `pnpm release:tag <package>` pushes the annotated tag after that pull request merges. Normally only the tag push triggers publishing, which happens in `publish.yml` via npm Trusted Publishing. The one-time first `@deviltea/spec-tool@0.0.1` publish is an explicit bootstrap exception: from clean merged `main`, run the full check, build before packing, verify the exact tarball contains the published CLI and skills, publish that tarball manually with npm web authentication, leave `0.0.1` untagged, then configure Trusted Publishing before returning to the normal tagged flow on the next version. Release commands and manual publishing affect `origin` or npm, so never run them without an explicit instruction to release. See [docs/migration/release-cutover.md](docs/migration/release-cutover.md).
 
 ## Testing policy
 

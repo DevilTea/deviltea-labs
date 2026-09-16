@@ -1,7 +1,7 @@
 import process from 'node:process'
 import { cancel, confirm, intro, isCancel, log, outro } from '@clack/prompts'
 import { $ } from 'zx'
-import { fail, packageEntry, packageIds, packageVersion, workspaceRoot } from './release-package'
+import { assertReleaseTagAllowed, fail, packageEntry, packageIds, packageVersion, workspaceRoot } from './release-package'
 
 const REPOSITORY = 'DevilTea/deviltea-labs'
 const PUBLISH_WORKFLOW_URL = `https://github.com/${REPOSITORY}/actions/workflows/publish.yml`
@@ -144,6 +144,7 @@ async function pushReleaseTag(id: string, autoConfirm: boolean) {
 	await git('merge', '--ff-only', 'origin/main')
 
 	const version = packageVersion(id)
+	assertReleaseTagAllowed(id, version)
 	const tag = `${id}@${version}`
 
 	if (await localTagExists(tag))
