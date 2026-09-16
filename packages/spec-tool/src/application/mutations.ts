@@ -158,7 +158,6 @@ async function writeArtifactFile(root: string, artifact: Artifact, mode: Artifac
 			await chmod(temporary, existing.mode & 0o7777)
 		if (mode === 'create') {
 			await link(temporary, target)
-			await unlink(temporary)
 		}
 		else {
 			await rename(temporary, target)

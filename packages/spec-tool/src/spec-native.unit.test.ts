@@ -1,5 +1,5 @@
 import type { ArtifactKind, Status } from './domain/model'
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -163,6 +163,15 @@ describe('spec-native model', () => {
 		expect(decodeResources([{ location: '', role: 'x', mediaType: 1, description: 'd', extra: true }]).diagnostics.length)
 			.toBeGreaterThan(2)
 	})
+
+	it('does not allow prototype keys to smuggle inherited Resource fields', () => {
+		const source = `---\nschema: spec/story@1\nkind: story\nid: ${ID}\ntitle: Proto\nstatus: draft\nrelations: []\nresources:\n  - __proto__:\n      location: hidden.txt\n      role: evidence\n      mediaType: text/plain\n      description: hidden\n---\n`
+		const result = decodeArtifact(source, `.spec/stories/${ID}.md`)
+		expect(result.artifact)
+			.toBeNull()
+		expect(result.diagnostics.map(item => item.code))
+			.toContain('SPEC-RESOURCE-INVALID')
+	})
 })
 
 describe('frontmatter, config, and layout', () => {
@@ -251,6 +260,28 @@ describe('workspace persistence and validation', () => {
 		}
 		finally {
 			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	it('refuses any pre-existing .spec entry without replacing a symlinked workspace', async () => {
+		const root = await mkdtemp(join(tmpdir(), 'spec-init-symlink-'))
+		const target = await mkdtemp(join(tmpdir(), 'spec-init-target-'))
+		try {
+			await writeFile(join(target, 'sentinel.txt'), 'keep\n')
+			await symlink(target, join(root, '.spec'), process.platform === 'win32' ? 'junction' : 'dir')
+			const initialized = await initWorkspace(root, { title: 'Must not replace' })
+			expect(initialized.ok)
+				.toBe(false)
+			expect(initialized.diagnostics[0]?.code)
+				.toBe('SPEC-LAYOUT-INVALID')
+			expect((await lstat(join(root, '.spec'))).isSymbolicLink())
+				.toBe(true)
+			expect(await readFile(join(target, 'sentinel.txt'), 'utf8'))
+				.toBe('keep\n')
+		}
+		finally {
+			await rm(root, { recursive: true, force: true })
+			await rm(target, { recursive: true, force: true })
 		}
 	})
 

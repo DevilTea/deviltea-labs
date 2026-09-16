@@ -91,7 +91,10 @@ complete connected refinement closure.
 Artifact, relation, lifecycle, Resource, search, trace, and validation commands
 return deterministic human output by default. Add `--format json` for stable
 machine-readable result envelopes; CLI usage/parse failures requested in JSON
-mode use `spec/error-result@1` with diagnostics. CHG completion is explicit via
+mode use `spec/error-result@1` with diagnostics. `spec relation list` without
+`--artifact` enumerates the global stored edge set; `--direction` only changes
+filtering when a focal `--artifact` is supplied because the global incoming and
+outgoing sets contain the same stored edges. CHG completion is explicit via
 `spec lifecycle complete`; chained supersession transfers current replacement
 targets to the new active replacement. Terminal Artifacts are immutable, and
 only draft Artifacts may be physically deleted.

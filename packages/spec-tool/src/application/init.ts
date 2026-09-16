@@ -89,10 +89,12 @@ export async function initWorkspace(root: string, values: InitValues = {}): Prom
 	if (suppliedTitle && /[\r\n]/.test(suppliedTitle))
 		return { ok: false, diagnostics: [diagnostic('SPEC-ENVELOPE-INVALID', 'Project title must be a non-empty single-line string.', { field: 'title' })] }
 	try {
-		if ((await lstat(specPath)).isDirectory() || (await lstat(specPath)).isFile())
-			return { ok: false, diagnostics: [diagnostic('SPEC-LAYOUT-INVALID', `A Spec workspace already exists at '${SPEC_ROOT}/'.`, { path: SPEC_ROOT })] }
+		await lstat(specPath)
+		return { ok: false, diagnostics: [diagnostic('SPEC-LAYOUT-INVALID', `A Spec workspace entry already exists at '${SPEC_ROOT}'.`, { path: SPEC_ROOT })] }
 	}
-	catch {
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+			return { ok: false, diagnostics: [diagnostic('SPEC-IO-ERROR', `Could not inspect '${SPEC_ROOT}': ${(error as Error).message}.`, { path: SPEC_ROOT })] }
 		// The expected first-init case: `.spec/` does not exist yet.
 	}
 	const plan = computeInitPlan(projectRoot, values)

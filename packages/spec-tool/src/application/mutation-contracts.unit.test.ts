@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { withWorkspaceMutationLock } from '../cli/commands/mutation'
 import { runCli } from '../cli/program'
 import { REQUIRED_SECTIONS } from '../domain/model'
 import { initWorkspace } from './init'
@@ -179,6 +180,36 @@ describe('spec-native mutation failure contracts', () => {
 		}
 	})
 
+	it('recovers a stale mutation lock without allowing a second writer to enter concurrently', async () => {
+		const root = await initializedWorkspace()
+		let release!: () => void
+		let entered!: () => void
+		const gate = new Promise<void>(resolve => release = resolve)
+		const acquired = new Promise<void>(resolve => entered = resolve)
+		try {
+			await writeFile(join(root, '.spec-tool.lock'), `${JSON.stringify({ pid: 2147483647, nonce: 'stale-by-test' })}\n`)
+			const first = withWorkspaceMutationLock(root, async () => {
+				entered()
+				await gate
+				return { ok: true, applied: false, value: 'first', diagnostics: [] }
+			})
+			await acquired
+			const second = await withWorkspaceMutationLock(root, async () => ({ ok: true, applied: false, value: 'second', diagnostics: [] }))
+			expect(second.ok)
+				.toBe(false)
+			expect(second.diagnostics.map(item => item.code))
+				.toContain('SPEC-IO-ERROR')
+			release()
+			expect(await first)
+				.toMatchObject({ ok: true, value: 'first' })
+		}
+		finally {
+			release?.()
+			await rm(join(root, '.spec-tool.lock'), { force: true })
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
 	it('rejects invalid supersession candidates', async () => {
 		const root = await initializedWorkspace()
 		try {
@@ -241,12 +272,15 @@ describe('spec-native relation command contracts', () => {
 			const outgoing = await jsonCommand(root, ['relation', 'list', '--artifact', useCase.id, '--direction', 'outgoing'])
 			const incoming = await jsonCommand(root, ['relation', 'list', '--artifact', story.id, '--direction', 'incoming'])
 			const all = await jsonCommand(root, ['relation', 'list', '--artifact', story.id, '--direction', 'all'])
+			const globalIncoming = await jsonCommand(root, ['relation', 'list', '--direction', 'incoming'])
 			expect(outgoing.json.relations)
 				.toHaveLength(1)
 			expect(incoming.json.relations)
 				.toHaveLength(1)
 			expect(all.json.relations)
 				.toHaveLength(1)
+			expect(globalIncoming.json.relations)
+				.toHaveLength(3)
 			expect(diagnosticCodes(await jsonCommand(root, ['relation', 'list', '--artifact', 'missing'])))
 				.toContain('SPEC-ARTIFACT-NOT-FOUND')
 			expect(diagnosticCodes(await jsonCommand(root, ['relation', 'list', '--direction', 'sideways'])))

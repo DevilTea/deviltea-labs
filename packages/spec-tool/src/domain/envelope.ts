@@ -32,7 +32,7 @@ function plainValue(node: unknown): unknown {
 	if (isSeq(node))
 		return node.items.map(plainValue)
 	if (isMap(node)) {
-		const result: Record<string, unknown> = {}
+		const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>
 		for (const pair of node.items) {
 			const key = isScalar(pair.key) ? pair.key.value : undefined
 			if (typeof key === 'string')

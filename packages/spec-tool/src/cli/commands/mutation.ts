@@ -51,6 +51,44 @@ async function readMutationLock(path: string): Promise<MutationLockOwner | undef
 	}
 }
 
+async function reclaimStaleMutationLock(root: string, lockPath: string, owner: MutationLockOwner): Promise<boolean> {
+	const claimPath = join(resolve(root), `.spec-tool-stale-${owner.nonce}.claim`)
+	let claimed = false
+	try {
+		try {
+			await link(lockPath, claimPath)
+			claimed = true
+		}
+		catch (error) {
+			const code = (error as NodeJS.ErrnoException).code
+			if (code === 'ENOENT')
+				return true
+			if (code !== 'EEXIST')
+				throw error
+			const existingClaim = await readMutationLock(claimPath)
+			if (existingClaim?.nonce === owner.nonce && !isProcessAlive(existingClaim.pid)) {
+				await unlink(claimPath)
+					.catch(() => undefined)
+				return true
+			}
+			return false
+		}
+
+		const claimedOwner = await readMutationLock(claimPath)
+		const currentOwner = await readMutationLock(lockPath)
+		if (claimedOwner?.nonce !== owner.nonce || currentOwner?.nonce !== owner.nonce)
+			return false
+		await unlink(lockPath)
+		return true
+	}
+	finally {
+		if (claimed) {
+			await rm(claimPath, { force: true })
+				.catch(() => undefined)
+		}
+	}
+}
+
 async function acquireMutationLock(root: string): Promise<{ lock?: MutationLock, diagnostics: Diagnostic[] }> {
 	const lockPath = join(resolve(root), MUTATION_LOCK_FILE)
 	const nonce = randomUUID()
@@ -58,7 +96,7 @@ async function acquireMutationLock(root: string): Promise<{ lock?: MutationLock,
 	const owner: MutationLockOwner = { pid: process.pid, nonce }
 	try {
 		await writeFile(temporary, `${JSON.stringify(owner)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
-		for (let attempt = 0; attempt < 2; attempt++) {
+		for (let attempt = 0; attempt < 4; attempt++) {
 			try {
 				await link(temporary, lockPath)
 				return {
@@ -78,10 +116,9 @@ async function acquireMutationLock(root: string): Promise<{ lock?: MutationLock,
 				if ((error as NodeJS.ErrnoException).code !== 'EEXIST')
 					throw error
 				const current = await readMutationLock(lockPath)
-				if (attempt === 0 && current && !isProcessAlive(current.pid)) {
-					await unlink(lockPath)
-						.catch(() => undefined)
-					continue
+				if (current && !isProcessAlive(current.pid)) {
+					if (await reclaimStaleMutationLock(root, lockPath, current))
+						continue
 				}
 				return { diagnostics: [diagnostic('SPEC-IO-ERROR', 'Another spec mutation is already in progress for this workspace.', { path: MUTATION_LOCK_FILE })] }
 			}
