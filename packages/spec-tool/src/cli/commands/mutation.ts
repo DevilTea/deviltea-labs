@@ -2,7 +2,7 @@ import type { MutationResult } from '../../application/mutations'
 import type { Diagnostic } from '../../domain/diagnostics'
 import type { CommandOutcome } from '../command-outcome'
 import { randomUUID } from 'node:crypto'
-import { link, readFile, rm, unlink, writeFile } from 'node:fs/promises'
+import { link, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import process from 'node:process'
 import { diagnostic } from '../../domain/diagnostics'
@@ -27,7 +27,8 @@ interface MutationLock {
 	release: () => Promise<void>
 }
 
-const MUTATION_LOCK_FILE = '.spec-tool.lock'
+const MUTATION_LOCK_PREFIX = '.spec-tool-lock-'
+const MUTATION_LOCK_SUFFIX = '.claim'
 
 function isProcessAlive(pid: number): boolean {
 	try {
@@ -51,86 +52,64 @@ async function readMutationLock(path: string): Promise<MutationLockOwner | undef
 	}
 }
 
-async function reclaimStaleMutationLock(root: string, lockPath: string, owner: MutationLockOwner): Promise<boolean> {
-	const claimPath = join(resolve(root), `.spec-tool-stale-${owner.nonce}.claim`)
-	let claimed = false
-	try {
-		try {
-			await link(lockPath, claimPath)
-			claimed = true
-		}
-		catch (error) {
-			const code = (error as NodeJS.ErrnoException).code
-			if (code === 'ENOENT')
-				return true
-			if (code !== 'EEXIST')
-				throw error
-			const existingClaim = await readMutationLock(claimPath)
-			if (existingClaim?.nonce === owner.nonce && !isProcessAlive(existingClaim.pid)) {
-				await unlink(claimPath)
-					.catch(() => undefined)
-				return true
-			}
-			return false
-		}
+function mutationLockClaimName(nonce: string): string {
+	return `${MUTATION_LOCK_PREFIX}${nonce}${MUTATION_LOCK_SUFFIX}`
+}
 
-		const claimedOwner = await readMutationLock(claimPath)
-		const currentOwner = await readMutationLock(lockPath)
-		if (claimedOwner?.nonce !== owner.nonce || currentOwner?.nonce !== owner.nonce)
-			return false
-		await unlink(lockPath)
-		return true
-	}
-	finally {
-		if (claimed) {
-			await rm(claimPath, { force: true })
-				.catch(() => undefined)
-		}
-	}
+function isMutationLockClaim(name: string): boolean {
+	return name.startsWith(MUTATION_LOCK_PREFIX) && name.endsWith(MUTATION_LOCK_SUFFIX)
 }
 
 async function acquireMutationLock(root: string): Promise<{ lock?: MutationLock, diagnostics: Diagnostic[] }> {
-	const lockPath = join(resolve(root), MUTATION_LOCK_FILE)
+	const workspaceRoot = resolve(root)
 	const nonce = randomUUID()
-	const temporary = join(resolve(root), `.spec-tool-lock-${nonce}.tmp`)
+	const claimName = mutationLockClaimName(nonce)
+	const claimPath = join(workspaceRoot, claimName)
+	const temporary = join(workspaceRoot, `.spec-tool-lock-${nonce}.tmp`)
 	const owner: MutationLockOwner = { pid: process.pid, nonce }
+	let keepClaim = false
 	try {
 		await writeFile(temporary, `${JSON.stringify(owner)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
-		for (let attempt = 0; attempt < 4; attempt++) {
-			try {
-				await link(temporary, lockPath)
-				return {
-					lock: {
-						release: async () => {
-							const current = await readMutationLock(lockPath)
-							if (current?.nonce === nonce) {
-								await unlink(lockPath)
-									.catch(() => undefined)
-							}
-						},
-					},
-					diagnostics: [],
-				}
+		await link(temporary, claimPath)
+
+		const entries = await readdir(workspaceRoot)
+		for (const name of entries) {
+			if (name === claimName || !isMutationLockClaim(name))
+				continue
+			const otherPath = join(workspaceRoot, name)
+			const other = await readMutationLock(otherPath)
+			if (!other) {
+				return { diagnostics: [diagnostic('SPEC-IO-ERROR', 'A Spec workspace mutation claim could not be read safely.', { path: name })] }
 			}
-			catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== 'EEXIST')
-					throw error
-				const current = await readMutationLock(lockPath)
-				if (current && !isProcessAlive(current.pid)) {
-					if (await reclaimStaleMutationLock(root, lockPath, current))
-						continue
-				}
-				return { diagnostics: [diagnostic('SPEC-IO-ERROR', 'Another spec mutation is already in progress for this workspace.', { path: MUTATION_LOCK_FILE })] }
+			if (!isProcessAlive(other.pid)) {
+				await rm(otherPath, { force: true })
+					.catch(() => undefined)
+				continue
 			}
+			return { diagnostics: [diagnostic('SPEC-IO-ERROR', 'Another spec mutation is already in progress for this workspace.', { path: name })] }
 		}
-		return { diagnostics: [diagnostic('SPEC-IO-ERROR', 'Could not acquire the Spec workspace mutation lock.', { path: MUTATION_LOCK_FILE })] }
+
+		keepClaim = true
+		return {
+			lock: {
+				release: async () => {
+					await rm(claimPath, { force: true })
+						.catch(() => undefined)
+				},
+			},
+			diagnostics: [],
+		}
 	}
 	catch (error) {
-		return { diagnostics: [diagnostic('SPEC-IO-ERROR', `Could not acquire the Spec workspace mutation lock: ${(error as Error).message}.`, { path: MUTATION_LOCK_FILE })] }
+		return { diagnostics: [diagnostic('SPEC-IO-ERROR', `Could not acquire the Spec workspace mutation lock: ${(error as Error).message}.`, { path: claimName })] }
 	}
 	finally {
 		await rm(temporary, { force: true })
 			.catch(() => undefined)
+		if (!keepClaim) {
+			await rm(claimPath, { force: true })
+				.catch(() => undefined)
+		}
 	}
 }
 

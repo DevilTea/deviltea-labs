@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -167,7 +167,7 @@ describe('spec-native mutation failure contracts', () => {
 	it('fails a concurrent CLI mutation while the workspace mutation lock is owned by a live process', async () => {
 		const root = await initializedWorkspace()
 		try {
-			await writeFile(join(root, '.spec-tool.lock'), `${JSON.stringify({ pid: process.pid, nonce: 'held-by-test' })}\n`)
+			await writeFile(join(root, '.spec-tool-lock-held-by-test.claim'), `${JSON.stringify({ pid: process.pid, nonce: 'held-by-test' })}\n`)
 			const result = await jsonCommand(root, ['artifact', 'create', '--kind', 'story', '--title', 'Blocked writer'])
 			expect(result.exitCode)
 				.toBe(2)
@@ -175,37 +175,43 @@ describe('spec-native mutation failure contracts', () => {
 				.toContain('SPEC-IO-ERROR')
 		}
 		finally {
-			await rm(join(root, '.spec-tool.lock'), { force: true })
+			await rm(join(root, '.spec-tool-lock-held-by-test.claim'), { force: true })
 			await rm(root, { recursive: true, force: true })
 		}
 	})
 
-	it('recovers a stale mutation lock without allowing a second writer to enter concurrently', async () => {
+	it('recovers stale unique claims without allowing concurrent writers to enter together', async () => {
 		const root = await initializedWorkspace()
 		let release!: () => void
-		let entered!: () => void
 		const gate = new Promise<void>(resolve => release = resolve)
-		const acquired = new Promise<void>(resolve => entered = resolve)
+		let entered = 0
+		const staleClaim = join(root, '.spec-tool-lock-stale-by-test.claim')
 		try {
-			await writeFile(join(root, '.spec-tool.lock'), `${JSON.stringify({ pid: 2147483647, nonce: 'stale-by-test' })}\n`)
-			const first = withWorkspaceMutationLock(root, async () => {
-				entered()
+			await writeFile(staleClaim, `${JSON.stringify({ pid: 2147483647, nonce: 'stale-by-test' })}\n`)
+			const attempts = Array.from({ length: 8 }, (_, index) => withWorkspaceMutationLock(root, async () => {
+				entered++
 				await gate
-				return { ok: true, applied: false, value: 'first', diagnostics: [] }
-			})
-			await acquired
-			const second = await withWorkspaceMutationLock(root, async () => ({ ok: true, applied: false, value: 'second', diagnostics: [] }))
-			expect(second.ok)
-				.toBe(false)
-			expect(second.diagnostics.map(item => item.code))
-				.toContain('SPEC-IO-ERROR')
+				return { ok: true, applied: false, value: index, diagnostics: [] }
+			}))
+			await new Promise(resolve => setTimeout(resolve, 50))
+			expect(entered)
+				.toBeLessThanOrEqual(1)
 			release()
-			expect(await first)
-				.toMatchObject({ ok: true, value: 'first' })
+			const results = await Promise.all(attempts)
+			expect(results.filter(result => result.ok))
+				.toHaveLength(entered)
+			expect(results.filter(result => !result.ok)
+				.every(result => result.diagnostics.some(item => item.code === 'SPEC-IO-ERROR')))
+				.toBe(true)
+			const recovered = await withWorkspaceMutationLock(root, async () => ({ ok: true, applied: false, value: 'recovered', diagnostics: [] }))
+			expect(recovered)
+				.toMatchObject({ ok: true, value: 'recovered' })
+			await expect(readFile(staleClaim, 'utf8'))
+				.rejects.toBeDefined()
 		}
 		finally {
 			release?.()
-			await rm(join(root, '.spec-tool.lock'), { force: true })
+			await rm(staleClaim, { force: true })
 			await rm(root, { recursive: true, force: true })
 		}
 	})
