@@ -74,6 +74,16 @@ try {
 	const validateJson = JSON.parse(validate.stdout)
 	check('validate exits successfully', validate.status === 0, validate.stderr)
 	check('validate accepts initialized workspace', validateJson.schema === 'spec/validation-result@1' && validateJson.valid === true, validate.stdout)
+	const artifact = run(binary, ['artifact', 'create', '--format', 'json', '--kind', 'story', '--title', 'Smoke story'], project)
+	const artifactJson = JSON.parse(artifact.stdout)
+	check('artifact create exits successfully', artifact.status === 0, artifact.stderr)
+	check('artifact create returns stable result', artifactJson.schema === 'spec/artifact-result@1' && artifactJson.artifact?.kind === 'story' && artifactJson.artifact?.status === 'draft', artifact.stdout)
+	const artifactId = artifactJson.artifact?.id
+	const list = run(binary, ['artifact', 'list', '--format', 'json', '--kind', 'story'], project)
+	const listJson = JSON.parse(list.stdout)
+	check('artifact list returns created Artifact', list.status === 0 && listJson.artifacts?.some(item => item.id === artifactId), list.stdout)
+	const deleted = run(binary, ['artifact', 'delete', artifactId, '--format', 'json'], project)
+	check('draft Artifact delete exits successfully', deleted.status === 0, deleted.stderr)
 	check('legacy EF root is not created', !existsSync(join(project, '.engineering')))
 }
 finally {

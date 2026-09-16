@@ -6,7 +6,7 @@ import { diagnostic } from '../domain/diagnostics'
 import { ARTIFACT_KINDS } from '../domain/model'
 import { CONFIG_PATH } from './config'
 import { discoverWorkspaceFiles } from './discovery'
-import { CANONICAL_DIRECTORY_BY_KIND, SPEC_ROOT } from './layout'
+import { CANONICAL_DIRECTORY_BY_KIND, RESOURCE_ROOT, SPEC_ROOT } from './layout'
 
 export interface WorkspaceLayoutResult {
 	diagnostics: Diagnostic[]
@@ -32,6 +32,14 @@ export async function validateWorkspaceLayout(root: string): Promise<WorkspaceLa
 		catch {
 			diagnostics.push(diagnostic('SPEC-LAYOUT-INVALID', `Missing canonical directory '${path}/'.`, { path }))
 		}
+	}
+	try {
+		if (!(await lstat(join(root, RESOURCE_ROOT))).isDirectory())
+			diagnostics.push(diagnostic('SPEC-LAYOUT-INVALID', `'${RESOURCE_ROOT}/' must be a directory.`, { path: RESOURCE_ROOT }))
+	}
+	catch {
+		// Resource storage is created by `spec init`, but remains optional for
+		// older valid workspaces that do not own any local resources yet.
 	}
 	try {
 		if (!(await lstat(join(root, CONFIG_PATH))).isFile())

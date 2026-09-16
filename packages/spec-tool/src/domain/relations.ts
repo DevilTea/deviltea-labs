@@ -5,6 +5,13 @@ import { isUuidV7 } from './identity'
 
 const RELATION_FIELDS = ['type', 'target'] as const
 
+export const RELATION_TYPES = ['refines', 'references', 'addresses', 'governed-by', 'supersedes', 'depends-on'] as const
+export type RelationType = (typeof RELATION_TYPES)[number]
+
+export function isRelationType(value: unknown): value is RelationType {
+	return typeof value === 'string' && (RELATION_TYPES as readonly string[]).includes(value)
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === 'object' && !Array.isArray(value)
 }

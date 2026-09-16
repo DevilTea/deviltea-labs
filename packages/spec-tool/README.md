@@ -20,7 +20,8 @@ schema: spec/config@1
 
 Artifact files use the canonical path `.spec/<plural-kind>/<uuid>.md`. The
 supported directories are `projects`, `prds`, `stories`, `use-cases`,
-`features`, `requirements`, `decisions`, `policies`, and `changes`.
+`features`, `requirements`, `decisions`, `policies`, and `changes`; local
+Artifact-owned Resources live under `.spec/resources/<owner-uuid>/...`.
 
 Every Artifact, including the single `kind: project` Artifact, has an opaque
 UUIDv7 identity. Its frontmatter envelope contains exactly:
@@ -47,6 +48,28 @@ npm install -g @deviltea/spec-tool
 spec init
 spec validate
 spec version
+
+spec artifact create --kind story --title "A story"
+spec artifact get <uuid>
+spec artifact update <uuid> --body-file story.md
+spec artifact delete <uuid>
+spec artifact list --kind story --status draft
+
+spec relation add <source-uuid> <target-uuid> --type refines
+spec relation remove <source-uuid> <target-uuid> --type refines
+spec relation list --artifact <uuid> --direction all
+
+spec lifecycle activate <uuid>
+spec lifecycle complete <change-uuid>
+spec lifecycle retire <uuid>
+spec lifecycle supersede <replacement-uuid> <replaced-uuid>
+
+spec resource add <artifact-uuid> \
+  --location .spec/resources/<artifact-uuid>/contract.json \
+  --role contract --media-type application/json
+spec resource remove <artifact-uuid> <location>
+spec resource list --artifact <artifact-uuid>
+spec resource read <artifact-uuid> <location>
 ```
 
 `spec init` creates all canonical directories, the exact config, and a valid
@@ -56,9 +79,12 @@ compatibility, canonical placement, required active/completed body sections,
 and relation/resource descriptor structure. It does not judge natural-language
 semantic quality.
 
-The initial implementation intentionally stops at this core slice. Artifact
-CRUD, query, lifecycle mutation, relation mutation, and Resource mutation
-commands are subsequent MVP slices.
+Artifact, relation, lifecycle, and Resource commands return deterministic
+human output by default. Add `--format json` for the stable machine-readable
+result envelope. CHG completion is explicit via `spec lifecycle complete`; chained supersession
+transfers current replacement targets to the new active replacement. Terminal
+Artifacts are immutable, only draft Artifacts may be physically deleted, and `resource read` only reads local files; it never
+fetches `https://` locations.
 
 ## License
 

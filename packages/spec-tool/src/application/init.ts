@@ -7,7 +7,7 @@ import { encodeArtifact } from '../domain/envelope'
 import { generateUuidV7 } from '../domain/identity'
 import { PLURAL_DIRECTORY_BY_KIND } from '../domain/model'
 import { encodeConfig } from '../repository/config'
-import { canonicalArtifactPath, SPEC_ROOT } from '../repository/layout'
+import { canonicalArtifactPath, RESOURCE_ROOT, SPEC_ROOT } from '../repository/layout'
 
 export interface InitValues {
 	title?: string
@@ -97,6 +97,7 @@ export async function initWorkspace(root: string, values: InitValues = {}): Prom
 		await mkdir(specPath, { recursive: false })
 		for (const directory of Object.values(PLURAL_DIRECTORY_BY_KIND))
 			await mkdir(join(specPath, directory), { recursive: false })
+		await mkdir(join(projectRoot, RESOURCE_ROOT), { recursive: false })
 		await writeFile(join(projectRoot, plan.files[0]!.path), plan.files[0]!.content, { encoding: 'utf8', flag: 'wx' })
 		await writeFile(join(projectRoot, plan.files[1]!.path), plan.files[1]!.content, { encoding: 'utf8', flag: 'wx' })
 		return { ok: true, plan, diagnostics: [] }

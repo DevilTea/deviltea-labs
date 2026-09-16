@@ -3,7 +3,7 @@ import { lstat, readdir, readFile } from 'node:fs/promises'
 import { dirname, join, normalize, relative, resolve } from 'node:path'
 import { diagnostic } from '../domain/diagnostics'
 import { CONFIG_PATH, decodeConfig } from './config'
-import { CANONICAL_DIRECTORY_BY_KIND, SPEC_ROOT } from './layout'
+import { CANONICAL_DIRECTORY_BY_KIND, RESOURCE_ROOT, SPEC_ROOT } from './layout'
 
 export interface WorkspaceRootResult {
 	root?: string
@@ -95,6 +95,11 @@ export async function discoverWorkspaceFiles(root: string): Promise<DiscoverWork
 		const relativePath = `${SPEC_ROOT}/${entry.name}`
 		if (relativePath === CONFIG_PATH)
 			continue
+		if (relativePath === RESOURCE_ROOT) {
+			if (!entry.isDirectory())
+				diagnostics.push(diagnostic('SPEC-LAYOUT-INVALID', `Resource root '${RESOURCE_ROOT}/' must be a directory.`, { path: RESOURCE_ROOT }))
+			continue
+		}
 		if (!entry.isDirectory() || !allowedDirectories.has(relativePath)) {
 			diagnostics.push(diagnostic('SPEC-LAYOUT-INVALID', `Unexpected entry '${relativePath}' in the Spec workspace.`, { path: relativePath }))
 			continue

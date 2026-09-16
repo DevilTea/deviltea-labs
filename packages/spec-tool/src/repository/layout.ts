@@ -3,6 +3,7 @@ import { isUuidV7 } from '../domain/identity'
 import { PLURAL_DIRECTORY_BY_KIND } from '../domain/model'
 
 export const SPEC_ROOT = '.spec'
+export const RESOURCE_ROOT = `${SPEC_ROOT}/resources`
 
 export const CANONICAL_DIRECTORY_BY_KIND: Record<ArtifactKind, string> = Object.fromEntries(
 	(Object.entries(PLURAL_DIRECTORY_BY_KIND) as [ArtifactKind, string][]).map(([kind, directory]) => [kind, `${SPEC_ROOT}/${directory}`]),
@@ -10,6 +11,10 @@ export const CANONICAL_DIRECTORY_BY_KIND: Record<ArtifactKind, string> = Object.
 
 export function canonicalArtifactPath(kind: ArtifactKind, id: string): string {
 	return `${CANONICAL_DIRECTORY_BY_KIND[kind]}/${id}.md`
+}
+
+export function canonicalResourceOwnerPath(ownerId: string): string {
+	return `${RESOURCE_ROOT}/${ownerId}`
 }
 
 export interface ParsedArtifactPath {
