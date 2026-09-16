@@ -226,24 +226,9 @@ importers:
 
   packages/spec-tool:
     dependencies:
-      '@clack/prompts':
-        specifier: 'catalog:'
-        version: 0.10.1
       commander:
         specifier: 'catalog:'
         version: 15.0.0
-      mdast-util-from-markdown:
-        specifier: 'catalog:'
-        version: 2.0.3
-      mdast-util-gfm:
-        specifier: 'catalog:'
-        version: 3.1.0
-      micromark-extension-gfm:
-        specifier: 'catalog:'
-        version: 3.0.0
-      pathe:
-        specifier: 'catalog:'
-        version: 2.0.3
       yaml:
         specifier: 'catalog:'
         version: 2.9.0

@@ -96,6 +96,19 @@ targets to the new active replacement. Terminal Artifacts are immutable, only
 draft Artifacts may be physically deleted, and `resource read` only reads local
 files; it never fetches `https://` locations.
 
+## Agent Skills
+
+The published package includes two Spec-native Agent Skills:
+
+- `maintain-spec-workspace` — invariant-aware Artifact, lifecycle, relation,
+  Resource, search/trace, and validation operations.
+- `review-spec-workspace` — read-only validation and deterministic inspection of
+  the current `.spec/` workspace.
+
+The inherited EF skill names and EF workflow guidance are not part of the Spec
+package surface. Historical `docs/ef-core/` material remains repository-only and
+is not shipped in the npm package.
+
 ## License
 
 [MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/LICENSE)
