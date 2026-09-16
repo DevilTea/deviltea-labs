@@ -67,8 +67,16 @@ export function packageVersion(id: string) {
 	return packageJson.version
 }
 
+export function assertReleaseTagAllowed(id: string, version: string): void {
+	packageEntry(id)
+	if (id === 'spec-tool' && version === '0.0.1')
+		fail('spec-tool@0.0.1 is the manual, untagged bootstrap release. Publish it manually, configure Trusted Publishing, then tag the next Spec Tool version.')
+}
+
 export function packageTag(id: string) {
-	return `${id}@${packageVersion(id)}`
+	const version = packageVersion(id)
+	assertReleaseTagAllowed(id, version)
+	return `${id}@${version}`
 }
 
 export function verifyTag(tag: string) {
@@ -82,6 +90,8 @@ export function verifyTag(tag: string) {
 
 	if (version !== currentVersion)
 		fail(`Tag ${tag} does not match ${id}@${currentVersion}`)
+
+	assertReleaseTagAllowed(id, version)
 
 	return id
 }

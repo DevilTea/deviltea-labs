@@ -29,7 +29,7 @@ after its bootstrap `0.0.1` publish:
 | `vue-temp-var` | `vue-temp-var` | `vue-temp-var@2.0.2` |
 | `@deviltea/tiny-state-machine` | `tiny-state-machine` | `tiny-state-machine@0.0.6` |
 | `@deviltea/tiny-state-machine-vue` | `tiny-state-machine-vue` | `tiny-state-machine-vue@0.0.6` |
-| `@deviltea/spec-tool` | `spec-tool` | `spec-tool@0.0.1` |
+| `@deviltea/spec-tool` | `spec-tool` | `spec-tool@0.0.2` (first normal tagged release) |
 
 `@deviltea/widget-core` and `@deviltea/widget-vue` moved to [`DevilTea/widget`](https://github.com/DevilTea/widget) and are no longer released from this repository.
 
