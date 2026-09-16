@@ -1,126 +1,220 @@
-/**
- * Stable JSON envelope construction (13-cli-contract.md "Validation JSON",
- * "Mutation JSON", "Query Commands", "Version and Help").
- *
- * Every envelope builder here returns a plain JSON-serializable object whose
- * shape exactly matches its documented schema, with every required key
- * present (using explicit `null` for a documented-nullable absent value,
- * never an omitted key). Diagnostics are converted through
- * `./diagnostics-json` uniformly.
- */
-
-import type { ArtifactSummaryProjection } from '../application/query-projection'
-import type { QueryResult } from '../application/query-types'
-import type { ValidationSummary } from '../application/snapshot-validation'
+import type { MutationResult, RelationView, ResourceReadValue } from '../application/mutations'
+import type { QueryResult, SearchFilters, SearchMatch, TraceValue } from '../application/queries'
 import type { Diagnostic } from '../domain/diagnostics'
-import type { ExitCode } from './exit'
-import { compareBytewise } from '../domain/model'
-import { diagnosticsToJson } from './diagnostics-json'
+import type { Artifact, ResourceDescriptor } from '../domain/model'
 
-// ---------------------------------------------------------------------------
-// ef/validation-result@1
-// ---------------------------------------------------------------------------
+export interface ErrorResultJson {
+	schema: 'spec/error-result@1'
+	ok: false
+	diagnostics: Diagnostic[]
+}
+
+export function errorResultJson(diagnostics: Diagnostic[]): ErrorResultJson {
+	return { schema: 'spec/error-result@1', ok: false, diagnostics }
+}
+
+export interface InitResultJson {
+	schema: 'spec/init-result@1'
+	ok: boolean
+	applied: boolean
+	root?: string
+	project?: Pick<Artifact, 'schema' | 'kind' | 'id' | 'title' | 'status'>
+	diagnostics: Diagnostic[]
+}
 
 export interface ValidationResultJson {
-	schema: 'ef/validation-result@1'
-	kind: 'validation'
-	scope: 'snapshot' | 'transition' | 'bootstrap' | 'range'
-	baseline_oid: string | null
-	proposed_oid: string | null
-	integration_ref: string | null
-	expected_ref_oid: string | null
-	strict: boolean
-	warnings_as_errors: boolean
-	workspace: boolean
-	complete: boolean
+	schema: 'spec/validation-result@1'
 	valid: boolean
-	counts: { error: number, warning: number, info: number }
-	exit_code: ExitCode
-	diagnostics: ReturnType<typeof diagnosticsToJson>
+	complete: boolean
+	artifactCount: number
+	projectCount: number
+	diagnostics: Diagnostic[]
 }
 
-export function buildValidationResultJson(summary: ValidationSummary, diagnostics: readonly Diagnostic[], workspace: boolean): ValidationResultJson {
+export interface ArtifactResultJson {
+	schema: 'spec/artifact-result@1'
+	action: 'create' | 'get' | 'update'
+	ok: boolean
+	applied: boolean
+	artifact?: Artifact
+	diagnostics: Diagnostic[]
+}
+
+export interface ArtifactDeleteResultJson {
+	schema: 'spec/artifact-delete-result@1'
+	ok: boolean
+	applied: boolean
+	deleted?: { id: string, path: string }
+	diagnostics: Diagnostic[]
+}
+
+export interface ArtifactListResultJson {
+	schema: 'spec/artifact-list-result@1'
+	ok: boolean
+	applied: boolean
+	artifacts: Artifact[]
+	diagnostics: Diagnostic[]
+}
+
+export interface RelationResultJson {
+	schema: 'spec/relation-result@1'
+	ok: boolean
+	applied: boolean
+	relation?: RelationView
+	replacement?: Artifact
+	replaced?: Artifact
+	diagnostics: Diagnostic[]
+}
+
+export interface RelationListResultJson {
+	schema: 'spec/relation-list-result@1'
+	ok: boolean
+	applied: boolean
+	relations: RelationView[]
+	diagnostics: Diagnostic[]
+}
+
+export interface LifecycleResultJson {
+	schema: 'spec/lifecycle-result@1'
+	ok: boolean
+	applied: boolean
+	artifact?: Artifact
+	replacement?: Artifact
+	replaced?: Artifact
+	diagnostics: Diagnostic[]
+}
+
+export interface ResourceResultJson {
+	schema: 'spec/resource-result@1'
+	ok: boolean
+	applied: boolean
+	resource?: ResourceDescriptor
+	diagnostics: Diagnostic[]
+}
+
+export interface ResourceListResultJson {
+	schema: 'spec/resource-list-result@1'
+	ok: boolean
+	applied: boolean
+	resources: Array<{ artifactId: string, resource: ResourceDescriptor }>
+	diagnostics: Diagnostic[]
+}
+
+export interface SearchResultJson {
+	schema: 'spec/search-result@1'
+	ok: boolean
+	query: string
+	filters: SearchFilters
+	matches: SearchMatch[]
+	diagnostics: Diagnostic[]
+}
+
+export interface TraceResultJson {
+	schema: 'spec/trace-result@1'
+	ok: boolean
+	artifactId: string
+	direction: string
+	artifacts: Artifact[]
+	relations: TraceValue['relations']
+	diagnostics: Diagnostic[]
+}
+
+export interface ResourceReadResultJson {
+	schema: 'spec/resource-read-result@1'
+	ok: boolean
+	applied: boolean
+	artifactId?: string
+	resource?: ResourceDescriptor
+	content?: string
+	encoding?: 'utf8' | 'base64'
+	bytes?: number
+	diagnostics: Diagnostic[]
+}
+
+export function initResultJson(result: Omit<InitResultJson, 'schema'>): InitResultJson {
+	return { schema: 'spec/init-result@1', ...result }
+}
+
+export function validationResultJson(result: Omit<ValidationResultJson, 'schema'>): ValidationResultJson {
+	return { schema: 'spec/validation-result@1', ...result }
+}
+
+export function artifactResultJson(action: ArtifactResultJson['action'], result: MutationResult<Artifact>): ArtifactResultJson {
+	return { schema: 'spec/artifact-result@1', action, ok: result.ok, applied: result.applied, artifact: result.value, diagnostics: result.diagnostics }
+}
+
+export function artifactDeleteResultJson(result: MutationResult<{ id: string, path: string }>): ArtifactDeleteResultJson {
+	return { schema: 'spec/artifact-delete-result@1', ok: result.ok, applied: result.applied, deleted: result.value, diagnostics: result.diagnostics }
+}
+
+export function artifactListResultJson(result: MutationResult<Artifact[]>): ArtifactListResultJson {
+	return { schema: 'spec/artifact-list-result@1', ok: result.ok, applied: result.applied, artifacts: result.value ?? [], diagnostics: result.diagnostics }
+}
+
+export function relationResultJson(result: MutationResult<RelationView | { replacement: Artifact, replaced: Artifact }>): RelationResultJson {
+	const value = result.value
 	return {
-		schema: 'ef/validation-result@1',
-		kind: 'validation',
-		scope: summary.scope,
-		baseline_oid: summary.baselineOid,
-		proposed_oid: summary.proposedOid,
-		integration_ref: summary.integrationRef,
-		expected_ref_oid: summary.expectedRefOid,
-		strict: summary.strict,
-		warnings_as_errors: summary.warningsAsErrors,
-		workspace,
-		complete: summary.complete,
-		valid: summary.valid,
-		counts: summary.counts,
-		exit_code: summary.exitCode,
-		diagnostics: diagnosticsToJson(diagnostics),
+		schema: 'spec/relation-result@1',
+		ok: result.ok,
+		applied: result.applied,
+		relation: value && 'source' in value ? value : undefined,
+		replacement: value && 'replacement' in value ? value.replacement : undefined,
+		replaced: value && 'replaced' in value ? value.replaced : undefined,
+		diagnostics: result.diagnostics,
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ef/mutation-result@1
-// ---------------------------------------------------------------------------
-
-export interface MutationChangeJson {
-	action: 'create'
-	path: string
+export function relationListResultJson(result: MutationResult<RelationView[]>): RelationListResultJson {
+	return { schema: 'spec/relation-list-result@1', ok: result.ok, applied: result.applied, relations: result.value ?? [], diagnostics: result.diagnostics }
 }
 
-export interface MutationResultJson {
-	schema: 'ef/mutation-result@1'
-	kind: 'init' | 'artifact-create'
-	complete: boolean
-	applied: boolean
-	dry_run: boolean
-	changes: MutationChangeJson[]
-	artifact: ArtifactSummaryProjection | null
-	diagnostics: ReturnType<typeof diagnosticsToJson>
-}
-
-export interface BuildMutationResultInput {
-	kind: 'init' | 'artifact-create'
-	complete: boolean
-	applied: boolean
-	dryRun: boolean
-	changes: readonly MutationChangeJson[]
-	artifact: ArtifactSummaryProjection | null
-	diagnostics: readonly Diagnostic[]
-}
-
-export function buildMutationResultJson(input: BuildMutationResultInput): MutationResultJson {
+export function lifecycleResultJson(result: MutationResult<Artifact | { replacement: Artifact, replaced: Artifact }>): LifecycleResultJson {
+	const value = result.value
 	return {
-		schema: 'ef/mutation-result@1',
-		kind: input.kind,
-		complete: input.complete,
-		applied: input.applied,
-		dry_run: input.dryRun,
-		changes: [...input.changes].sort((a, b) => compareBytewise(a.path, b.path)),
-		artifact: input.artifact,
-		diagnostics: diagnosticsToJson(input.diagnostics),
+		schema: 'spec/lifecycle-result@1',
+		ok: result.ok,
+		applied: result.applied,
+		artifact: value && 'kind' in value ? value : undefined,
+		replacement: value && 'replacement' in value ? value.replacement : undefined,
+		replaced: value && 'replaced' in value ? value.replaced : undefined,
+		diagnostics: result.diagnostics,
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ef/query-result@1 (already wire-shaped by the application layer; only the
-// embedded `diagnostics` array needs conversion).
-// ---------------------------------------------------------------------------
-
-export function queryResultToJson(result: QueryResult): Record<string, unknown> {
-	return { ...result, diagnostics: diagnosticsToJson(result.diagnostics) }
+export function resourceResultJson(result: MutationResult<ResourceDescriptor>): ResourceResultJson {
+	return { schema: 'spec/resource-result@1', ok: result.ok, applied: result.applied, resource: result.value, diagnostics: result.diagnostics }
 }
 
-// ---------------------------------------------------------------------------
-// ef/version-result@1
-// ---------------------------------------------------------------------------
-
-export interface VersionResultJson {
-	schema: 'ef/version-result@1'
-	version: string
-	ef_core_major: 1
+export function resourceListResultJson(result: MutationResult<Array<{ artifactId: string, resource: ResourceDescriptor }>>): ResourceListResultJson {
+	return { schema: 'spec/resource-list-result@1', ok: result.ok, applied: result.applied, resources: result.value ?? [], diagnostics: result.diagnostics }
 }
 
-export function buildVersionResultJson(version: string): VersionResultJson {
-	return { schema: 'ef/version-result@1', version, ef_core_major: 1 }
+export function resourceReadResultJson(result: MutationResult<ResourceReadValue>): ResourceReadResultJson {
+	return {
+		schema: 'spec/resource-read-result@1',
+		ok: result.ok,
+		applied: result.applied,
+		artifactId: result.value?.artifactId,
+		resource: result.value?.resource,
+		content: result.value?.content,
+		encoding: result.value?.encoding,
+		bytes: result.value?.bytes,
+		diagnostics: result.diagnostics,
+	}
+}
+
+export function searchResultJson(query: string, filters: SearchFilters, result: QueryResult<SearchMatch[]>): SearchResultJson {
+	return { schema: 'spec/search-result@1', ok: result.ok, query, filters, matches: result.value ?? [], diagnostics: result.diagnostics }
+}
+
+export function traceResultJson(artifactId: string, direction: string, result: QueryResult<TraceValue>): TraceResultJson {
+	return {
+		schema: 'spec/trace-result@1',
+		ok: result.ok,
+		artifactId,
+		direction,
+		artifacts: result.value?.artifacts ?? [],
+		relations: result.value?.relations ?? [],
+		diagnostics: result.diagnostics,
+	}
 }

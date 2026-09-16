@@ -1,196 +1,85 @@
-/**
- * YAML frontmatter boundary detection and YAML-level parsing for the EF
- * artifact envelope (01-artifact-envelope.md "YAML boundary" section,
- * 09-validation.md Parse phase and diagnostic contract).
- *
- * This module only establishes the frontmatter/body boundary and produces a
- * generic parsed YAML document plus structural (non-envelope-schema)
- * diagnostics: unterminated frontmatter, wrong top-level shape, duplicate
- * mapping keys, and forbidden YAML constructs (anchors, aliases, merge keys,
- * custom tags). Envelope field-level decoding (EF-ENV-003 and later) is a
- * separate module's responsibility; this module exposes the parsed mapping
- * generically for that module to consume.
- */
-
 import type { YAMLMap, Node as YamlNode } from 'yaml'
-import type { DiagnosticCode } from '../domain/diagnostic-codes'
-import type { Diagnostic, RelatedLocation, SourceLocation } from '../domain/diagnostics'
+import type { Diagnostic, SourceLocation } from '../domain/diagnostics'
 import { isAlias, isMap, isNode, isScalar, isSeq, parseDocument } from 'yaml'
-import { severityOf } from '../domain/diagnostic-codes'
-
-// ---------------------------------------------------------------------------
-// Line splitting and Unicode-scalar-aware source locations
-// ---------------------------------------------------------------------------
+import { diagnostic } from '../domain/diagnostics'
 
 interface SourceLine {
 	content: string
-	startOffset: number
-	terminatorLength: number
+	start: number
+	terminator: number
 }
 
-/** Split `source` into lines, tolerant of `\n` and `\r\n` terminators. */
-function splitLines(source: string): SourceLine[] {
+function linesOf(source: string): SourceLine[] {
 	const lines: SourceLine[] = []
-	let pos = 0
-
+	let start = 0
 	while (true) {
-		const nlIndex = source.indexOf('\n', pos)
-		if (nlIndex === -1) {
-			lines.push({ content: source.slice(pos), startOffset: pos, terminatorLength: 0 })
-			break
+		const newline = source.indexOf('\n', start)
+		if (newline < 0) {
+			lines.push({ content: source.slice(start), start, terminator: 0 })
+			return lines
 		}
-		const hasCR = nlIndex > pos && source[nlIndex - 1] === '\r'
-		const contentEnd = hasCR ? nlIndex - 1 : nlIndex
-		lines.push({
-			content: source.slice(pos, contentEnd),
-			startOffset: pos,
-			terminatorLength: nlIndex + 1 - contentEnd,
-		})
-		pos = nlIndex + 1
-	}
-	return lines
-}
-
-const DELIMITER_PATTERN = /^---[ \t]*$/
-
-function isDelimiterLine(content: string): boolean {
-	return DELIMITER_PATTERN.test(content)
-}
-
-/** Count Unicode scalar values (not UTF-16 code units) in `text`. */
-function scalarLength(text: string): number {
-	let count = 0
-
-	for (const _ of text)
-		count++
-	return count
-}
-
-/** One-based line and Unicode-scalar column of `offset` within `text`. */
-function locateOffsetInText(text: string, offset: number): SourceLocation {
-	const lines = splitLines(text)
-	let line = 1
-	let lineStart = 0
-	for (let i = 0; i < lines.length; i++) {
-		const current = lines[i]!
-		const nextStart = current.startOffset + current.content.length + current.terminatorLength
-		line = i + 1
-		lineStart = current.startOffset
-		if (offset < nextStart || i === lines.length - 1)
-			break
-	}
-	const column = scalarLength(text.slice(lineStart, offset)) + 1
-	return { line, column }
-}
-
-// ---------------------------------------------------------------------------
-// Diagnostic construction
-// ---------------------------------------------------------------------------
-
-function makeDiagnostic(
-	code: DiagnosticCode,
-	message: string,
-	options: {
-		path?: string
-		field?: string
-		location?: SourceLocation
-		related?: RelatedLocation[]
-	} = {},
-): Diagnostic {
-	return {
-		code,
-		severity: severityOf(code),
-		message,
-		path: options.path,
-		field: options.field,
-		location: options.location,
-		related: options.related ?? [],
+		const cr = newline > start && source[newline - 1] === '\r'
+		const contentEnd = cr ? newline - 1 : newline
+		lines.push({ content: source.slice(start, contentEnd), start, terminator: newline + 1 - contentEnd })
+		start = newline + 1
 	}
 }
 
-// ---------------------------------------------------------------------------
-// splitFrontmatter
-// ---------------------------------------------------------------------------
+function scalarLength(value: string): number {
+	let length = 0
+	for (const _ of value)
+		length++
+	return length
+}
+
+function locateOffset(source: string, offset: number, startLine: number): SourceLocation {
+	const lines = linesOf(source)
+	const line = lines.findIndex((item) => {
+		const end = item.start + item.content.length + item.terminator
+		return offset < end
+	})
+	const index = line < 0 ? lines.length - 1 : line
+	const current = lines[index] ?? { content: '', start: 0, terminator: 0 }
+	return { line: startLine + index, column: scalarLength(source.slice(current.start, Math.max(current.start, offset))) + 1 }
+}
+
+function delimiter(content: string): boolean {
+	return /^---[ \t]*$/.test(content)
+}
 
 export interface FrontmatterSplitSuccess {
 	ok: true
-	/** Raw YAML text strictly between the opening and closing `---` lines. */
 	frontmatterText: string
-	/** Source text after the closing `---` line and its terminator. */
 	bodyText: string
-	/** One-based line number, in `source`, of the first line of `bodyText`. */
 	bodyStartLine: number
 }
 
 export interface FrontmatterSplitFailure {
 	ok: false
-	/** EF-ENV-001: missing or unterminated frontmatter. */
 	diagnostic: Diagnostic
 }
 
 export type FrontmatterSplitResult = FrontmatterSplitSuccess | FrontmatterSplitFailure
 
-/**
- * Detect the `---`-delimited frontmatter boundary at the start of `source`
- * (01-artifact-envelope.md YAML boundary). The opening delimiter MUST be the
- * file's first line; the closing delimiter is the first subsequent line that
- * is `---` (optionally followed by trailing spaces/tabs) with no leading
- * whitespace, matching real YAML block-scalar indentation rules so that an
- * indented `---` inside frontmatter content never falsely closes it.
- */
 export function splitFrontmatter(source: string): FrontmatterSplitResult {
-	const lines = splitLines(source)
-	const first = lines[0]
-
-	if (!first || !isDelimiterLine(first.content)) {
-		return {
-			ok: false,
-			diagnostic: makeDiagnostic(
-				'EF-ENV-001',
-				'Frontmatter is missing; the file must begin with a \'---\' line.',
-				{ location: { line: 1, column: 1 } },
-			),
-		}
-	}
-
-	let closingIndex = -1
-	for (let i = 1; i < lines.length; i++) {
-		if (isDelimiterLine(lines[i]!.content)) {
-			closingIndex = i
-			break
-		}
-	}
-
-	if (closingIndex === -1) {
-		return {
-			ok: false,
-			diagnostic: makeDiagnostic(
-				'EF-ENV-001',
-				'Frontmatter is unterminated; no closing \'---\' line was found.',
-				{ location: { line: 1, column: 1 } },
-			),
-		}
-	}
-
-	const contentStart = lines[1]!.startOffset
-	const closingLine = lines[closingIndex]!
-	const frontmatterText = source.slice(contentStart, closingLine.startOffset)
-	const bodyStart = closingLine.startOffset + closingLine.content.length + closingLine.terminatorLength
-	const bodyText = source.slice(bodyStart)
-
+	const lines = linesOf(source)
+	if (!lines[0] || !delimiter(lines[0].content))
+		return { ok: false, diagnostic: diagnostic('SPEC-ARTIFACT-PARSE', 'Artifact must begin with a YAML frontmatter delimiter (---).', { location: { line: 1, column: 1 } }) }
+	const closing = lines.findIndex((line, index) => index > 0 && delimiter(line.content))
+	if (closing < 0)
+		return { ok: false, diagnostic: diagnostic('SPEC-ARTIFACT-PARSE', 'Artifact frontmatter is missing its closing delimiter (---).', { location: { line: 1, column: 1 } }) }
+	const firstBody = lines[1]?.start ?? lines[0]!.start + lines[0]!.content.length + lines[0]!.terminator
+	const close = lines[closing]!
+	const bodyStart = close.start + close.content.length + close.terminator
 	return {
 		ok: true,
-		frontmatterText,
-		bodyText,
-		bodyStartLine: closingIndex + 2,
+		frontmatterText: source.slice(firstBody, close.start),
+		bodyText: source.slice(bodyStart),
+		bodyStartLine: closing + 2,
 	}
 }
 
-// ---------------------------------------------------------------------------
-// parseFrontmatterDocument
-// ---------------------------------------------------------------------------
-
-const ALLOWED_TAGS = new Set([
+const CORE_YAML_TAGS = new Set([
 	'tag:yaml.org,2002:map',
 	'tag:yaml.org,2002:seq',
 	'tag:yaml.org,2002:str',
@@ -201,191 +90,79 @@ const ALLOWED_TAGS = new Set([
 ])
 
 export interface ParseFrontmatterDocumentOptions {
-	/**
-	 * One-based line number, in the enclosing file, corresponding to line 1 of
-	 * `frontmatterText`. Defaults to 1. Pass `bodyStartLine`'s sibling value
-	 * (always 2 for text produced by `splitFrontmatter`, since the opening
-	 * `---` always occupies file line 1) so that returned locations are
-	 * relative to the enclosing file rather than the extracted YAML text.
-	 */
 	startLine?: number
 }
 
-/** The `yaml` package's parsed-document return shape, reused verbatim. */
 export type FrontmatterDocument = ReturnType<typeof parseDocument>
 
 export interface ParsedFrontmatterDocument {
-	/** The full parsed `yaml` Document, including its own `errors`/`warnings`. */
 	document: FrontmatterDocument
-	/** The top-level YAML mapping, present only when the shape check passes. */
 	mapping: YAMLMap<unknown, unknown> | undefined
-	/** EF-ENV-002, EF-ENV-005, and EF-ENV-010 findings for this frontmatter. */
 	diagnostics: Diagnostic[]
-	/**
-	 * One-based line and Unicode-scalar-column location of a parsed YAML node,
-	 * or of a raw character offset into `frontmatterText`. Returns `undefined`
-	 * when no source position is available.
-	 */
 	locate: (nodeOrOffset: YamlNode | number | null | undefined) => SourceLocation | undefined
 }
 
-function joinField(base: string | undefined, key: string): string {
-	return base ? `${base}.${key}` : key
-}
-
-function indexField(base: string | undefined, index: number): string {
-	return `${base ?? ''}[${index}]`
-}
-
-function scalarStringValue(node: unknown): string | undefined {
-	if (isScalar(node) && typeof node.value === 'string')
-		return node.value
-	return undefined
-}
-
-/**
- * Parse YAML 1.2 frontmatter text and report structural envelope
- * diagnostics: not exactly one top-level mapping (EF-ENV-002), duplicate
- * mapping keys (EF-ENV-005), and forbidden constructs — anchors, aliases,
- * merge keys, custom tags (EF-ENV-010).
- */
 export function parseFrontmatterDocument(
 	frontmatterText: string,
 	path: string,
 	options: ParseFrontmatterDocumentOptions = {},
 ): ParsedFrontmatterDocument {
 	const startLine = options.startLine ?? 1
-
+	const document = parseDocument(frontmatterText, { uniqueKeys: true, merge: false })
 	const locate = (nodeOrOffset: YamlNode | number | null | undefined): SourceLocation | undefined => {
-		let offset: number | undefined
-		if (typeof nodeOrOffset === 'number')
-			offset = nodeOrOffset
-		else if (nodeOrOffset != null && nodeOrOffset.range != null)
-			offset = nodeOrOffset.range[0]
-		if (offset === undefined)
+		if (nodeOrOffset === null || nodeOrOffset === undefined)
 			return undefined
-		const local = locateOffsetInText(frontmatterText, offset)
-		return { line: local.line + (startLine - 1), column: local.column }
+		const offset = typeof nodeOrOffset === 'number' ? nodeOrOffset : nodeOrOffset.range?.[0]
+		return offset === undefined ? undefined : locateOffset(frontmatterText, offset, startLine)
 	}
-
-	const document = parseDocument(frontmatterText, {
-		uniqueKeys: true,
-		merge: false,
-	})
-
-	const diagnostics: Diagnostic[] = []
-
-	// Duplicate mapping keys are detected independently below (with a
-	// `related` first-occurrence location); the library's own DUPLICATE_KEY
-	// errors are excluded here to avoid reporting the same violation twice.
-	const structuralErrors = document.errors.filter(error => error.code !== 'DUPLICATE_KEY')
-	for (const error of structuralErrors) {
-		diagnostics.push(makeDiagnostic(
-			'EF-ENV-002',
-			`Frontmatter YAML could not be parsed as a single mapping: ${error.message}`,
-			{ path, location: locate(error.pos[0]) },
-		))
-	}
-
-	const contents = document.contents ?? undefined
-	const mapping = contents !== undefined && isMap(contents) ? contents : undefined
-
-	if (structuralErrors.length === 0 && !mapping) {
-		diagnostics.push(makeDiagnostic(
-			'EF-ENV-002',
-			'Frontmatter must contain exactly one top-level YAML mapping.',
-			{ path, location: contents !== undefined ? locate(contents) : locate(0) },
-		))
-	}
-
-	if (contents !== undefined)
-		diagnostics.push(...scanForbiddenAndDuplicates(contents, path, locate))
-
+	const diagnostics: Diagnostic[] = document.errors
+		.filter(error => error.code !== 'DUPLICATE_KEY')
+		.map(error => diagnostic('SPEC-ARTIFACT-PARSE', `Frontmatter YAML could not be parsed: ${error.message}`, { path, location: locate(error.pos[0]) }))
+	const contents = document.contents
+	if (contents !== null && contents !== undefined)
+		scanForbidden(contents as YamlNode, path, locate, diagnostics)
+	const mapping = contents !== null && contents !== undefined && isMap(contents) ? contents : undefined
+	if (!mapping && document.errors.length === 0)
+		diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', 'Artifact frontmatter must contain one top-level YAML mapping.', { path, location: locate(0) }))
 	return { document, mapping, diagnostics, locate }
 }
 
-function scanForbiddenAndDuplicates(
-	root: YamlNode,
+function scanForbidden(
+	node: YamlNode,
 	path: string,
-	locate: (nodeOrOffset: YamlNode | number | null | undefined) => SourceLocation | undefined,
-): Diagnostic[] {
-	const diagnostics: Diagnostic[] = []
-
-	function checkNode(node: unknown, field: string | undefined): void {
-		if (!isNode(node))
-			return
-
-		if (isAlias(node)) {
-			diagnostics.push(makeDiagnostic(
-				'EF-ENV-010',
-				'YAML alias is a forbidden construct in the artifact envelope.',
-				{ path, field, location: locate(node) },
-			))
-			return
-		}
-
-		if (node.anchor) {
-			diagnostics.push(makeDiagnostic(
-				'EF-ENV-010',
-				`YAML anchor '&${node.anchor}' is a forbidden construct in the artifact envelope.`,
-				{ path, field, location: locate(node) },
-			))
-		}
-
-		if (node.tag && !ALLOWED_TAGS.has(node.tag)) {
-			diagnostics.push(makeDiagnostic(
-				'EF-ENV-010',
-				`YAML custom tag '${node.tag}' is a forbidden construct in the artifact envelope.`,
-				{ path, field, location: locate(node) },
-			))
-		}
-
-		if (isMap(node)) {
-			const seen = new Map<string, SourceLocation | undefined>()
-			for (const pair of node.items) {
-				const keyText = scalarStringValue(pair.key)
-				const childField = keyText !== undefined ? joinField(field, keyText) : field
-
-				if (keyText === '<<') {
-					diagnostics.push(makeDiagnostic(
-						'EF-ENV-010',
-						'YAML merge key \'<<\' is a forbidden construct in the artifact envelope.',
-						{ path, field: childField, location: locate(pair.key as YamlNode) },
-					))
-				}
-
-				if (keyText !== undefined) {
-					if (seen.has(keyText)) {
-						diagnostics.push(makeDiagnostic(
-							'EF-ENV-005',
-							`Duplicate mapping key '${keyText}'.`,
-							{
-								path,
-								field: childField,
-								location: locate(pair.key as YamlNode),
-								related: [{
-									path,
-									field: childField,
-									location: seen.get(keyText),
-									message: `First occurrence of key '${keyText}'.`,
-								}],
-							},
-						))
-					}
-					else {
-						seen.set(keyText, locate(pair.key as YamlNode))
-					}
-				}
-
-				checkNode(pair.key, childField)
-				checkNode(pair.value, childField)
-			}
-		}
-		else if (isSeq(node)) {
-			node.items.forEach((item, index) => checkNode(item, indexField(field, index)))
+	locate: (node: YamlNode | number | null | undefined) => SourceLocation | undefined,
+	diagnostics: Diagnostic[],
+): void {
+	if (isAlias(node)) {
+		diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', 'YAML aliases are not allowed in Spec frontmatter.', { path, location: locate(node) }))
+		return
+	}
+	if (node.anchor)
+		diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', 'YAML anchors are not allowed in Spec frontmatter.', { path, location: locate(node) }))
+	if (node.tag && !CORE_YAML_TAGS.has(node.tag))
+		diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', `YAML tag '${node.tag}' is not allowed in Spec frontmatter.`, { path, location: locate(node) }))
+	if (isMap(node)) {
+		const seen = new Set<string>()
+		for (const pair of node.items) {
+			const key = isScalar(pair.key) && typeof pair.key.value === 'string' ? pair.key.value : undefined
+			if (key === undefined)
+				diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', 'Frontmatter field names must be strings.', { path, location: locate(pair.key as YamlNode) }))
+			if (key === '<<')
+				diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', 'YAML merge keys are not allowed in Spec frontmatter.', { path, field: key, location: locate(pair.key as YamlNode) }))
+			if (key !== undefined && seen.has(key))
+				diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', `Duplicate frontmatter field '${key}'.`, { path, field: key, location: locate(pair.key as YamlNode) }))
+			if (key !== undefined)
+				seen.add(key)
+			if (isNode(pair.key))
+				scanForbidden(pair.key, path, locate, diagnostics)
+			if (isNode(pair.value))
+				scanForbidden(pair.value, path, locate, diagnostics)
 		}
 	}
-
-	checkNode(root, undefined)
-	return diagnostics
+	else if (isSeq(node)) {
+		for (const item of node.items) {
+			if (isNode(item))
+				scanForbidden(item, path, locate, diagnostics)
+		}
+	}
 }

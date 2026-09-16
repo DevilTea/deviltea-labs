@@ -9,15 +9,40 @@ Design precedence is intentionally explicit:
 
 1. The current accepted direction recorded in Discussion #65.
 2. Shipped code and tests, which describe current implementation behavior but do not define future product direction.
-3. `docs/ef-core/`, retained as inherited EF implementation/history reference while Spec is redesigned.
-4. Historical issues and archived EF design material, including issues #63 and #11.
+3. `docs/ef-core/`, retained only as inherited EF implementation/history reference.
+4. Historical issues and archived EF design material.
 
-When these sources conflict, the higher-precedence source wins.
+When these sources conflict, the higher-precedence source wins. Standalone
+planning documents are intentionally not maintained in this package; new design
+exploration, alternatives, and accepted decisions belong in Discussion #65.
 
-Standalone planning documents are intentionally not maintained in this package. New design exploration, alternatives, and accepted decisions belong in Discussion #65 so there is one canonical continuation point.
+## Current Spec-native MVP
+
+The implemented MVP is rooted at `.spec/` and uses UUIDv7 Artifact identities
+with the Spec-native kind model. It provides:
+
+- workspace initialization and current-workspace validation;
+- Artifact create/get/update/delete/list;
+- lifecycle activate/complete/retire/supersede;
+- relation add/remove/list with graph invariants;
+- local and HTTPS Resource descriptors plus local-only Resource reads;
+- deterministic title/body search;
+- deterministic `refines` trace in `up`, `down`, or `both` directions;
+- stable human and versioned JSON command results.
+
+The MVP does not read or migrate `.engineering/` workspaces and does not carry
+EF schema aliases, sequential IDs, linked-repository semantics, integration-ref
+or Git transition/range/bootstrap authority, CHG exactly-once effects, or
+implementation-linkage behavior.
+
+Published Agent Skills are `maintain-spec-workspace` and
+`review-spec-workspace`. They describe the complete current MVP rather than the
+inherited EF workflow.
 
 ## Inherited EF Core documentation
 
-`docs/ef-core/` is kept temporarily because much of the copied implementation still follows it and its deterministic parsing/validation rules remain useful implementation reference material.
-
-It is **not** the canonical Spec product model. In particular, copied EF assumptions about identity, workspace layout, target/version workflow, Git authority boundaries, implementation linkage, and change transactions may be superseded by Discussion #65 before the implementation is updated.
+`docs/ef-core/` is historical source material only. It is **not** the Spec
+product model, is not included in the published npm package, and must not be
+used to override Discussion #65 or current Spec behavior. Its assumptions about
+identity, workspace layout, lifecycle orchestration, Git authority,
+implementation linkage, and change transactions are intentionally non-binding.
