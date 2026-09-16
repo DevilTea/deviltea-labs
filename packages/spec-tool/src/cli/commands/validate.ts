@@ -1,6 +1,5 @@
 import type { CommandOutcome } from '../command-outcome'
-import { loadSnapshotFromWorkingTree } from '../../application/snapshot'
-import { validateSnapshot } from '../../application/snapshot-validation'
+import { validateCurrentWorkspace } from '../../application/validation'
 import { resolveWorkspaceRoot } from '../../repository/discovery'
 import { validationResultJson } from '../envelopes'
 import { renderValidation } from '../human-render'
@@ -27,7 +26,6 @@ export async function runValidateCommand(options: ValidateCommandOptions, deps: 
 	if (!resolved.root) {
 		return output(options, validationResultJson({ valid: false, complete: false, artifactCount: 0, projectCount: 0, diagnostics: resolved.diagnostics }), 2)
 	}
-	const loaded = await loadSnapshotFromWorkingTree(resolved.root)
-	const validation = validateSnapshot(loaded.snapshot)
+	const validation = await validateCurrentWorkspace(resolved.root)
 	return output(options, validationResultJson(validation), validation.complete ? validation.valid ? 0 : 1 : 2)
 }

@@ -1,4 +1,4 @@
-import type { ArtifactDeleteResultJson, ArtifactListResultJson, ArtifactResultJson, InitResultJson, LifecycleResultJson, RelationListResultJson, RelationResultJson, ResourceListResultJson, ResourceReadResultJson, ResourceResultJson, ValidationResultJson } from './envelopes'
+import type { ArtifactDeleteResultJson, ArtifactListResultJson, ArtifactResultJson, InitResultJson, LifecycleResultJson, RelationListResultJson, RelationResultJson, ResourceListResultJson, ResourceReadResultJson, ResourceResultJson, SearchResultJson, TraceResultJson, ValidationResultJson } from './envelopes'
 
 export function renderInit(result: InitResultJson): string {
 	if (!result.ok) {
@@ -94,4 +94,23 @@ export function renderResourceRead(result: ResourceReadResultJson): string {
 	if (!result.ok)
 		return `${diagnosticsText(result.diagnostics)}\n`
 	return result.content ?? ''
+}
+
+export function renderSearchResult(result: SearchResultJson): string {
+	if (!result.ok)
+		return `${diagnosticsText(result.diagnostics)}\n`
+	return `${result.matches.map(match => `${match.artifact.id}\t${match.artifact.kind}\t${match.artifact.status}\t${match.matchedFields.join(',')}\t${match.artifact.title}`)
+		.join('\n')}${result.matches.length > 0 ? '\n' : ''}`
+}
+
+export function renderTraceResult(result: TraceResultJson): string {
+	if (!result.ok)
+		return `${diagnosticsText(result.diagnostics)}\n`
+	const lines = [`Trace ${result.artifactId} (${result.direction})`, 'Artifacts:']
+	for (const artifact of result.artifacts)
+		lines.push(`${artifact.id}\t${artifact.kind}\t${artifact.status}\t${artifact.title}`)
+	lines.push('Relations:')
+	for (const relation of result.relations)
+		lines.push(`${relation.source}\t${relation.type}\t${relation.target}`)
+	return `${lines.join('\n')}\n`
 }

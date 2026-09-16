@@ -1,4 +1,5 @@
 import type { MutationResult, RelationView, ResourceReadValue } from '../application/mutations'
+import type { QueryResult, SearchFilters, SearchMatch, TraceValue } from '../application/queries'
 import type { Diagnostic } from '../domain/diagnostics'
 import type { Artifact, ResourceDescriptor } from '../domain/model'
 
@@ -89,6 +90,25 @@ export interface ResourceListResultJson {
 	diagnostics: Diagnostic[]
 }
 
+export interface SearchResultJson {
+	schema: 'spec/search-result@1'
+	ok: boolean
+	query: string
+	filters: SearchFilters
+	matches: SearchMatch[]
+	diagnostics: Diagnostic[]
+}
+
+export interface TraceResultJson {
+	schema: 'spec/trace-result@1'
+	ok: boolean
+	artifactId: string
+	direction: string
+	artifacts: Artifact[]
+	relations: TraceValue['relations']
+	diagnostics: Diagnostic[]
+}
+
 export interface ResourceReadResultJson {
 	schema: 'spec/resource-read-result@1'
 	ok: boolean
@@ -169,6 +189,22 @@ export function resourceReadResultJson(result: MutationResult<ResourceReadValue>
 		content: result.value?.content,
 		encoding: result.value?.encoding,
 		bytes: result.value?.bytes,
+		diagnostics: result.diagnostics,
+	}
+}
+
+export function searchResultJson(query: string, filters: SearchFilters, result: QueryResult<SearchMatch[]>): SearchResultJson {
+	return { schema: 'spec/search-result@1', ok: result.ok, query, filters, matches: result.value ?? [], diagnostics: result.diagnostics }
+}
+
+export function traceResultJson(artifactId: string, direction: string, result: QueryResult<TraceValue>): TraceResultJson {
+	return {
+		schema: 'spec/trace-result@1',
+		ok: result.ok,
+		artifactId,
+		direction,
+		artifacts: result.value?.artifacts ?? [],
+		relations: result.value?.relations ?? [],
 		diagnostics: result.diagnostics,
 	}
 }

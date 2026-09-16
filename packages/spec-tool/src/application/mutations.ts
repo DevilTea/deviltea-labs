@@ -763,6 +763,24 @@ async function validateResourceLocation(root: string, ownerId: string, location:
 	return (await validateLocalResourcePath(root, ownerId, location, true)).diagnostics
 }
 
+export async function validateResourceIntegrity(root: string, artifacts: readonly Artifact[]): Promise<Diagnostic[]> {
+	const diagnostics: Diagnostic[] = []
+	for (const artifact of artifacts) {
+		const seen = new Set<string>()
+		for (const resource of artifact.resources) {
+			if (seen.has(resource.location))
+				diagnostics.push(diagnostic('SPEC-RESOURCE-INVALID', `Artifact '${artifact.id}' contains duplicate Resource location '${resource.location}'.`, { path: pathFor(artifact), artifactId: artifact.id, field: 'resources' }))
+			seen.add(resource.location)
+			diagnostics.push(...resourceFieldsValid(resource)
+				.map(item => ({ ...item, path: item.path ?? pathFor(artifact), artifactId: item.artifactId ?? artifact.id })))
+			const locationDiagnostics = await validateResourceLocation(root, artifact.id, resource.location)
+			diagnostics.push(...locationDiagnostics
+				.map(item => ({ ...item, path: item.path ?? pathFor(artifact), artifactId: item.artifactId ?? artifact.id })))
+		}
+	}
+	return aggregateDiagnostics(diagnostics)
+}
+
 export interface ResourceAddInput extends ResourceDescriptor {
 	artifactId: string
 }

@@ -70,21 +70,31 @@ spec resource add <artifact-uuid> \
 spec resource remove <artifact-uuid> <location>
 spec resource list --artifact <artifact-uuid>
 spec resource read <artifact-uuid> <location>
+
+spec search <text> --kind story --status active
+spec trace <artifact-uuid> --direction both
 ```
 
 `spec init` creates all canonical directories, the exact config, and a valid
 active PROJECT Artifact. `spec validate` checks the current `.spec/` workspace
 for layout, config, UUIDv7 identity, uniqueness, schema/kind and kind/status
 compatibility, canonical placement, required active/completed body sections,
-and relation/resource descriptor structure. It does not judge natural-language
-semantic quality.
+relation graph invariants, and Resource descriptor/filesystem integrity. It does
+not judge natural-language semantic quality or Git history.
 
-Artifact, relation, lifecycle, and Resource commands return deterministic
-human output by default. Add `--format json` for the stable machine-readable
-result envelope. CHG completion is explicit via `spec lifecycle complete`; chained supersession
-transfers current replacement targets to the new active replacement. Terminal
-Artifacts are immutable, only draft Artifacts may be physically deleted, and `resource read` only reads local files; it never
-fetches `https://` locations.
+`spec search` performs deterministic case-insensitive substring matching over
+Artifact titles and bodies; it does not rank results. `spec trace` follows only
+the canonical `refines` graph: `up` follows stored outgoing edges toward Story,
+`down` follows derived incoming edges toward Requirement, and `both` returns the
+complete connected refinement closure.
+
+Artifact, relation, lifecycle, Resource, search, trace, and validation commands
+return deterministic human output by default. Add `--format json` for the stable
+machine-readable result envelope. CHG completion is explicit via
+`spec lifecycle complete`; chained supersession transfers current replacement
+targets to the new active replacement. Terminal Artifacts are immutable, only
+draft Artifacts may be physically deleted, and `resource read` only reads local
+files; it never fetches `https://` locations.
 
 ## License
 

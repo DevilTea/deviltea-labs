@@ -3,6 +3,7 @@ import { Command, CommanderError, Option } from 'commander'
 import { runArtifactCreateCommand, runArtifactDeleteCommand, runArtifactGetCommand, runArtifactListCommand, runArtifactUpdateCommand } from './commands/artifact'
 import { runInitCommand } from './commands/init'
 import { runLifecycleActivateCommand, runLifecycleCompleteCommand, runLifecycleRetireCommand, runLifecycleSupersedeCommand } from './commands/lifecycle'
+import { runSearchCommand, runTraceCommand } from './commands/query'
 import { runRelationAddCommand, runRelationListCommand, runRelationRemoveCommand } from './commands/relation'
 import { runResourceAddCommand, runResourceListCommand, runResourceReadCommand, runResourceRemoveCommand } from './commands/resource'
 import { runValidateCommand } from './commands/validate'
@@ -25,6 +26,8 @@ const GENERAL_HELP = [
 	'  spec relation <add|remove|list>',
 	'  spec lifecycle <activate|complete|retire|supersede>',
 	'  spec resource <add|remove|list|read>',
+	'  spec search <text>',
+	'  spec trace <artifact-id>',
 	'  spec validate',
 	'  spec version',
 	'',
@@ -81,6 +84,29 @@ export function buildProgram(io: CliIO, context: RunCliContext, setOutcome: (out
 					terminology: options.terminology as string | undefined,
 				},
 			}, { cwd: io.cwd }))
+		})
+
+	program.command('search')
+		.description('Search Artifact title/body text in the current workspace.')
+		.argument('<text>')
+		.option('--kind <kind>')
+		.option('--status <status>')
+		.addOption(new Option('--project <project-root>', 'project root; defaults to the nearest workspace'))
+		.addOption(formatOption())
+		.option('--no-color')
+		.action(async (text: string, options: Record<string, unknown>) => {
+			setOutcome(await runSearchCommand(text, options, { cwd: io.cwd }))
+		})
+
+	program.command('trace')
+		.description('Trace the refines chain around an Artifact.')
+		.argument('<artifact-id>')
+		.option('--direction <direction>', 'up, down, or both', 'both')
+		.addOption(new Option('--project <project-root>', 'project root; defaults to the nearest workspace'))
+		.addOption(formatOption())
+		.option('--no-color')
+		.action(async (artifactId: string, options: Record<string, unknown>) => {
+			setOutcome(await runTraceCommand(artifactId, options, { cwd: io.cwd }))
 		})
 
 	program.command('validate')
