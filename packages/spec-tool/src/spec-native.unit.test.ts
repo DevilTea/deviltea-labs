@@ -148,6 +148,9 @@ describe('spec-native model', () => {
 		const malformed = decodeArtifact('no frontmatter', '.spec/stories/x.md')
 		expect(malformed.diagnostics[0]?.code)
 			.toBe('SPEC-ARTIFACT-PARSE')
+		const numericDescriptorKey = decodeArtifact(`---\nschema: spec/story@1\nkind: story\nid: ${ID}\ntitle: Bad nested key\nstatus: draft\nrelations: []\nresources:\n  - location: a.txt\n    role: evidence\n    mediaType: text/plain\n    description: ''\n    1: extra\n---\n`, `.spec/stories/${ID}.md`)
+		expect(numericDescriptorKey.diagnostics.map(item => item.code))
+			.toContain('SPEC-ARTIFACT-PARSE')
 	})
 
 	it('supports structural relation/resource decoding and rejects unknown fields', () => {
@@ -189,6 +192,8 @@ describe('frontmatter, config, and layout', () => {
 			.toBeNull()
 		expect(decodeConfig('schema: spec/config@1\nextra: true\n').diagnostics[0]?.code)
 			.toBe('SPEC-CONFIG-INVALID')
+		expect(decodeConfig('schema: spec/config@1\n1: extra\n').diagnostics[0]?.code)
+			.toBe('SPEC-CONFIG-INVALID')
 		expect(decodeConfig('- nope\n').config)
 			.toBeNull()
 	})
@@ -227,6 +232,22 @@ describe('workspace persistence and validation', () => {
 			await writeFile(join(root, '.engineering', 'ef.yaml'), 'schema: ef/config@1\n')
 			expect(validateSnapshot((await loadSnapshotFromWorkingTree(root)).snapshot).valid)
 				.toBe(true)
+		}
+		finally {
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
+	it('rejects invalid project titles before publishing a workspace', async () => {
+		const root = await mkdtemp(join(tmpdir(), 'spec-init-invalid-'))
+		try {
+			const initialized = await initWorkspace(root, { title: 'Bad\nTitle' })
+			expect(initialized.ok)
+				.toBe(false)
+			expect(initialized.diagnostics[0]?.code)
+				.toBe('SPEC-ENVELOPE-INVALID')
+			await expect(readFile(join(root, '.spec', 'config.yaml'), 'utf8'))
+				.rejects.toBeDefined()
 		}
 		finally {
 			await rm(root, { recursive: true, force: true })
@@ -301,6 +322,13 @@ describe('cLI', () => {
 				.toContain('spec/version-result@1')
 			expect((await runCli(['bogus'], { cwd: root }, { version: '9.9.9' })).exitCode)
 				.toBe(2)
+			const jsonUsageError = await runCli(['artifact', 'create', '--format', 'json'], { cwd: root }, { version: '9.9.9' })
+			expect(jsonUsageError.exitCode)
+				.toBe(2)
+			expect(jsonUsageError.stderr)
+				.toBe('')
+			expect(JSON.parse(jsonUsageError.stdout))
+				.toMatchObject({ schema: 'spec/error-result@1', ok: false, diagnostics: [{ code: 'SPEC-CLI-INVALID' }] })
 		}
 		finally {
 			await rm(root, { recursive: true, force: true })

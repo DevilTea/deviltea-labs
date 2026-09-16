@@ -62,7 +62,9 @@ spec relation list --artifact <uuid> --direction all --format json
 ```
 
 Local Resources must live under `.spec/resources/<owner-uuid>/...`. HTTPS
-Resources are descriptor-only; `spec resource read` never fetches them.
+Resources are descriptor-only; `spec resource read` never fetches them. In JSON
+mode, byte-safe UTF-8 Resource content uses `encoding: utf8`; arbitrary binary
+content uses `encoding: base64` so bytes are not corrupted.
 
 ```text
 spec resource add <owner-uuid> --location <location> --role <role> --media-type <media-type> --format json
@@ -85,7 +87,10 @@ with no ranking. Trace follows only the `refines` graph.
 
 Run `spec validate --format json --no-input` after a mutation sequence. A clean
 validation proves the deterministic current-workspace invariants only; it does
-not prove natural-language semantic adequacy or Git-history correctness.
+not prove natural-language semantic adequacy or Git-history correctness. Treat
+`spec/error-result@1` as the stable JSON envelope for CLI usage/parse failures.
+Concurrent mutating CLI invocations fail fast through an ephemeral workspace
+lock rather than overwriting one another; retry after the other mutation ends.
 
 Spec MVP has no `.engineering/` compatibility, EF schema aliases, Git
 transition/range/bootstrap authority, implementation-linkage manifest, or

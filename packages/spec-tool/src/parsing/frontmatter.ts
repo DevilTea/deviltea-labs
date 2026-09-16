@@ -145,6 +145,8 @@ function scanForbidden(
 		const seen = new Set<string>()
 		for (const pair of node.items) {
 			const key = isScalar(pair.key) && typeof pair.key.value === 'string' ? pair.key.value : undefined
+			if (key === undefined)
+				diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', 'Frontmatter field names must be strings.', { path, location: locate(pair.key as YamlNode) }))
 			if (key === '<<')
 				diagnostics.push(diagnostic('SPEC-ARTIFACT-PARSE', 'YAML merge keys are not allowed in Spec frontmatter.', { path, field: key, location: locate(pair.key as YamlNode) }))
 			if (key !== undefined && seen.has(key))

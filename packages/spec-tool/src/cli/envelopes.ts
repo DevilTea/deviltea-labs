@@ -3,6 +3,16 @@ import type { QueryResult, SearchFilters, SearchMatch, TraceValue } from '../app
 import type { Diagnostic } from '../domain/diagnostics'
 import type { Artifact, ResourceDescriptor } from '../domain/model'
 
+export interface ErrorResultJson {
+	schema: 'spec/error-result@1'
+	ok: false
+	diagnostics: Diagnostic[]
+}
+
+export function errorResultJson(diagnostics: Diagnostic[]): ErrorResultJson {
+	return { schema: 'spec/error-result@1', ok: false, diagnostics }
+}
+
 export interface InitResultJson {
 	schema: 'spec/init-result@1'
 	ok: boolean
@@ -116,7 +126,7 @@ export interface ResourceReadResultJson {
 	artifactId?: string
 	resource?: ResourceDescriptor
 	content?: string
-	encoding?: 'utf8'
+	encoding?: 'utf8' | 'base64'
 	bytes?: number
 	diagnostics: Diagnostic[]
 }

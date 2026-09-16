@@ -163,6 +163,22 @@ describe('spec-native mutation failure contracts', () => {
 		}
 	})
 
+	it('fails a concurrent CLI mutation while the workspace mutation lock is owned by a live process', async () => {
+		const root = await initializedWorkspace()
+		try {
+			await writeFile(join(root, '.spec-tool.lock'), `${JSON.stringify({ pid: process.pid, nonce: 'held-by-test' })}\n`)
+			const result = await jsonCommand(root, ['artifact', 'create', '--kind', 'story', '--title', 'Blocked writer'])
+			expect(result.exitCode)
+				.toBe(2)
+			expect(diagnosticCodes(result))
+				.toContain('SPEC-IO-ERROR')
+		}
+		finally {
+			await rm(join(root, '.spec-tool.lock'), { force: true })
+			await rm(root, { recursive: true, force: true })
+		}
+	})
+
 	it('rejects invalid supersession candidates', async () => {
 		const root = await initializedWorkspace()
 		try {

@@ -1,5 +1,6 @@
 import type { CommandOutcome } from './command-outcome'
 import { Command, CommanderError, Option } from 'commander'
+import { diagnostic } from '../domain/diagnostics'
 import { runArtifactCreateCommand, runArtifactDeleteCommand, runArtifactGetCommand, runArtifactListCommand, runArtifactUpdateCommand } from './commands/artifact'
 import { runInitCommand } from './commands/init'
 import { runLifecycleActivateCommand, runLifecycleCompleteCommand, runLifecycleRetireCommand, runLifecycleSupersedeCommand } from './commands/lifecycle'
@@ -8,6 +9,7 @@ import { runRelationAddCommand, runRelationListCommand, runRelationRemoveCommand
 import { runResourceAddCommand, runResourceListCommand, runResourceReadCommand, runResourceRemoveCommand } from './commands/resource'
 import { runValidateCommand } from './commands/validate'
 import { runVersionCommand } from './commands/version'
+import { errorResultJson } from './envelopes'
 
 export interface CliIO {
 	cwd: string
@@ -326,10 +328,19 @@ export async function runCli(argv: readonly string[], io: CliIO, context: RunCli
 		return outcome ?? { exitCode: 0, stdout: `${GENERAL_HELP}\n`, stderr: '' }
 	}
 	catch (error) {
-		if (outcome)
+		const jsonRequested = argv.some((argument, index) => (argument === '--format' && argv[index + 1] === 'json') || argument === '--format=json')
+		if (outcome && !(error instanceof CommanderError && error.exitCode !== 0 && jsonRequested))
 			return outcome
+		if (error instanceof CommanderError && jsonRequested) {
+			const result = errorResultJson([diagnostic('SPEC-CLI-INVALID', error.message.replace(/^error:\s*/u, ''), {})])
+			return { exitCode: error.exitCode === 0 ? 0 : 2, stdout: `${JSON.stringify(result)}\n`, stderr: '' }
+		}
 		if (error instanceof CommanderError)
 			return { exitCode: error.exitCode === 0 ? 0 : 2, stdout: '', stderr: `${error.message}\n` }
+		if (jsonRequested) {
+			const result = errorResultJson([diagnostic('SPEC-CLI-INTERNAL', 'Internal CLI failure.', {})])
+			return { exitCode: 3, stdout: `${JSON.stringify(result)}\n`, stderr: '' }
+		}
 		throw error
 	}
 }

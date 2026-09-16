@@ -2,8 +2,9 @@
 
 /* Packed-consumer smoke test for the Spec-native CLI contract. */
 
+import { Buffer } from 'node:buffer'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import process from 'node:process'
@@ -86,6 +87,55 @@ try {
 	check('artifact create exits successfully', artifact.status === 0, artifact.stderr)
 	check('artifact create returns stable result', artifactJson.schema === 'spec/artifact-result@1' && artifactJson.artifact?.kind === 'story' && artifactJson.artifact?.status === 'draft', artifact.stdout)
 	const artifactId = artifactJson.artifact?.id
+	const secondArtifact = run(binary, ['artifact', 'create', '--format', 'json', '--kind', 'story', '--title', 'Smoke target'], project)
+	const secondArtifactJson = JSON.parse(secondArtifact.stdout)
+	const secondArtifactId = secondArtifactJson.artifact?.id
+	check('second artifact create exits successfully', secondArtifact.status === 0, secondArtifact.stderr)
+
+	const relationAdd = run(binary, ['relation', 'add', artifactId, secondArtifactId, '--type', 'references', '--format', 'json'], project)
+	const relationAddJson = JSON.parse(relationAdd.stdout)
+	check('relation add exits successfully', relationAdd.status === 0, relationAdd.stderr)
+	check('relation add uses stable result schema', relationAddJson.schema === 'spec/relation-result@1' && relationAddJson.relation?.type === 'references', relationAdd.stdout)
+	const relationList = run(binary, ['relation', 'list', '--artifact', artifactId, '--format', 'json'], project)
+	const relationListJson = JSON.parse(relationList.stdout)
+	check('relation list returns added edge', relationList.status === 0 && relationListJson.relations?.some(item => item.source === artifactId && item.target === secondArtifactId), relationList.stdout)
+	const relationRemove = run(binary, ['relation', 'remove', artifactId, secondArtifactId, '--type', 'references', '--format', 'json'], project)
+	check('relation remove exits successfully', relationRemove.status === 0, relationRemove.stderr)
+
+	const resourceDirectory = join(project, '.spec', 'resources', artifactId)
+	mkdirSync(resourceDirectory, { recursive: true })
+	writeFileSync(join(resourceDirectory, 'smoke.txt'), 'packed resource\n')
+	const resourceLocation = `.spec/resources/${artifactId}/smoke.txt`
+	const resourceAdd = run(binary, ['resource', 'add', artifactId, '--location', resourceLocation, '--role', 'evidence', '--media-type', 'text/plain', '--format', 'json'], project)
+	check('resource add exits successfully', resourceAdd.status === 0, resourceAdd.stderr)
+	const resourceRead = run(binary, ['resource', 'read', artifactId, resourceLocation, '--format', 'json'], project)
+	const resourceReadJson = JSON.parse(resourceRead.stdout)
+	check('resource read preserves UTF-8 content', resourceRead.status === 0 && resourceReadJson.encoding === 'utf8' && resourceReadJson.content === 'packed resource\n', resourceRead.stdout)
+	const binaryBytes = Buffer.from([0, 255, 128, 65, 10])
+	writeFileSync(join(resourceDirectory, 'smoke.bin'), binaryBytes)
+	const binaryResourceLocation = `.spec/resources/${artifactId}/smoke.bin`
+	const binaryResourceAdd = run(binary, ['resource', 'add', artifactId, '--location', binaryResourceLocation, '--role', 'evidence', '--media-type', 'application/octet-stream', '--format', 'json'], project)
+	check('binary resource add exits successfully', binaryResourceAdd.status === 0, binaryResourceAdd.stderr)
+	const binaryResourceRead = run(binary, ['resource', 'read', artifactId, binaryResourceLocation, '--format', 'json'], project)
+	const binaryResourceReadJson = JSON.parse(binaryResourceRead.stdout)
+	check('binary resource read is byte-safe base64', binaryResourceRead.status === 0 && binaryResourceReadJson.encoding === 'base64' && binaryResourceReadJson.bytes === binaryBytes.byteLength && Buffer.from(binaryResourceReadJson.content, 'base64')
+		.equals(binaryBytes), binaryResourceRead.stdout)
+	const binaryResourceRemove = run(binary, ['resource', 'remove', artifactId, binaryResourceLocation, '--format', 'json'], project)
+	check('binary resource remove exits successfully', binaryResourceRemove.status === 0, binaryResourceRemove.stderr)
+	const resourceRemove = run(binary, ['resource', 'remove', artifactId, resourceLocation, '--format', 'json'], project)
+	check('resource remove exits successfully', resourceRemove.status === 0, resourceRemove.stderr)
+
+	const storyBody = '## Actor\nUser\n\n## Goal\nExercise packed lifecycle.\n\n## Value\nVerify the installed CLI.\n'
+	const artifactUpdate = run(binary, ['artifact', 'update', artifactId, '--body', storyBody, '--format', 'json'], project)
+	check('artifact update exits successfully', artifactUpdate.status === 0, artifactUpdate.stderr)
+	const lifecycleActivate = run(binary, ['lifecycle', 'activate', artifactId, '--format', 'json'], project)
+	const lifecycleActivateJson = JSON.parse(lifecycleActivate.stdout)
+	check('lifecycle activate reaches active', lifecycleActivate.status === 0 && lifecycleActivateJson.artifact?.status === 'active', lifecycleActivate.stdout)
+
+	const usageError = run(binary, ['artifact', 'create', '--format', 'json'], project)
+	const usageErrorJson = JSON.parse(usageError.stdout)
+	check('JSON usage errors use stable error envelope', usageError.status === 2 && usageError.stderr === '' && usageErrorJson.schema === 'spec/error-result@1' && usageErrorJson.diagnostics?.[0]?.code === 'SPEC-CLI-INVALID', `${usageError.stdout} ${usageError.stderr}`)
+
 	const list = run(binary, ['artifact', 'list', '--format', 'json', '--kind', 'story'], project)
 	const listJson = JSON.parse(list.stdout)
 	check('artifact list returns created Artifact', list.status === 0 && listJson.artifacts?.some(item => item.id === artifactId), list.stdout)
@@ -97,7 +147,7 @@ try {
 	const traceJson = JSON.parse(trace.stdout)
 	check('trace exits successfully', trace.status === 0, trace.stderr)
 	check('trace uses stable result schema and includes the root Artifact', traceJson.schema === 'spec/trace-result@1' && traceJson.direction === 'both' && traceJson.artifacts?.some(item => item.id === artifactId), trace.stdout)
-	const deleted = run(binary, ['artifact', 'delete', artifactId, '--format', 'json'], project)
+	const deleted = run(binary, ['artifact', 'delete', secondArtifactId, '--format', 'json'], project)
 	check('draft Artifact delete exits successfully', deleted.status === 0, deleted.stderr)
 	check('legacy EF root is not created', !existsSync(join(project, '.engineering')))
 }

@@ -45,6 +45,8 @@ function scanStructure(node: YamlNode, text: string, path: string, diagnostics: 
 		const seen = new Set<string>()
 		for (const pair of node.items) {
 			const key = scalarString(pair.key)
+			if (key === undefined)
+				diagnostics.push(diagnostic('SPEC-CONFIG-INVALID', 'Configuration field names must be strings.', { path, location: locate(text, pair.key as YamlNode) }))
 			if (key === '<<')
 				diagnostics.push(diagnostic('SPEC-CONFIG-INVALID', 'YAML merge keys are not allowed in Spec configuration.', { path, field: key, location: locate(text, pair.key as YamlNode) }))
 			if (key !== undefined && seen.has(key))

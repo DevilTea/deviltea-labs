@@ -2,10 +2,11 @@ import type { Diagnostic } from '../domain/diagnostics'
 import type { Artifact, ArtifactKind, RelationEntry, ResourceDescriptor, Status } from '../domain/model'
 import type { RelationType } from '../domain/relations'
 import type { ProjectSnapshot } from './snapshot'
+import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { access, link, lstat, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
-import { basename, dirname, isAbsolute, join, posix, relative, resolve, win32 } from 'node:path'
+import { access, chmod, link, lstat, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, join, posix, relative, resolve, win32 } from 'node:path'
 import { validateBody } from '../domain/body-schemas'
 import { aggregateDiagnostics, diagnostic } from '../domain/diagnostics'
 import { encodeArtifact } from '../domain/envelope'
@@ -50,7 +51,7 @@ export interface ResourceReadValue {
 	artifactId: string
 	resource: ResourceDescriptor
 	content: string
-	encoding: 'utf8'
+	encoding: 'utf8' | 'base64'
 	bytes: number
 }
 
@@ -150,9 +151,11 @@ async function writeArtifactFile(root: string, artifact: Artifact, mode: Artifac
 		throw new Error(`Artifact path '${path}' already exists.`)
 	if (mode === 'replace' && (!existing || !existing.isFile() || existing.isSymbolicLink()))
 		throw new Error(`Artifact path '${path}' is not a regular file.`)
-	const temporary = join(targetDirectory, `.${basename(target)}.${randomUUID()}.tmp`)
+	const temporary = join(resolve(root), `.spec-tool-write-${randomUUID()}.tmp`)
 	try {
 		await writeFile(temporary, encodeArtifact(artifact), { encoding: 'utf8', flag: 'wx' })
+		if (mode === 'replace' && existing)
+			await chmod(temporary, existing.mode & 0o7777)
 		if (mode === 'create') {
 			await link(temporary, target)
 			await unlink(temporary)
@@ -868,7 +871,10 @@ export async function readResource(root: string, artifactId: string, location: s
 		return failure(local.diagnostics)
 	try {
 		const buffer = await readFile(local.absolutePath)
-		return success({ artifactId, resource, content: buffer.toString('utf8'), encoding: 'utf8', bytes: buffer.byteLength }, false)
+		const utf8 = buffer.toString('utf8')
+		const byteSafeUtf8 = Buffer.from(utf8, 'utf8')
+			.equals(buffer)
+		return success({ artifactId, resource, content: byteSafeUtf8 ? utf8 : buffer.toString('base64'), encoding: byteSafeUtf8 ? 'utf8' : 'base64', bytes: buffer.byteLength }, false)
 	}
 	catch (error) {
 		return ioFailure(error, location)

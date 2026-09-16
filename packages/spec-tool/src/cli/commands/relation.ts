@@ -7,7 +7,7 @@ import { addRelation, listRelations, removeRelation } from '../../application/mu
 import { isRelationType } from '../../domain/relations'
 import { relationListResultJson, relationResultJson } from '../envelopes'
 import { renderRelationList, renderRelationResult } from '../human-render'
-import { formatMutation, noColor, resolveMutationRoot } from './mutation'
+import { formatMutation, noColor, resolveMutationRoot, withWorkspaceMutationLock } from './mutation'
 
 type RelationOperationResult = MutationResult<RelationView | { replacement: Artifact, replaced: Artifact }>
 
@@ -28,7 +28,7 @@ export async function runRelationAddCommand(sourceId: string, targetId: string, 
 		? failed(root.diagnostics)
 		: !isRelationType(type)
 				? failed([{ code: 'SPEC-CLI-INVALID', severity: 'error', message: `Unknown relation type '${type ?? ''}'.`, field: 'type', related: [] }])
-				: await addRelation(root.root, sourceId, targetId, type)
+				: await withWorkspaceMutationLock(root.root, () => addRelation(root.root!, sourceId, targetId, type))
 	const json = relationResultJson(result)
 	return formatMutation(common.format, json, renderRelationResult(json), result.ok, result.diagnostics)
 }
@@ -42,7 +42,7 @@ export async function runRelationRemoveCommand(sourceId: string, targetId: strin
 		? failed(root.diagnostics)
 		: !isRelationType(type)
 				? failed([{ code: 'SPEC-CLI-INVALID', severity: 'error', message: `Unknown relation type '${type ?? ''}'.`, field: 'type', related: [] }])
-				: await removeRelation(root.root, sourceId, targetId, type)
+				: await withWorkspaceMutationLock(root.root, () => removeRelation(root.root!, sourceId, targetId, type))
 	const json = relationResultJson(result)
 	return formatMutation(common.format, json, renderRelationResult(json), result.ok, result.diagnostics)
 }

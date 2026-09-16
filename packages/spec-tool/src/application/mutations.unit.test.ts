@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { Buffer } from 'node:buffer'
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -254,6 +255,23 @@ describe('spec-native artifact, relation, and lifecycle mutations', () => {
 	})
 })
 
+it('preserves Artifact file mode across replace-style mutations', async () => {
+	const root = await initializedWorkspace()
+	try {
+		const created = await command(root, ['artifact', 'create', '--kind', 'story', '--title', 'Private story'])
+		const id = created.json.artifact.id as string
+		const path = join(root, '.spec', 'stories', `${id}.md`)
+		await chmod(path, 0o600)
+		expect((await command(root, ['artifact', 'update', id, '--title', 'Still private'])).exitCode)
+			.toBe(0)
+		expect((await stat(path)).mode & 0o777)
+			.toBe(0o600)
+	}
+	finally {
+		await rm(root, { recursive: true, force: true })
+	}
+})
+
 describe('spec-native Resource mutations', () => {
 	it('supports local and https descriptors and rejects traversal, symlinks, cross-owner paths, and URL reads', async () => {
 		const root = await initializedWorkspace()
@@ -276,6 +294,17 @@ describe('spec-native Resource mutations', () => {
 				.toBe(0)
 			expect(read.json.content)
 				.toBe('resource text\n')
+			expect(read.json.encoding)
+				.toBe('utf8')
+
+			const binaryBytes = Buffer.from([0, 255, 128, 65, 10])
+			await writeFile(join(firstDir, 'binary.bin'), binaryBytes)
+			const binaryLocation = `.spec/resources/${firstId}/binary.bin`
+			expect((await command(root, ['resource', 'add', firstId, '--location', binaryLocation, '--role', 'evidence', '--media-type', 'application/octet-stream'])).exitCode)
+				.toBe(0)
+			const binaryRead = await command(root, ['resource', 'read', firstId, binaryLocation])
+			expect(binaryRead.json)
+				.toMatchObject({ encoding: 'base64', bytes: binaryBytes.byteLength, content: binaryBytes.toString('base64') })
 
 			const traversal = await command(root, ['resource', 'add', firstId, '--location', `.spec/resources/${firstId}/../${secondId}/other.txt`, '--role', 'evidence', '--media-type', 'text/plain'])
 			expect(traversal.exitCode)

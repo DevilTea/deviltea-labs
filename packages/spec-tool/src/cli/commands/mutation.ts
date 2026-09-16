@@ -1,7 +1,10 @@
+import type { MutationResult } from '../../application/mutations'
 import type { Diagnostic } from '../../domain/diagnostics'
 import type { CommandOutcome } from '../command-outcome'
-import { readFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { link, readFile, rm, unlink, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
+import process from 'node:process'
 import { diagnostic } from '../../domain/diagnostics'
 import { resolveWorkspaceRoot } from '../../repository/discovery'
 
@@ -13,6 +16,100 @@ export interface MutationCommandOptions {
 
 export interface MutationCommandDeps {
 	cwd: string
+}
+
+interface MutationLockOwner {
+	pid: number
+	nonce: string
+}
+
+interface MutationLock {
+	release: () => Promise<void>
+}
+
+const MUTATION_LOCK_FILE = '.spec-tool.lock'
+
+function isProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0)
+		return true
+	}
+	catch (error) {
+		return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+	}
+}
+
+async function readMutationLock(path: string): Promise<MutationLockOwner | undefined> {
+	try {
+		const value = JSON.parse(await readFile(path, 'utf8')) as Partial<MutationLockOwner>
+		return Number.isInteger(value.pid) && typeof value.nonce === 'string' && value.nonce !== ''
+			? { pid: value.pid!, nonce: value.nonce }
+			: undefined
+	}
+	catch {
+		return undefined
+	}
+}
+
+async function acquireMutationLock(root: string): Promise<{ lock?: MutationLock, diagnostics: Diagnostic[] }> {
+	const lockPath = join(resolve(root), MUTATION_LOCK_FILE)
+	const nonce = randomUUID()
+	const temporary = join(resolve(root), `.spec-tool-lock-${nonce}.tmp`)
+	const owner: MutationLockOwner = { pid: process.pid, nonce }
+	try {
+		await writeFile(temporary, `${JSON.stringify(owner)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+		for (let attempt = 0; attempt < 2; attempt++) {
+			try {
+				await link(temporary, lockPath)
+				return {
+					lock: {
+						release: async () => {
+							const current = await readMutationLock(lockPath)
+							if (current?.nonce === nonce) {
+								await unlink(lockPath)
+									.catch(() => undefined)
+							}
+						},
+					},
+					diagnostics: [],
+				}
+			}
+			catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== 'EEXIST')
+					throw error
+				const current = await readMutationLock(lockPath)
+				if (attempt === 0 && current && !isProcessAlive(current.pid)) {
+					await unlink(lockPath)
+						.catch(() => undefined)
+					continue
+				}
+				return { diagnostics: [diagnostic('SPEC-IO-ERROR', 'Another spec mutation is already in progress for this workspace.', { path: MUTATION_LOCK_FILE })] }
+			}
+		}
+		return { diagnostics: [diagnostic('SPEC-IO-ERROR', 'Could not acquire the Spec workspace mutation lock.', { path: MUTATION_LOCK_FILE })] }
+	}
+	catch (error) {
+		return { diagnostics: [diagnostic('SPEC-IO-ERROR', `Could not acquire the Spec workspace mutation lock: ${(error as Error).message}.`, { path: MUTATION_LOCK_FILE })] }
+	}
+	finally {
+		await rm(temporary, { force: true })
+			.catch(() => undefined)
+	}
+}
+
+export async function withWorkspaceMutationLock<T>(
+	root: string,
+	operation: () => Promise<MutationResult<T>>,
+): Promise<MutationResult<T>> {
+	const acquired = await acquireMutationLock(root)
+	if (!acquired.lock)
+		return { ok: false, applied: false, diagnostics: acquired.diagnostics }
+	try {
+		return await operation()
+	}
+	finally {
+		await acquired.lock.release()
+	}
 }
 
 export async function resolveMutationRoot(options: MutationCommandOptions, deps: MutationCommandDeps): Promise<{ root?: string, diagnostics: Diagnostic[] }> {

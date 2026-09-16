@@ -5,7 +5,7 @@ import type { MutationCommandDeps, MutationCommandOptions } from './mutation'
 import { activateArtifact, completeArtifact, retireArtifact, supersedeArtifacts } from '../../application/mutations'
 import { lifecycleResultJson } from '../envelopes'
 import { renderLifecycleResult } from '../human-render'
-import { formatMutation, noColor, resolveMutationRoot } from './mutation'
+import { formatMutation, noColor, resolveMutationRoot, withWorkspaceMutationLock } from './mutation'
 
 type LifecycleOperationResult = MutationResult<Artifact | { replacement: Artifact, replaced: Artifact }>
 
@@ -26,21 +26,21 @@ export async function runLifecycleActivateCommand(id: string, options: Record<st
 	const common = optionsOf(options)
 	noColor(common)
 	const root = await resolveMutationRoot(common, deps)
-	return output(root.root ? await activateArtifact(root.root, id) : failed(root.diagnostics), common)
+	return output(root.root ? await withWorkspaceMutationLock(root.root, () => activateArtifact(root.root!, id)) : failed(root.diagnostics), common)
 }
 
 export async function runLifecycleCompleteCommand(id: string, options: Record<string, unknown>, deps: MutationCommandDeps): Promise<CommandOutcome> {
 	const common = optionsOf(options)
 	noColor(common)
 	const root = await resolveMutationRoot(common, deps)
-	return output(root.root ? await completeArtifact(root.root, id) : failed(root.diagnostics), common)
+	return output(root.root ? await withWorkspaceMutationLock(root.root, () => completeArtifact(root.root!, id)) : failed(root.diagnostics), common)
 }
 
 export async function runLifecycleRetireCommand(id: string, options: Record<string, unknown>, deps: MutationCommandDeps): Promise<CommandOutcome> {
 	const common = optionsOf(options)
 	noColor(common)
 	const root = await resolveMutationRoot(common, deps)
-	return output(root.root ? await retireArtifact(root.root, id) : failed(root.diagnostics), common)
+	return output(root.root ? await withWorkspaceMutationLock(root.root, () => retireArtifact(root.root!, id)) : failed(root.diagnostics), common)
 }
 
 export async function runLifecycleSupersedeCommand(argumentReplacement: string | undefined, argumentReplaced: string | undefined, options: Record<string, unknown>, deps: MutationCommandDeps): Promise<CommandOutcome> {
@@ -51,5 +51,5 @@ export async function runLifecycleSupersedeCommand(argumentReplacement: string |
 	if (!replacementId || !replacedId)
 		return output(failed([{ code: 'SPEC-CLI-INVALID', severity: 'error', message: 'Lifecycle supersede requires replacement and replaced Artifact IDs.', related: [] }]), common)
 	const root = await resolveMutationRoot(common, deps)
-	return output(root.root ? await supersedeArtifacts(root.root, replacementId, replacedId) : failed(root.diagnostics), common)
+	return output(root.root ? await withWorkspaceMutationLock(root.root, () => supersedeArtifacts(root.root!, replacementId, replacedId)) : failed(root.diagnostics), common)
 }

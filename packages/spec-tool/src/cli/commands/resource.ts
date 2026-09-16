@@ -5,7 +5,7 @@ import type { MutationCommandDeps, MutationCommandOptions } from './mutation'
 import { addResource, listResources, readResource, removeResource } from '../../application/mutations'
 import { resourceListResultJson, resourceReadResultJson, resourceResultJson } from '../envelopes'
 import { renderResourceList, renderResourceRead, renderResourceResult } from '../human-render'
-import { formatMutation, noColor, resolveMutationRoot } from './mutation'
+import { formatMutation, noColor, resolveMutationRoot, withWorkspaceMutationLock } from './mutation'
 
 function failed<T>(diagnostics: MutationResult<T>['diagnostics']): MutationResult<T> {
 	return { ok: false, applied: false, diagnostics }
@@ -20,13 +20,13 @@ export async function runResourceAddCommand(artifactId: string, options: Record<
 	noColor(common)
 	const root = await resolveMutationRoot(common, deps)
 	const result = root.root
-		? await addResource(root.root, {
+		? await withWorkspaceMutationLock(root.root, () => addResource(root.root!, {
 				artifactId,
 				location: options.location as string,
 				role: options.role as string,
 				mediaType: options.mediaType as string,
 				description: (options.description as string | undefined) ?? '',
-			})
+			}))
 		: failed<ResourceDescriptor>(root.diagnostics)
 	const json = resourceResultJson(result)
 	return formatMutation(common.format, json, renderResourceResult(json), result.ok, result.diagnostics)
@@ -36,7 +36,7 @@ export async function runResourceRemoveCommand(artifactId: string, location: str
 	const common = optionsOf(options)
 	noColor(common)
 	const root = await resolveMutationRoot(common, deps)
-	const result = root.root ? await removeResource(root.root, artifactId, location) : failed<ResourceDescriptor>(root.diagnostics)
+	const result = root.root ? await withWorkspaceMutationLock(root.root, () => removeResource(root.root!, artifactId, location)) : failed<ResourceDescriptor>(root.diagnostics)
 	const json = resourceResultJson(result)
 	return formatMutation(common.format, json, renderResourceResult(json), result.ok, result.diagnostics)
 }

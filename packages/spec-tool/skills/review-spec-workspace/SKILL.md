@@ -30,7 +30,9 @@ spec resource read <uuid> <local-location> --format json
 Search is deterministic case-insensitive substring matching over title/body and
 has no ranking. Trace traverses only `refines`; use relation listing when other
 relation types matter. `resource read` is local-only and never fetches HTTPS
-locations.
+locations. JSON Resource reads report `encoding: utf8` for byte-safe UTF-8 and
+`encoding: base64` for arbitrary binary bytes. CLI usage/parse failures requested
+as JSON use `spec/error-result@1`.
 
 Review the current `.spec/` workspace only. Do not inspect or interpret an
 `.engineering/` tree as Spec state, and do not infer EF transition/range/

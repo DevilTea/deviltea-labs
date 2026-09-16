@@ -6,7 +6,7 @@ import { createArtifact, deleteArtifact, getArtifact, listArtifacts, updateArtif
 import { isArtifactKind, isStatus } from '../../domain/model'
 import { artifactDeleteResultJson, artifactListResultJson, artifactResultJson } from '../envelopes'
 import { renderArtifactDelete, renderArtifactList, renderArtifactResult } from '../human-render'
-import { formatMutation, noColor, readBodyOption, resolveMutationRoot } from './mutation'
+import { formatMutation, noColor, readBodyOption, resolveMutationRoot, withWorkspaceMutationLock } from './mutation'
 
 function failed<T>(diagnostics: MutationResult<T>['diagnostics']): MutationResult<T> {
 	return { ok: false, applied: false, diagnostics }
@@ -36,7 +36,7 @@ export async function runArtifactCreateCommand(options: Record<string, unknown>,
 	const body = await readBodyOption(options.body as string | undefined, options.bodyFile as string | undefined, deps.cwd)
 	if (body.diagnostics.length > 0)
 		return outputArtifact('create', failed(body.diagnostics), common)
-	return outputArtifact('create', await createArtifact(root.root, { kind: kindValue, title: options.title as string, body: body.body, status: statusValue as Status | undefined }), common)
+	return outputArtifact('create', await withWorkspaceMutationLock(root.root, () => createArtifact(root.root!, { kind: kindValue, title: options.title as string, body: body.body, status: statusValue as Status | undefined })), common)
 }
 
 export async function runArtifactGetCommand(id: string, options: Record<string, unknown>, deps: MutationCommandDeps): Promise<CommandOutcome> {
@@ -55,14 +55,14 @@ export async function runArtifactUpdateCommand(id: string, options: Record<strin
 	const body = await readBodyOption(options.body as string | undefined, options.bodyFile as string | undefined, deps.cwd)
 	if (body.diagnostics.length > 0)
 		return outputArtifact('update', failed(body.diagnostics), common)
-	return outputArtifact('update', await updateArtifact(root.root, { id, title: options.title as string | undefined, body: body.body }), common)
+	return outputArtifact('update', await withWorkspaceMutationLock(root.root, () => updateArtifact(root.root!, { id, title: options.title as string | undefined, body: body.body })), common)
 }
 
 export async function runArtifactDeleteCommand(id: string, options: Record<string, unknown>, deps: MutationCommandDeps): Promise<CommandOutcome> {
 	const common = optionsOf(options)
 	noColor(common)
 	const root = await resolveMutationRoot(common, deps)
-	const result = root.root ? await deleteArtifact(root.root, id) : failed<{ id: string, path: string }>(root.diagnostics)
+	const result = root.root ? await withWorkspaceMutationLock(root.root, () => deleteArtifact(root.root!, id)) : failed<{ id: string, path: string }>(root.diagnostics)
 	const json = artifactDeleteResultJson(result)
 	return formatMutation(common.format, json, renderArtifactDelete(json), result.ok, result.diagnostics)
 }

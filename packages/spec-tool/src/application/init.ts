@@ -1,13 +1,14 @@
 import type { Diagnostic } from '../domain/diagnostics'
 import type { Artifact } from '../domain/model'
-import { lstat, mkdir, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { lstat, mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { diagnostic } from '../domain/diagnostics'
 import { encodeArtifact } from '../domain/envelope'
 import { generateUuidV7 } from '../domain/identity'
 import { PLURAL_DIRECTORY_BY_KIND } from '../domain/model'
 import { encodeConfig } from '../repository/config'
-import { canonicalArtifactPath, RESOURCE_ROOT, SPEC_ROOT } from '../repository/layout'
+import { canonicalArtifactPath, SPEC_ROOT } from '../repository/layout'
 
 export interface InitValues {
 	title?: string
@@ -84,6 +85,9 @@ export interface InitWorkspaceResult {
 export async function initWorkspace(root: string, values: InitValues = {}): Promise<InitWorkspaceResult> {
 	const projectRoot = resolve(root)
 	const specPath = join(projectRoot, SPEC_ROOT)
+	const suppliedTitle = values.title?.trim()
+	if (suppliedTitle && /[\r\n]/.test(suppliedTitle))
+		return { ok: false, diagnostics: [diagnostic('SPEC-ENVELOPE-INVALID', 'Project title must be a non-empty single-line string.', { field: 'title' })] }
 	try {
 		if ((await lstat(specPath)).isDirectory() || (await lstat(specPath)).isFile())
 			return { ok: false, diagnostics: [diagnostic('SPEC-LAYOUT-INVALID', `A Spec workspace already exists at '${SPEC_ROOT}/'.`, { path: SPEC_ROOT })] }
@@ -92,17 +96,23 @@ export async function initWorkspace(root: string, values: InitValues = {}): Prom
 		// The expected first-init case: `.spec/` does not exist yet.
 	}
 	const plan = computeInitPlan(projectRoot, values)
+	const temporarySpecPath = join(projectRoot, `.spec-init-${randomUUID()}.tmp`)
 	try {
 		await mkdir(projectRoot, { recursive: true })
-		await mkdir(specPath, { recursive: false })
+		await mkdir(temporarySpecPath, { recursive: false })
 		for (const directory of Object.values(PLURAL_DIRECTORY_BY_KIND))
-			await mkdir(join(specPath, directory), { recursive: false })
-		await mkdir(join(projectRoot, RESOURCE_ROOT), { recursive: false })
-		await writeFile(join(projectRoot, plan.files[0]!.path), plan.files[0]!.content, { encoding: 'utf8', flag: 'wx' })
-		await writeFile(join(projectRoot, plan.files[1]!.path), plan.files[1]!.content, { encoding: 'utf8', flag: 'wx' })
+			await mkdir(join(temporarySpecPath, directory), { recursive: false })
+		await mkdir(join(temporarySpecPath, 'resources'), { recursive: false })
+		await writeFile(join(temporarySpecPath, 'config.yaml'), plan.files[0]!.content, { encoding: 'utf8', flag: 'wx' })
+		await writeFile(join(temporarySpecPath, plan.files[1]!.path.slice(`${SPEC_ROOT}/`.length)), plan.files[1]!.content, { encoding: 'utf8', flag: 'wx' })
+		await rename(temporarySpecPath, specPath)
 		return { ok: true, plan, diagnostics: [] }
 	}
 	catch (error) {
 		return { ok: false, diagnostics: [diagnostic('SPEC-IO-ERROR', `Could not initialize '${SPEC_ROOT}/': ${(error as Error).message}.`, { path: SPEC_ROOT })] }
+	}
+	finally {
+		await rm(temporarySpecPath, { recursive: true, force: true })
+			.catch(() => undefined)
 	}
 }

@@ -89,12 +89,20 @@ the canonical `refines` graph: `up` follows stored outgoing edges toward Story,
 complete connected refinement closure.
 
 Artifact, relation, lifecycle, Resource, search, trace, and validation commands
-return deterministic human output by default. Add `--format json` for the stable
-machine-readable result envelope. CHG completion is explicit via
+return deterministic human output by default. Add `--format json` for stable
+machine-readable result envelopes; CLI usage/parse failures requested in JSON
+mode use `spec/error-result@1` with diagnostics. CHG completion is explicit via
 `spec lifecycle complete`; chained supersession transfers current replacement
-targets to the new active replacement. Terminal Artifacts are immutable, only
-draft Artifacts may be physically deleted, and `resource read` only reads local
-files; it never fetches `https://` locations.
+targets to the new active replacement. Terminal Artifacts are immutable, and
+only draft Artifacts may be physically deleted.
+
+`resource read` only reads local files and never fetches `https://` locations.
+Byte-safe UTF-8 files return `encoding: utf8`; other byte sequences return
+`encoding: base64`, preserving the original content and byte count. Mutating CLI
+commands use an ephemeral per-workspace lock outside `.spec/` to reject
+concurrent Spec writers rather than silently lose updates. Initialization stages
+a complete workspace outside `.spec/` and publishes it only after staging
+succeeds.
 
 ## Agent Skills
 
