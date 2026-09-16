@@ -30,15 +30,6 @@ catalogs:
     lint-staged:
       specifier: ^15.5.2
       version: 15.5.2
-    mdast-util-from-markdown:
-      specifier: ^2.0.3
-      version: 2.0.3
-    mdast-util-gfm:
-      specifier: ^3.1.0
-      version: 3.1.0
-    micromark-extension-gfm:
-      specifier: ^3.0.0
-      version: 3.0.0
     pathe:
       specifier: ^2.0.3
       version: 2.0.3
@@ -170,37 +161,6 @@ importers:
       vue-tsc:
         specifier: 'catalog:'
         version: 3.3.6(typescript@6.0.3)
-
-  packages/ef:
-    dependencies:
-      '@clack/prompts':
-        specifier: 'catalog:'
-        version: 0.10.1
-      commander:
-        specifier: 'catalog:'
-        version: 15.0.0
-      mdast-util-from-markdown:
-        specifier: 'catalog:'
-        version: 2.0.3
-      mdast-util-gfm:
-        specifier: 'catalog:'
-        version: 3.1.0
-      micromark-extension-gfm:
-        specifier: 'catalog:'
-        version: 3.0.0
-      pathe:
-        specifier: 'catalog:'
-        version: 2.0.3
-      yaml:
-        specifier: 'catalog:'
-        version: 2.9.0
-    devDependencies:
-      tsdown:
-        specifier: 'catalog:'
-        version: 0.22.14(@volar/typescript@2.4.28)(publint@0.3.22)(tsx@4.23.0)(typescript@6.0.3)(vue-tsc@3.3.6(typescript@6.0.3))
-      vitest:
-        specifier: 'catalog:'
-        version: 4.1.9(@types/node@24.13.3)(@vitest/coverage-v8@4.1.9)(happy-dom@20.11.2)(vite@8.1.3(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.0)(yaml@2.9.0))
 
   packages/eslint-config:
     dependencies:

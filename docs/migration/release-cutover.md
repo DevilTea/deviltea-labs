@@ -1,9 +1,10 @@
 # Release cutover
 
 The workspace uses independent package versioning and a centralized release
-flow. Publishing itself is never performed from a workstation: it only happens
-in GitHub Actions through npm Trusted Publishing (OIDC). No npm credentials or
-long-lived npm token are stored in this repository.
+flow. Established packages publish only in GitHub Actions through npm Trusted
+Publishing (OIDC); the one-time `@deviltea/spec-tool@0.0.1` bootstrap exception
+is documented below. No npm credentials or long-lived npm token are stored in
+this repository.
 
 Version bumps are driven locally by `pnpm release`, because GitHub Actions
 cannot open pull requests in this repository (the "Allow GitHub Actions to
@@ -15,9 +16,10 @@ push.
 
 ## Trusted Publishing
 
-Trusted Publishers are configured for the following packages with owner
-`DevilTea`, repository `deviltea-labs`, workflow `publish.yml`, and no GitHub
-environment:
+Trusted Publisher configuration uses owner `DevilTea`, repository
+`deviltea-labs`, workflow `publish.yml`, and no GitHub environment. The table
+also lists `@deviltea/spec-tool`, whose Trusted Publisher is configured only
+after its bootstrap `0.0.1` publish:
 
 | npm package | Release identifier | Tag example |
 | --- | --- | --- |
@@ -27,14 +29,24 @@ environment:
 | `vue-temp-var` | `vue-temp-var` | `vue-temp-var@2.0.2` |
 | `@deviltea/tiny-state-machine` | `tiny-state-machine` | `tiny-state-machine@0.0.6` |
 | `@deviltea/tiny-state-machine-vue` | `tiny-state-machine-vue` | `tiny-state-machine-vue@0.0.6` |
-| `@deviltea/ef` | `ef` | `ef@0.0.1` |
-| `@deviltea/spec-tool` | `spec-tool` | `spec-tool@0.0.2` |
+| `@deviltea/spec-tool` | `spec-tool` | `spec-tool@0.0.1` |
 
 `@deviltea/widget-core` and `@deviltea/widget-vue` moved to [`DevilTea/widget`](https://github.com/DevilTea/widget) and are no longer released from this repository.
 
+## First `@deviltea/spec-tool` publish
+
+`@deviltea/spec-tool@0.0.1` is the bootstrap exception to the normal Trusted
+Publishing-only flow because the npm package does not exist yet. After this
+repository change is merged and validated, pack the package from `main`, publish
+that exact tarball manually with npm authentication. This bootstrap publish cannot
+carry npm provenance because provenance requires a supported cloud CI runner. Then
+configure `publish.yml` as the Trusted Publisher; subsequent GitHub Actions publishes
+receive provenance automatically. Do not push the
+`spec-tool@0.0.1` release tag until the package's publishing setup is ready.
+
 ## Release procedure
 
-The two commands require a local [GitHub CLI](https://cli.github.com)
+The normal release commands require a local [GitHub CLI](https://cli.github.com)
 installation authenticated with `gh auth login`.
 
 1. From a clean, up-to-date `main`, run `pnpm release <package> <release>`,
@@ -62,6 +74,8 @@ accepted; a declined prompt restores the bumped `package.json`.
 `scripts/release-package.ts` remains the single source of truth for the package
 table and is also invoked as a CLI by `publish.yml`.
 
-The first release from this repository remains the final operational check for
-each package's Trusted Publisher and npm provenance. Do not use an npm token
-as a fallback if that check fails.
+For established packages, the first automated release remains the final operational
+check for Trusted Publisher configuration and npm provenance. For `@deviltea/spec-tool`,
+the manual `0.0.1` bootstrap establishes the package first; the next GitHub Actions
+release performs that Trusted Publisher/provenance check. Do not use an npm token as a
+fallback if trusted publishing fails.

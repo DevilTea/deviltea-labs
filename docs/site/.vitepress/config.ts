@@ -19,7 +19,6 @@ export default defineConfig({
 						{ text: 'vue-temp-var', link: '/packages/vue-temp-var' },
 						{ text: '@deviltea/tiny-state-machine', link: '/packages/tiny-state-machine' },
 						{ text: '@deviltea/tiny-state-machine-vue', link: '/packages/tiny-state-machine-vue' },
-						{ text: '@deviltea/ef', link: '/packages/ef' },
 						{ text: '@deviltea/spec-tool', link: '/packages/spec-tool' },
 					],
 				},

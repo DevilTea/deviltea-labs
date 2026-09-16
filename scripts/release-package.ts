@@ -6,10 +6,6 @@ import { fileURLToPath } from 'node:url'
 export const workspaceRoot = fileURLToPath(new URL('..', import.meta.url))
 
 const packages = {
-	'ef': {
-		directory: 'packages/ef',
-		name: '@deviltea/ef',
-	},
 	'spec-tool': {
 		directory: 'packages/spec-tool',
 		name: '@deviltea/spec-tool',

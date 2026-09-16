@@ -82,8 +82,8 @@ jobs:
       - name: Validate tsconfig contracts
         run: node packages/tsconfig/scripts/test-contracts.mjs --typescript next
 
-  ef-pack:
-    name: Pack @deviltea/ef (Node 24)
+  spec-tool-pack:
+    name: Pack @deviltea/spec-tool (Node 24)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -99,24 +99,24 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build @deviltea/ef
-        run: pnpm --filter @deviltea/ef build
+      - name: Build @deviltea/spec-tool
+        run: pnpm --filter @deviltea/spec-tool build
 
-      - name: Pack @deviltea/ef
-        working-directory: packages/ef
-        run: pnpm pack --pack-destination "$GITHUB_WORKSPACE/ef-tarball"
+      - name: Pack @deviltea/spec-tool
+        working-directory: packages/spec-tool
+        run: pnpm pack --pack-destination "$GITHUB_WORKSPACE/spec-tool-tarball"
 
       - name: Upload packed tarball
         uses: actions/upload-artifact@v6
         with:
-          name: ef-tarball
-          path: ef-tarball/*.tgz
+          name: spec-tool-tarball
+          path: spec-tool-tarball/*.tgz
           if-no-files-found: error
           retention-days: 1
 
-  ef-cli:
+  spec-tool-cli:
     name: Packed-consumer CLI (${{ matrix.os }}, Node ${{ matrix.node }})
-    needs: ef-pack
+    needs: spec-tool-pack
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -145,16 +145,16 @@ jobs:
       - name: Download packed tarball
         uses: actions/download-artifact@v6
         with:
-          name: ef-tarball
-          path: ef-tarball
+          name: spec-tool-tarball
+          path: spec-tool-tarball
 
       - name: Locate packed tarball
         id: tarball
         shell: bash
         run: |
-          tarball="$(find ef-tarball -maxdepth 2 -name '*.tgz' | head -n 1)"
+          tarball="$(find spec-tool-tarball -maxdepth 2 -name '*.tgz' | head -n 1)"
           if [ -z "$tarball" ]; then
-            echo "No tarball found under ef-tarball/" >&2
+            echo "No tarball found under spec-tool-tarball/" >&2
             exit 1
           fi
 
@@ -167,5 +167,5 @@ jobs:
 
       - name: Run packed-consumer CLI smoke test
         env:
-          EF_SMOKE_TARBALL: ${{ steps.tarball.outputs.path }}
-        run: node packages/ef/test/package-smoke.mjs
+          SPEC_SMOKE_TARBALL: ${{ steps.tarball.outputs.path }}
+        run: node packages/spec-tool/test/package-smoke.mjs
