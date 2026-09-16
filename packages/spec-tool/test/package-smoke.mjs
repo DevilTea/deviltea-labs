@@ -32,8 +32,10 @@ function runInstalledBin(binary, args, cwd) {
 	if (process.platform !== 'win32')
 		return run(binary, args, cwd)
 
-	const command = [`"${binary}"`, ...args.map(arg => `"${arg.replaceAll('"', '""')}"`)].join(' ')
-	return run(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], cwd)
+	const quote = value => `'${value.replaceAll('\'', '\'\'')}'`
+	const command = `& ${[binary, ...args].map(quote)
+		.join(' ')}`
+	return run('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', command], cwd)
 }
 
 function check(name, condition, detail = '') {
@@ -95,8 +97,8 @@ try {
 	check('validate accepts initialized workspace', validateJson.schema === 'spec/validation-result@1' && validateJson.valid === true, validate.stdout)
 
 	const binProbe = runInstalledBin(binary, ['artifact', 'create', '--format', 'json', '--kind', 'story', '--title', 'Bin shim smoke'], project)
-	const binProbeJson = JSON.parse(binProbe.stdout)
-	check('installed npm bin forwards spaced arguments', binProbe.status === 0 && binProbeJson.artifact?.title === 'Bin shim smoke', `${binProbe.stdout} ${binProbe.stderr}`)
+	const binProbeJson = binProbe.status === 0 ? JSON.parse(binProbe.stdout) : undefined
+	check('installed npm bin forwards spaced arguments', binProbe.status === 0 && binProbeJson?.artifact?.title === 'Bin shim smoke', `${binProbe.stdout} ${binProbe.stderr}`)
 
 	const artifact = runSpec(['artifact', 'create', '--format', 'json', '--kind', 'story', '--title', 'Smoke story'], project)
 	const artifactJson = JSON.parse(artifact.stdout)
