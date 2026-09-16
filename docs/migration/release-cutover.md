@@ -41,8 +41,10 @@ repository change is merged and validated, pack the package from `main`, publish
 that exact tarball manually with npm authentication. This bootstrap publish cannot
 carry npm provenance because provenance requires a supported cloud CI runner. Then
 configure `publish.yml` as the Trusted Publisher; subsequent GitHub Actions publishes
-receive provenance automatically. Do not push the
-`spec-tool@0.0.1` release tag until the package's publishing setup is ready.
+receive provenance automatically. The manual `0.0.1` bootstrap is intentionally
+**not tagged**: a `spec-tool@0.0.1` tag would trigger `publish.yml` and attempt to
+publish the already-existing version again. The next Spec Tool version uses the
+normal tag-driven release flow after Trusted Publishing is configured.
 
 ## Release procedure
 
