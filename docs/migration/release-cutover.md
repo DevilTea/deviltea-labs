@@ -36,15 +36,36 @@ after its bootstrap `0.0.1` publish:
 ## First `@deviltea/spec-tool` publish
 
 `@deviltea/spec-tool@0.0.1` is the bootstrap exception to the normal Trusted
-Publishing-only flow because the npm package does not exist yet. After this
-repository change is merged and validated, pack the package from `main`, publish
-that exact tarball manually with npm authentication. This bootstrap publish cannot
-carry npm provenance because provenance requires a supported cloud CI runner. Then
-configure `publish.yml` as the Trusted Publisher; subsequent GitHub Actions publishes
-receive provenance automatically. The manual `0.0.1` bootstrap is intentionally
-**not tagged**: a `spec-tool@0.0.1` tag would trigger `publish.yml` and attempt to
-publish the already-existing version again. The next Spec Tool version uses the
-normal tag-driven release flow after Trusted Publishing is configured.
+Publishing-only flow because the npm package does not exist yet. Perform the
+bootstrap only from a clean, up-to-date merged `main`, and build before packing:
+
+```bash
+pnpm check
+destination="$(mktemp -d)"
+pnpm --filter @deviltea/spec-tool build
+pnpm --dir packages/spec-tool pack --pack-destination "$destination"
+tarball="$(find "$destination" -maxdepth 1 -name '*.tgz' -print -quit)"
+test -n "$tarball"
+for path in \
+  package/package.json \
+  package/dist/cli.mjs \
+  package/skills/maintain-spec-workspace/SKILL.md \
+  package/skills/review-spec-workspace/SKILL.md
+do
+  tar -tf "$tarball" | grep -Fx "$path"
+done
+npm publish "$tarball" --access public
+```
+
+Publish **that exact verified tarball**. Do not run a plain `pnpm pack` from a
+fresh checkout before the build: `dist/` is generated and contains the published
+`spec` executable. This bootstrap publish cannot carry npm provenance because
+provenance requires a supported cloud CI runner. Then configure `publish.yml` as
+the Trusted Publisher; subsequent GitHub Actions publishes receive provenance
+automatically. The manual `0.0.1` bootstrap is intentionally **not tagged**: a
+`spec-tool@0.0.1` tag would trigger `publish.yml` and attempt to publish the
+already-existing version again. The next Spec Tool version uses the normal
+tag-driven release flow after Trusted Publishing is configured.
 
 ## Release procedure
 

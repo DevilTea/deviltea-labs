@@ -28,6 +28,14 @@ function run(command, args, cwd, shell = false) {
 	return spawnSync(command, args, { cwd, encoding: 'utf8', env: process.env, maxBuffer: 10 * 1024 * 1024, shell })
 }
 
+function runInstalledBin(binary, args, cwd) {
+	if (process.platform !== 'win32')
+		return run(binary, args, cwd)
+
+	const command = [`"${binary}"`, ...args.map(arg => `"${arg.replaceAll('"', '""')}"`)].join(' ')
+	return run(process.env.ComSpec ?? 'cmd.exe', ['/d', '/s', '/c', `"${command}"`], cwd)
+}
+
 function check(name, condition, detail = '') {
 	record(name, Boolean(condition), condition ? '' : detail)
 }
@@ -85,6 +93,11 @@ try {
 	const validateJson = JSON.parse(validate.stdout)
 	check('validate exits successfully', validate.status === 0, validate.stderr)
 	check('validate accepts initialized workspace', validateJson.schema === 'spec/validation-result@1' && validateJson.valid === true, validate.stdout)
+
+	const binProbe = runInstalledBin(binary, ['artifact', 'create', '--format', 'json', '--kind', 'story', '--title', 'Bin shim smoke'], project)
+	const binProbeJson = JSON.parse(binProbe.stdout)
+	check('installed npm bin forwards spaced arguments', binProbe.status === 0 && binProbeJson.artifact?.title === 'Bin shim smoke', `${binProbe.stdout} ${binProbe.stderr}`)
+
 	const artifact = runSpec(['artifact', 'create', '--format', 'json', '--kind', 'story', '--title', 'Smoke story'], project)
 	const artifactJson = JSON.parse(artifact.stdout)
 	check('artifact create exits successfully', artifact.status === 0, artifact.stderr)
