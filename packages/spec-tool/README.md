@@ -111,10 +111,20 @@ succeeds.
 
 The published package includes two Spec-native Agent Skills:
 
-- `maintain-spec-workspace` — invariant-aware Artifact, lifecycle, relation,
-  Resource, search/trace, and validation operations.
-- `review-spec-workspace` — read-only validation and deterministic inspection of
-  the current `.spec/` workspace.
+- `maintain-spec-workspace` — semantic layer selection plus invariant-aware
+  Artifact authoring, lifecycle, relation, Resource, search/trace, and validation
+  operations.
+- `review-spec-workspace` — read-only structural and semantic review of the
+  current `.spec/` workspace, including refinement quality and layer-boundary
+  checks.
+
+The same skills are mirrored at the repository-standard `skills/<name>/SKILL.md`
+locations so the repository can be used directly with the Skills CLI:
+
+```bash
+npx skills@latest add DevilTea/deviltea-labs --list
+npx skills@latest add DevilTea/deviltea-labs --skill maintain-spec-workspace --skill review-spec-workspace
+```
 
 The inherited EF skill names and EF workflow guidance are not part of the Spec
 package surface. Historical `docs/ef-core/` material remains repository-only and

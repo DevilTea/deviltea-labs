@@ -17,6 +17,20 @@ Package documentation is available at
 | `@deviltea/tiny-state-machine-vue` | [`packages/tiny-state-machine-vue`](packages/tiny-state-machine-vue) |
 | `@deviltea/spec-tool` | [`packages/spec-tool`](packages/spec-tool) |
 
+## Agent Skills
+
+Repository-installable Agent Skills live under [`skills/`](skills/). The
+Spec Tool skills can be discovered and installed with the Skills CLI:
+
+```sh
+npx skills@latest add DevilTea/deviltea-labs --list
+npx skills@latest add DevilTea/deviltea-labs --skill maintain-spec-workspace --skill review-spec-workspace
+```
+
+The root copies mirror the skills shipped in `@deviltea/spec-tool`; package
+tests verify that the repository-installable and npm-distributed copies stay in
+sync.
+
 ## Development
 
 ```sh
