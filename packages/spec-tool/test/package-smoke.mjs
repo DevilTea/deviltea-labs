@@ -6,12 +6,15 @@ import { Buffer } from 'node:buffer'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
 const packageTool = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const npmTool = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const temporaryDirectory = mkdtempSync(join(tmpdir(), 'deviltea-spec-smoke-'))
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const repositoryRoot = resolve(packageRoot, '..', '..')
 const results = []
 
 function record(name, ok, detail = '') {
@@ -65,12 +68,18 @@ try {
 	setup(npmTool, ['install', tarball], consumer)
 	const installedPackage = join(consumer, 'node_modules', '@deviltea', 'spec-tool')
 	const installedSkills = join(installedPackage, 'skills')
+	const repositorySkills = join(repositoryRoot, 'skills')
+	const packageSourceSkills = join(packageRoot, 'skills')
 	const cliEntry = join(installedPackage, 'dist', 'cli.mjs')
 	const binary = join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? 'spec.cmd' : 'spec')
 	check('installed spec binary exists', existsSync(binary), binary)
 	check('installed CLI entry exists', existsSync(cliEntry), cliEntry)
 	check('package ships maintain-spec-workspace skill', existsSync(join(installedSkills, 'maintain-spec-workspace', 'SKILL.md')))
 	check('package ships review-spec-workspace skill', existsSync(join(installedSkills, 'review-spec-workspace', 'SKILL.md')))
+	check('repository exposes maintain-spec-workspace for skills CLI discovery', existsSync(join(repositorySkills, 'maintain-spec-workspace', 'SKILL.md')))
+	check('repository exposes review-spec-workspace for skills CLI discovery', existsSync(join(repositorySkills, 'review-spec-workspace', 'SKILL.md')))
+	check('repository maintain skill matches packaged source', readFileSync(join(repositorySkills, 'maintain-spec-workspace', 'SKILL.md'), 'utf8') === readFileSync(join(packageSourceSkills, 'maintain-spec-workspace', 'SKILL.md'), 'utf8'))
+	check('repository review skill matches packaged source', readFileSync(join(repositorySkills, 'review-spec-workspace', 'SKILL.md'), 'utf8') === readFileSync(join(packageSourceSkills, 'review-spec-workspace', 'SKILL.md'), 'utf8'))
 	check('package omits inherited author-engineering-files skill', !existsSync(join(installedSkills, 'author-engineering-files')))
 	check('package omits inherited review-engineering-change skill', !existsSync(join(installedSkills, 'review-engineering-change')))
 	check('package omits inherited EF documentation', !existsSync(join(installedPackage, 'docs', 'ef-core')))
