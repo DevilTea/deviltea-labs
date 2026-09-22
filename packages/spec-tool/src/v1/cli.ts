@@ -232,7 +232,9 @@ export async function runV1Cli(argv: readonly string[], io: V1CliIO): Promise<V1
 		const valid = resource === 'workspace' && operation === 'validate'
 			? (result as { valid: boolean }).valid
 			: true
-		return { exitCode: valid ? 0 : 1, stdout: `${output}\n`, stderr: '' }
+		return valid
+			? { exitCode: 0, stdout: `${output}\n`, stderr: '' }
+			: { exitCode: 1, stdout: '', stderr: `${output}\n` }
 	}
 	catch (error) {
 		const payload: SpecErrorEnvelope = error instanceof SpecError

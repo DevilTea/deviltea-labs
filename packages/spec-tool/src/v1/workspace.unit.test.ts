@@ -140,6 +140,27 @@ describe('frozen v1 workspace foundation', () => {
 		expect(invalid).not.toHaveProperty('revision')
 	})
 
+	it('rejects non-string frontmatter keys rather than silently ignoring unknown fields', async () => {
+		const root = await temporaryRoot()
+		await initWorkspace(root)
+		const id = newUuidV7()
+		await writeSemanticFile(root, `.spec/features/${id}.md`, encodeFeature({
+			id,
+			title: 'Search',
+			summary: 'Lookup',
+			rules: [],
+		})
+			.replace('rules: []', 'rules: []\n1: unexpected'))
+		const result = await validateWorkspace(root)
+		expect(result.valid)
+			.toBe(false)
+		expect(result.issues)
+			.toEqual([expect.objectContaining({
+				source: { path: `.spec/features/${id}.md` },
+				reason: 'invalid_format',
+			})])
+	})
+
 	it('rejects duplicate semantic IDs across kinds', async () => {
 		const root = await temporaryRoot()
 		await initWorkspace(root)

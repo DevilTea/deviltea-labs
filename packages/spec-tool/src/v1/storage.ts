@@ -71,7 +71,6 @@ function decodeFrontmatter(
 		return null
 	}
 	const keys = document.contents.items.map(pair => pair.key?.toJSON())
-		.filter((key): key is string => typeof key === 'string')
 	const expected = FIELDS[kind]
 	if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
 		addIssue(issues, path, path, 'invalid_format', 'Frontmatter must contain exactly the canonical fields in canonical order.')
