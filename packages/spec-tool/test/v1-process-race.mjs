@@ -51,6 +51,7 @@ async function main() {
 			assert.equal(rejected.length, 1, 'second process must reject stale revision')
 			assert.equal(JSON.parse(rejected[0].stderr).code, 'revision_conflict')
 			assert.equal(rejected[0].stdout, '')
+			assert.equal(successes[0].stderr, '', 'successful CLI must not emit stderr')
 			assert.equal(JSON.parse(successes[0].stdout).changedNodes.length, 1)
 			const snapshot = await client.graph.export()
 			assert.equal(snapshot.data.nodes.length, 1)

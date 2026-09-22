@@ -127,6 +127,20 @@ describe('frozen v1 semantic client', () => {
 			.toEqual([])
 		expect(relations.changedEdges.added)
 			.toEqual([{ from: story.id, type: 'motivates', to: targetId }])
+		const noOpRelations = await spec.graph.setRelationTargets({
+			sourceId: story.id,
+			type: 'motivates',
+			targets: [featureId, targetId],
+			expectedRevision: relations.revision,
+		})
+		expect(noOpRelations)
+			.toEqual({ revision: relations.revision, changedNodes: [], deletedIds: [], changedEdges: { added: [], removed: [] } })
+		await expect(spec.graph.setRelationTargets({
+			sourceId: story.id,
+			type: 'motivates',
+			targets: [],
+			expectedRevision: relations.revision,
+		})).rejects.toMatchObject({ code: 'relation_invalid', details: { reason: 'cardinality' } })
 		await expect(spec.feature.delete({ id: featureId, expectedRevision: relations.revision }))
 			.rejects.toMatchObject({
 				code: 'referenced_unit',
