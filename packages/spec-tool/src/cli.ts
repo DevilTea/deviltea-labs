@@ -4,6 +4,7 @@ import { readFileSync, realpathSync } from 'node:fs'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { runCli } from './cli/program'
+import { isV1Command, runV1Cli } from './v1/cli'
 
 function readPackageVersion(): string {
 	try {
@@ -17,6 +18,14 @@ function readPackageVersion(): string {
 }
 
 export async function main(argv: readonly string[]): Promise<{ exitCode: number, stdout: string, stderr: string }> {
+	if (isV1Command(argv)) {
+		const chunks: string[] = []
+		if (!process.stdin.isTTY) {
+			for await (const chunk of process.stdin)
+				chunks.push(String(chunk))
+		}
+		return runV1Cli(argv, { cwd: process.cwd(), stdin: chunks.join('') })
+	}
 	return runCli(argv, { cwd: process.cwd() }, { version: readPackageVersion() })
 }
 

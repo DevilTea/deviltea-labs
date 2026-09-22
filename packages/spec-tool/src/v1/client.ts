@@ -1,0 +1,393 @@
+import type {
+	DeleteRequest,
+	FeatureCreateRequest,
+	FeatureResource,
+	FeatureUpdateRequest,
+	GraphResource,
+	MutationResponse,
+	NormalizedEdge,
+	ReadResponse,
+	RelationType,
+	SetRelationTargetsRequest,
+	StoryCreateRequest,
+	StoryResource,
+	StoryUpdateRequest,
+	WorkspaceResource,
+} from './types'
+import type { WorkspaceSnapshot } from './workspace'
+import { resolve } from 'node:path'
+import {
+	invalidRequest,
+	notFound,
+	referencedUnit,
+	relationInvalid,
+	revisionConflict,
+} from './errors'
+import { isUuidV7, newUuidV7 } from './identity'
+import {
+	compareText,
+	encodeFeature,
+	encodeStory,
+	removeSemanticFile,
+	writeSemanticFile,
+} from './storage'
+import { initWorkspace, readSnapshot, validateWorkspace } from './workspace'
+import { withWorkspaceWriteLock } from './write-lock'
+
+const REVISIONS = /^[0-9a-f]{64}$/
+const NODE_KINDS = ['story', 'feature', 'contract', 'scenario', 'rule', 'clause']
+const RELATIONS = ['motivates', 'demonstrates', 'constrains']
+const mutationQueues = new Map<string, Promise<void>>()
+
+async function serialized<T>(root: string, operation: () => Promise<T>): Promise<T> {
+	const key = resolve(root)
+	const previous = mutationQueues.get(key) ?? Promise.resolve()
+	let release!: () => void
+	const current = new Promise<void>((done) => {
+		release = done
+	})
+	mutationQueues.set(key, current)
+	await previous
+	try {
+		return await operation()
+	}
+	finally {
+		release()
+		if (mutationQueues.get(key) === current)
+			mutationQueues.delete(key)
+	}
+}
+
+function issue(path: string, reason: 'missing' | 'unexpected' | 'conflict' | 'unsupported' | 'invalid_format', message: string) {
+	return { path, reason, message }
+}
+
+function fail(path: string, reason: 'missing' | 'unexpected' | 'conflict' | 'unsupported' | 'invalid_format', message: string): never {
+	throw invalidRequest([issue(path, reason, message)])
+}
+
+function assertShape(
+	value: unknown,
+	keys: readonly string[],
+	required: readonly string[] = keys,
+	path = 'request',
+): asserts value is Record<string, unknown> {
+	if (value === null || typeof value !== 'object' || Array.isArray(value))
+		fail(path, 'invalid_format', 'Request must be a JSON object.')
+	for (const key of Object.keys(value)) {
+		if (!keys.includes(key))
+			fail(`${path}.${key}`, 'unexpected', 'Unknown request field.')
+	}
+	for (const key of required) {
+		if (!(key in value))
+			fail(`${path}.${key}`, 'missing', 'Required request field is missing.')
+	}
+}
+
+function assertText(value: unknown, path: string): asserts value is string {
+	if (typeof value !== 'string' || !value.trim())
+		fail(path, 'invalid_format', 'Required text must be a non-empty string.')
+}
+
+function assertId(value: unknown, path: string): asserts value is string {
+	if (!isUuidV7(value))
+		fail(path, 'invalid_format', 'Semantic identity must be canonical lowercase UUIDv7.')
+}
+
+function assertRevision(value: unknown): asserts value is string {
+	if (typeof value !== 'string' || !REVISIONS.test(value))
+		fail('expectedRevision', 'invalid_format', 'expectedRevision must be a lowercase SHA-256 hex digest.')
+}
+
+function assertRelations(value: unknown): asserts value is string[] {
+	if (!Array.isArray(value) || !value.every(isUuidV7))
+		fail('targets', 'invalid_format', 'Relation targets must be an array of canonical UUIDv7 strings.')
+}
+
+function assertSourceExists(snapshot: WorkspaceSnapshot, id: string): void {
+	if (!snapshot.ir.nodes.some(node => node.id === id))
+		throw notFound(id)
+}
+
+function assertMotivates(snapshot: WorkspaceSnapshot, sourceId: string, targets: string[]): string[] {
+	if (targets.length === 0)
+		throw relationInvalid('cardinality', sourceId, 'motivates', targets)
+	if (new Set(targets).size !== targets.length)
+		throw relationInvalid('duplicate_target', sourceId, 'motivates', targets)
+	for (const id of targets) {
+		if (!snapshot.features.has(id)) {
+			if (snapshot.stories.has(id))
+				throw relationInvalid('target_kind', sourceId, 'motivates', targets)
+			throw notFound(id, 'feature')
+		}
+	}
+	return [...targets].sort(compareText)
+}
+
+function sameTargets(left: string[], right: string[]): boolean {
+	return left.length === right.length && left.every((id, index) => id === right[index])
+}
+
+function emptyMutation(revision: string): MutationResponse {
+	return { revision, changedNodes: [], deletedIds: [], changedEdges: { added: [], removed: [] } }
+}
+
+function edgeKey(edge: NormalizedEdge): string {
+	return [edge.from, edge.type, edge.to].join(':')
+}
+
+function delta(before: WorkspaceSnapshot, after: WorkspaceSnapshot): MutationResponse {
+	const priorNodes = new Map(before.ir.nodes.map(node => [node.id, node]))
+	const currentNodes = new Map(after.ir.nodes.map(node => [node.id, node]))
+	const priorEdges = new Set(before.ir.edges.map(edgeKey))
+	const currentEdges = new Set(after.ir.edges.map(edgeKey))
+	return {
+		revision: after.revision,
+		changedNodes: after.ir.nodes.filter(node => JSON.stringify(priorNodes.get(node.id)) !== JSON.stringify(node)),
+		deletedIds: [...priorNodes.keys()].filter(id => !currentNodes.has(id))
+			.sort(compareText),
+		changedEdges: {
+			added: after.ir.edges.filter(edge => !priorEdges.has(edgeKey(edge))),
+			removed: before.ir.edges.filter(edge => !currentEdges.has(edgeKey(edge))),
+		},
+	}
+}
+
+async function mutate(
+	root: string,
+	expectedRevision: unknown,
+	change: (snapshot: WorkspaceSnapshot) => Promise<boolean>,
+): Promise<MutationResponse> {
+	assertRevision(expectedRevision)
+	return serialized(root, () => withWorkspaceWriteLock(root, async () => {
+		const before = await readSnapshot(root)
+		if (before.revision !== expectedRevision)
+			throw revisionConflict(expectedRevision, before.revision)
+		const changed = await change(before)
+		return changed ? delta(before, await readSnapshot(root)) : emptyMutation(before.revision)
+	}))
+}
+
+function featurePath(id: string): string {
+	return `.spec/features/${id}.md`
+}
+
+function storyPath(id: string): string {
+	return `.spec/stories/${id}.md`
+}
+
+function createId(snapshot: WorkspaceSnapshot): string {
+	let id: string
+	do {
+		id = newUuidV7()
+	} while (snapshot.features.has(id) || snapshot.stories.has(id))
+	return id
+}
+
+export class SpecClient {
+	readonly root: string
+	readonly workspace: WorkspaceResource
+	readonly graph: GraphResource
+	readonly story: StoryResource
+	readonly feature: FeatureResource
+
+	constructor(root: string) {
+		if (typeof root !== 'string' || !root.trim())
+			fail('root', 'invalid_format', 'Repository root must be a non-empty path.')
+		this.root = resolve(root)
+		this.workspace = {
+			init: () => initWorkspace(this.root),
+			validate: () => validateWorkspace(this.root),
+		}
+		this.graph = {
+			export: async () => {
+				const snapshot = await readSnapshot(this.root)
+				return { revision: snapshot.revision, data: snapshot.ir }
+			},
+			get: async (request) => {
+				assertShape(request, ['id'])
+				assertId(request.id, 'id')
+				const snapshot = await readSnapshot(this.root)
+				const node = snapshot.ir.nodes.find(node => node.id === request.id)
+				if (!node)
+					throw notFound(request.id)
+				return { revision: snapshot.revision, data: node }
+			},
+			list: async (request = {}) => {
+				assertShape(request, ['kind'], [])
+				if (request.kind !== undefined && !NODE_KINDS.includes(request.kind as string))
+					fail('kind', 'unsupported', 'Unsupported node kind.')
+				const snapshot = await readSnapshot(this.root)
+				return {
+					revision: snapshot.revision,
+					data: snapshot.ir.nodes
+						.filter(node => request.kind === undefined || node.kind === request.kind)
+						.map(node => 'title' in node
+							? { id: node.id, kind: node.kind, title: node.title }
+							: { id: node.id, kind: node.kind }),
+				}
+			},
+			incoming: request => this.readEdges(request, 'incoming'),
+			outgoing: request => this.readEdges(request, 'outgoing'),
+			setRelationTargets: request => this.setRelationTargets(request),
+		}
+		this.feature = {
+			create: request => this.createFeature(request),
+			update: request => this.updateFeature(request),
+			delete: request => this.deleteFeature(request),
+		}
+		this.story = {
+			create: request => this.createStory(request),
+			update: request => this.updateStory(request),
+			delete: request => this.deleteStory(request),
+		}
+	}
+
+	private async readEdges(
+		request: { id: string, type?: RelationType },
+		direction: 'incoming' | 'outgoing',
+	): Promise<ReadResponse<NormalizedEdge[]>> {
+		assertShape(request, ['id', 'type'], ['id'])
+		assertId(request.id, 'id')
+		if (request.type !== undefined && !RELATIONS.includes(request.type))
+			fail('type', 'unsupported', 'Unsupported relation type.')
+		const snapshot = await readSnapshot(this.root)
+		assertSourceExists(snapshot, request.id)
+		const data = snapshot.ir.edges.filter(edge =>
+			(direction === 'incoming' ? edge.to : edge.from) === request.id
+			&& (request.type === undefined || edge.type === request.type))
+		return { revision: snapshot.revision, data }
+	}
+
+	private async createFeature(request: FeatureCreateRequest): Promise<MutationResponse> {
+		assertShape(request, ['title', 'summary', 'expectedRevision'])
+		assertText(request.title, 'title')
+		assertText(request.summary, 'summary')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const id = createId(snapshot)
+			await writeSemanticFile(this.root, featurePath(id), encodeFeature({
+				id,
+				title: request.title,
+				summary: request.summary,
+				rules: [],
+			}))
+			return true
+		})
+	}
+
+	private async updateFeature(request: FeatureUpdateRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'changes', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertShape(request.changes, ['title', 'summary'], [])
+		if ('title' in request.changes)
+			assertText(request.changes.title, 'changes.title')
+		if ('summary' in request.changes)
+			assertText(request.changes.summary, 'changes.summary')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.features.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'feature')
+			const updated = { ...stored.value, ...request.changes }
+			if (updated.title === stored.value.title && updated.summary === stored.value.summary)
+				return false
+			await writeSemanticFile(this.root, stored.path, encodeFeature(updated, stored.body))
+			return true
+		})
+	}
+
+	private async deleteFeature(request: DeleteRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'expectedRevision'])
+		assertId(request.id, 'id')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.features.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'feature')
+			const inbound = snapshot.ir.edges.filter(edge => edge.to === request.id)
+			if (inbound.length > 0)
+				throw referencedUnit(request.id, inbound)
+			await removeSemanticFile(this.root, stored.path)
+			return true
+		})
+	}
+
+	private async createStory(request: StoryCreateRequest): Promise<MutationResponse> {
+		assertShape(request, ['title', 'actor', 'goal', 'value', 'motivates', 'expectedRevision'])
+		for (const key of ['title', 'actor', 'goal', 'value'] as const)
+			assertText(request[key], key)
+		if (!Array.isArray(request.motivates) || !request.motivates.every(isUuidV7))
+			fail('motivates', 'invalid_format', 'motivates must contain canonical UUIDv7 strings.')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const id = createId(snapshot)
+			const targets = assertMotivates(snapshot, id, request.motivates)
+			await writeSemanticFile(this.root, storyPath(id), encodeStory({
+				id,
+				title: request.title,
+				actor: request.actor,
+				goal: request.goal,
+				value: request.value,
+				motivates: targets,
+			}))
+			return true
+		})
+	}
+
+	private async updateStory(request: StoryUpdateRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'changes', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertShape(request.changes, ['title', 'actor', 'goal', 'value'], [])
+		for (const key of ['title', 'actor', 'goal', 'value'] as const) {
+			if (key in request.changes)
+				assertText(request.changes[key], `changes.${key}`)
+		}
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.stories.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'story')
+			const updated = { ...stored.value, ...request.changes }
+			if (updated.title === stored.value.title && updated.actor === stored.value.actor
+				&& updated.goal === stored.value.goal && updated.value === stored.value.value) {
+				return false
+			}
+			await writeSemanticFile(this.root, stored.path, encodeStory(updated, stored.body))
+			return true
+		})
+	}
+
+	private async deleteStory(request: DeleteRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'expectedRevision'])
+		assertId(request.id, 'id')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.stories.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'story')
+			const inbound = snapshot.ir.edges.filter(edge => edge.to === request.id)
+			if (inbound.length > 0)
+				throw referencedUnit(request.id, inbound)
+			await removeSemanticFile(this.root, stored.path)
+			return true
+		})
+	}
+
+	private async setRelationTargets(request: SetRelationTargetsRequest): Promise<MutationResponse> {
+		assertShape(request, ['sourceId', 'type', 'targets', 'expectedRevision'])
+		assertId(request.sourceId, 'sourceId')
+		if (!RELATIONS.includes(request.type))
+			fail('type', 'unsupported', 'Unsupported relation type.')
+		assertRelations(request.targets)
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			assertSourceExists(snapshot, request.sourceId)
+			const stored = snapshot.stories.get(request.sourceId)
+			if (request.type !== 'motivates' || !stored)
+				throw relationInvalid('source_kind', request.sourceId, request.type, request.targets)
+			const targets = assertMotivates(snapshot, request.sourceId, request.targets)
+			if (sameTargets(stored.value.motivates, targets))
+				return false
+			await writeSemanticFile(this.root, stored.path, encodeStory({ ...stored.value, motivates: targets }, stored.body))
+			return true
+		})
+	}
+}
+
+export function createSpecClient(root: string): SpecClient {
+	return new SpecClient(root)
+}
