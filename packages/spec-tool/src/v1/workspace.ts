@@ -1,3 +1,4 @@
+import type { ScenarioStored } from './scenario'
 import type { FeatureData, RuleData, Stored, StoryData } from './storage'
 import type { MutationResponse, NormalizedEdge, NormalizedIr, NormalizedNode, ValidationIssue, ValidationResult } from './types'
 import { createHash, randomUUID } from 'node:crypto'
@@ -6,8 +7,9 @@ import { join } from 'node:path'
 import { isMap, parseDocument } from 'yaml'
 import { invalidRequest, validationFailed } from './errors'
 import { isUuidV7 } from './identity'
+import { parseScenarioFile } from './scenario'
 import { addIssue, compareText, decodeFeature, decodeStory, statOrNull } from './storage'
-import { withWorkspaceWriteLock } from './write-lock'
+import { withWorkspaceReadLock, withWorkspaceWriteLock } from './write-lock'
 
 const SPEC = '.spec'
 const MANIFEST = '.spec/spec.yaml'
@@ -19,6 +21,7 @@ export interface WorkspaceSnapshot {
 	features: Map<string, Stored<FeatureData>>
 	rules: Map<string, { ownerId: string, path: string, value: RuleData }>
 	stories: Map<string, Stored<StoryData>>
+	scenarios: Map<string, ScenarioStored>
 	ir: NormalizedIr
 	revision: string
 }
@@ -72,6 +75,7 @@ async function scanRoot(
 	name: StorageRoot,
 	features: Map<string, Stored<FeatureData>>,
 	stories: Map<string, Stored<StoryData>>,
+	scenarios: Map<string, ScenarioStored>,
 	ids: Map<string, string>,
 	issues: ValidationIssue[],
 ): Promise<void> {
@@ -97,12 +101,26 @@ async function scanRoot(
 			addIssue(issues, relative, relative, 'invalid_format', 'Filename must contain a canonical lowercase UUIDv7 and the expected extension.')
 			continue
 		}
-		if (name === 'contracts' || name === 'scenarios') {
-			addIssue(issues, relative, relative, 'unsupported', 'This semantic kind is implemented in a later vertical slice.')
+		if (name === 'contracts') {
+			addIssue(issues, relative, relative, 'unsupported', 'Contract persistence is implemented in Slice 3.')
 			continue
 		}
 		const filenameId = filename.slice(0, -extension.length)
 		const raw = await readFile(absolute, 'utf8')
+		if (name === 'scenarios') {
+			const container = parseScenarioFile(relative, raw, issues)
+			if (!container)
+				continue
+			for (const entry of container.entries) {
+				if (ids.has(entry.value.id)) {
+					addIssue(issues, relative, 'id', 'duplicate', 'Scenario UUID duplicates a workspace semantic unit.')
+					continue
+				}
+				ids.set(entry.value.id, relative)
+				scenarios.set(entry.value.id, { path: relative, value: entry.value, entry, container })
+			}
+			continue
+		}
 		const decoded = name === 'features'
 			? decodeFeature(relative, raw, filenameId, issues)
 			: decodeStory(relative, raw, filenameId, issues)
@@ -128,6 +146,7 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 	const issues: ValidationIssue[] = []
 	const features = new Map<string, Stored<FeatureData>>()
 	const stories = new Map<string, Stored<StoryData>>()
+	const scenarios = new Map<string, ScenarioStored>()
 	const ids = new Map<string, string>()
 	const stat = await statOrNull(join(root, SPEC))
 	if (!stat) {
@@ -145,7 +164,7 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 	}
 	await inspectManifest(root, issues)
 	for (const name of STORAGE_ROOTS)
-		await scanRoot(root, name, features, stories, ids, issues)
+		await scanRoot(root, name, features, stories, scenarios, ids, issues)
 	const rules = new Map<string, { ownerId: string, path: string, value: RuleData }>()
 	for (const feature of features.values()) {
 		for (const [index, rule] of feature.value.rules.entries()) {
@@ -162,6 +181,13 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 		for (const target of story.value.motivates) {
 			if (!features.has(target)) {
 				addIssue(issues, story.path, 'motivates', 'unresolved', `Story must motivate an existing Feature: ${target}`)
+			}
+		}
+	}
+	for (const scenario of scenarios.values()) {
+		for (const target of scenario.value.demonstrates) {
+			if (!features.has(target) && !rules.has(target)) {
+				addIssue(issues, scenario.path, 'demonstrates', ids.has(target) ? 'invariant' : 'unresolved', `Scenario demonstrates must target an existing Rule or Feature: ${target}`)
 			}
 		}
 	}
@@ -182,6 +208,13 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 			ownerId,
 			source: { path },
 		})),
+		...[...scenarios.values()].map(({ value, path }) => ({
+			id: value.id,
+			kind: 'scenario' as const,
+			title: value.title,
+			steps: value.steps,
+			source: { path },
+		})),
 		...[...stories.values()].map(({ value, path }) => ({
 			id: value.id,
 			kind: 'story' as const,
@@ -192,8 +225,12 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 			source: { path },
 		})),
 	].sort((left, right) => compareText(left.id, right.id))
-	const edges: NormalizedEdge[] = [...stories.values()].flatMap(({ value }) =>
-		value.motivates.map(to => ({ from: value.id, type: 'motivates' as const, to })))
+	const edges: NormalizedEdge[] = [
+		...[...stories.values()].flatMap(({ value }) =>
+			value.motivates.map(to => ({ from: value.id, type: 'motivates' as const, to }))),
+		...[...scenarios.values()].flatMap(({ value }) =>
+			value.demonstrates.map(to => ({ from: value.id, type: 'demonstrates' as const, to }))),
+	]
 		.sort((left, right) => compareText(left.from, right.from) || compareText(left.type, right.type) || compareText(left.to, right.to))
 	const ir: NormalizedIr = { formatVersion: 1, nodes, edges }
 	const semanticNodes = nodes.map((node) => {
@@ -205,21 +242,26 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 	const revision = createHash('sha256')
 		.update(JSON.stringify(semanticProjection), 'utf8')
 		.digest('hex')
-	return { issues: [], snapshot: { root, features, rules, stories, ir, revision } }
+	return { issues: [], snapshot: { root, features, rules, stories, scenarios, ir, revision } }
 }
 
-export async function readSnapshot(root: string): Promise<WorkspaceSnapshot> {
-	const inspection = await inspectWorkspace(root)
-	if (!inspection.snapshot)
-		throw validationFailed(inspection.issues)
-	return inspection.snapshot
+export async function readSnapshot(root: string, insideWriteLock = false): Promise<WorkspaceSnapshot> {
+	const inspect = async () => {
+		const inspection = await inspectWorkspace(root)
+		if (!inspection.snapshot)
+			throw validationFailed(inspection.issues)
+		return inspection.snapshot
+	}
+	return insideWriteLock ? inspect() : withWorkspaceReadLock(root, inspect)
 }
 
 export async function validateWorkspace(root: string): Promise<ValidationResult> {
-	const inspection = await inspectWorkspace(root)
-	return inspection.snapshot
-		? { valid: true, revision: inspection.snapshot.revision, issues: [] }
-		: { valid: false, issues: inspection.issues }
+	return withWorkspaceReadLock(root, async () => {
+		const inspection = await inspectWorkspace(root)
+		return inspection.snapshot
+			? { valid: true, revision: inspection.snapshot.revision, issues: [] }
+			: { valid: false, issues: inspection.issues }
+	})
 }
 
 export async function initWorkspace(root: string): Promise<MutationResponse> {
@@ -247,7 +289,7 @@ export async function initWorkspace(root: string): Promise<MutationResponse> {
 		finally {
 			await rm(temporary, { recursive: true, force: true })
 		}
-		const snapshot = await readSnapshot(root)
+		const snapshot = await readSnapshot(root, true)
 		return {
 			revision: snapshot.revision,
 			changedNodes: [],

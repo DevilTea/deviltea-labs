@@ -13,6 +13,10 @@ import type {
 	RuleReparentRequest,
 	RuleResource,
 	RuleUpdateRequest,
+	ScenarioCreateRequest,
+	ScenarioResource,
+	ScenarioStep,
+	ScenarioUpdateRequest,
 	SetRelationTargetsRequest,
 	StoryCreateRequest,
 	StoryResource,
@@ -29,6 +33,7 @@ import {
 	revisionConflict,
 } from './errors'
 import { isUuidV7, newUuidV7 } from './identity'
+import { deleteScenarioFromContainer, renderNewScenarioFile, updateScenarioInContainer } from './scenario'
 import {
 	compareText,
 	encodeFeature,
@@ -95,6 +100,12 @@ function assertText(value: unknown, path: string): asserts value is string {
 		fail(path, 'invalid_format', 'Required text must be a non-empty string.')
 }
 
+function assertScenarioLine(value: unknown, path: string): asserts value is string {
+	assertText(value, path)
+	if (/[\r\n]/.test(value))
+		fail(path, 'invalid_format', 'Gherkin titles and step text must fit on one line.')
+}
+
 function assertId(value: unknown, path: string): asserts value is string {
 	if (!isUuidV7(value))
 		fail(path, 'invalid_format', 'Semantic identity must be canonical lowercase UUIDv7.')
@@ -110,6 +121,48 @@ function assertRelations(value: unknown): asserts value is string[] {
 		fail('targets', 'invalid_format', 'Relation targets must be an array of canonical UUIDv7 strings.')
 }
 
+function assertScenarioSteps(value: unknown): asserts value is ScenarioStep[] {
+	if (!Array.isArray(value) || !value.length)
+		fail('steps', 'invalid_format', 'steps must be a non-empty normalized ScenarioStep array.')
+	let phase: ScenarioStep['type'] | null = null
+	let whenCount = 0
+	let thenCount = 0
+	for (const [index, step] of value.entries()) {
+		const path = `steps[${index}]`
+		assertShape(step, ['type', 'text'], ['type', 'text'], path)
+		if (step.type !== 'given' && step.type !== 'when' && step.type !== 'then')
+			fail(`${path}.type`, 'invalid_format', 'Step phase must be given, when or then.')
+		assertScenarioLine(step.text, `${path}.text`)
+		if ((step.type === 'given' && phase !== null && phase !== 'given')
+			|| (step.type === 'when' && phase === 'then')
+			|| (step.type === 'then' && !whenCount)) {
+			fail(`${path}.type`, 'invalid_format', 'Steps must follow Given* -> When+ -> Then+.')
+		}
+		phase = step.type
+		if (step.type === 'when')
+			whenCount++
+		if (step.type === 'then')
+			thenCount++
+	}
+	if (!whenCount || !thenCount)
+		fail('steps', 'invalid_format', 'A Scenario requires at least one When and one Then step.')
+}
+
+function assertDemonstrates(snapshot: WorkspaceSnapshot, sourceId: string, targets: string[]): string[] {
+	if (targets.length === 0)
+		throw relationInvalid('cardinality', sourceId, 'demonstrates', targets)
+	if (new Set(targets).size !== targets.length)
+		throw relationInvalid('duplicate_target', sourceId, 'demonstrates', targets)
+	for (const id of targets) {
+		if (!snapshot.features.has(id) && !snapshot.rules.has(id)) {
+			if (snapshot.ir.nodes.some(node => node.id === id))
+				throw relationInvalid('target_kind', sourceId, 'demonstrates', targets)
+			throw notFound(id)
+		}
+	}
+	return [...targets].sort(compareText)
+}
+
 function assertSourceExists(snapshot: WorkspaceSnapshot, id: string): void {
 	if (!snapshot.ir.nodes.some(node => node.id === id))
 		throw notFound(id)
@@ -122,7 +175,7 @@ function assertMotivates(snapshot: WorkspaceSnapshot, sourceId: string, targets:
 		throw relationInvalid('duplicate_target', sourceId, 'motivates', targets)
 	for (const id of targets) {
 		if (!snapshot.features.has(id)) {
-			if (snapshot.stories.has(id))
+			if (snapshot.ir.nodes.some(node => node.id === id))
 				throw relationInvalid('target_kind', sourceId, 'motivates', targets)
 			throw notFound(id, 'feature')
 		}
@@ -166,16 +219,20 @@ async function mutate(
 ): Promise<MutationResponse> {
 	assertRevision(expectedRevision)
 	return serialized(root, () => withWorkspaceWriteLock(root, async () => {
-		const before = await readSnapshot(root)
+		const before = await readSnapshot(root, true)
 		if (before.revision !== expectedRevision)
 			throw revisionConflict(expectedRevision, before.revision)
 		const changed = await change(before)
-		return changed ? delta(before, await readSnapshot(root)) : emptyMutation(before.revision)
+		return changed ? delta(before, await readSnapshot(root, true)) : emptyMutation(before.revision)
 	}))
 }
 
 function featurePath(id: string): string {
 	return `.spec/features/${id}.md`
+}
+
+function scenarioPath(storageId: string): string {
+	return `.spec/scenarios/${storageId}.feature`
 }
 
 function storyPath(id: string): string {
@@ -186,7 +243,7 @@ function createId(snapshot: WorkspaceSnapshot): string {
 	let id: string
 	do {
 		id = newUuidV7()
-	} while (snapshot.features.has(id) || snapshot.stories.has(id) || snapshot.rules.has(id))
+	} while (snapshot.features.has(id) || snapshot.stories.has(id) || snapshot.rules.has(id) || snapshot.scenarios.has(id))
 	return id
 }
 
@@ -197,6 +254,7 @@ export class SpecClient {
 	readonly story: StoryResource
 	readonly feature: FeatureResource
 	readonly rule: RuleResource
+	readonly scenario: ScenarioResource
 
 	constructor(root: string) {
 		if (typeof root !== 'string' || !root.trim())
@@ -254,6 +312,11 @@ export class SpecClient {
 			delete: request => this.deleteRule(request),
 			reorder: request => this.reorderRules(request),
 			reparent: request => this.reparentRule(request),
+		}
+		this.scenario = {
+			create: request => this.createScenario(request),
+			update: request => this.updateScenario(request),
+			delete: request => this.deleteScenario(request),
 		}
 	}
 
@@ -440,7 +503,74 @@ export class SpecClient {
 						rules: [...target.value.rules, stored.value],
 					}, target.body),
 				},
-			], async () => { await readSnapshot(this.root) })
+			], async () => { await readSnapshot(this.root, true) })
+			return true
+		})
+	}
+
+	private async createScenario(request: ScenarioCreateRequest): Promise<MutationResponse> {
+		assertShape(request, ['title', 'steps', 'demonstrates', 'expectedRevision'])
+		assertScenarioLine(request.title, 'title')
+		assertScenarioSteps(request.steps)
+		assertRelations(request.demonstrates)
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const id = createId(snapshot)
+			const demonstrates = assertDemonstrates(snapshot, id, request.demonstrates)
+			const storageId = newUuidV7()
+			await writeSemanticFile(this.root, scenarioPath(storageId), renderNewScenarioFile({
+				id,
+				title: request.title,
+				steps: request.steps,
+				demonstrates,
+			}))
+			return true
+		})
+	}
+
+	private async updateScenario(request: ScenarioUpdateRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'changes', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertShape(request.changes, ['title', 'steps'], [])
+		if ('title' in request.changes)
+			assertScenarioLine(request.changes.title, 'changes.title')
+		if ('steps' in request.changes)
+			assertScenarioSteps(request.changes.steps)
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.scenarios.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'scenario')
+			const title = request.changes.title === undefined ? stored.value.title : request.changes.title
+			const steps = request.changes.steps === undefined ? stored.value.steps : request.changes.steps
+			const titleChanged = title !== stored.value.title
+			const stepsChanged = JSON.stringify(steps) !== JSON.stringify(stored.value.steps)
+			if (!titleChanged && !stepsChanged)
+				return false
+			const raw = updateScenarioInContainer(stored.container, stored.entry, {
+				...stored.value,
+				title,
+				steps,
+			}, { title: titleChanged, steps: stepsChanged })
+			await writeSemanticFile(this.root, stored.path, raw)
+			return true
+		})
+	}
+
+	private async deleteScenario(request: DeleteRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'expectedRevision'])
+		assertId(request.id, 'id')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.scenarios.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'scenario')
+			const inbound = snapshot.ir.edges.filter(edge => edge.to === request.id)
+			if (inbound.length > 0)
+				throw referencedUnit(request.id, inbound)
+			if (stored.container.entries.length === 1) {
+				await removeSemanticFile(this.root, stored.path)
+			}
+			else {
+				await writeSemanticFile(this.root, stored.path, deleteScenarioFromContainer(stored.container, stored.entry))
+			}
 			return true
 		})
 	}
@@ -511,14 +641,31 @@ export class SpecClient {
 		assertRelations(request.targets)
 		return mutate(this.root, request.expectedRevision, async (snapshot) => {
 			assertSourceExists(snapshot, request.sourceId)
-			const stored = snapshot.stories.get(request.sourceId)
-			if (request.type !== 'motivates' || !stored)
-				throw relationInvalid('source_kind', request.sourceId, request.type, request.targets)
-			const targets = assertMotivates(snapshot, request.sourceId, request.targets)
-			if (sameTargets(stored.value.motivates, targets))
-				return false
-			await writeSemanticFile(this.root, stored.path, encodeStory({ ...stored.value, motivates: targets }, stored.body))
-			return true
+			const story = snapshot.stories.get(request.sourceId)
+			if (request.type === 'motivates' && story) {
+				const targets = assertMotivates(snapshot, request.sourceId, request.targets)
+				if (sameTargets(story.value.motivates, targets))
+					return false
+				await writeSemanticFile(this.root, story.path, encodeStory({
+					...story.value,
+					motivates: targets,
+				}, story.body))
+				return true
+			}
+			const scenario = snapshot.scenarios.get(request.sourceId)
+			if (request.type === 'demonstrates' && scenario) {
+				const targets = assertDemonstrates(snapshot, request.sourceId, request.targets)
+				if (sameTargets(scenario.value.demonstrates, targets))
+					return false
+				await writeSemanticFile(this.root, scenario.path, updateScenarioInContainer(
+					scenario.container,
+					scenario.entry,
+					{ ...scenario.value, demonstrates: targets },
+					{ demonstrates: true },
+				))
+				return true
+			}
+			throw relationInvalid('source_kind', request.sourceId, request.type, request.targets)
 		})
 	}
 }

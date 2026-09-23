@@ -5,7 +5,7 @@ export type WorkspaceFormatVersion = typeof WORKSPACE_FORMAT_VERSION
 export type IrFormatVersion = typeof IR_FORMAT_VERSION
 
 export type NodeKind = 'story' | 'feature' | 'contract' | 'scenario' | 'rule' | 'clause'
-export type SliceNodeKind = 'story' | 'feature' | 'rule'
+export type SliceNodeKind = 'story' | 'feature' | 'rule' | 'scenario'
 export type RelationType = 'motivates' | 'demonstrates' | 'constrains'
 
 export interface SourceReference {
@@ -152,6 +152,17 @@ export interface FeatureUpdateRequest extends ExpectedRevisionRequest {
 	changes: FeatureUpdateChanges
 }
 
+export interface ScenarioCreateRequest extends ExpectedRevisionRequest {
+	title: string
+	steps: ScenarioStep[]
+	demonstrates: string[]
+}
+
+export interface ScenarioUpdateRequest extends ExpectedRevisionRequest {
+	id: string
+	changes: { title?: string, steps?: ScenarioStep[] }
+}
+
 export interface RuleCreateRequest extends ExpectedRevisionRequest {
 	ownerId: string
 	statement: string
@@ -214,4 +225,10 @@ export interface RuleResource {
 	delete: (request: DeleteRequest) => Promise<MutationResponse>
 	reorder: (request: RuleReorderRequest) => Promise<MutationResponse>
 	reparent: (request: RuleReparentRequest) => Promise<MutationResponse>
+}
+
+export interface ScenarioResource {
+	create: (request: ScenarioCreateRequest) => Promise<MutationResponse>
+	update: (request: ScenarioUpdateRequest) => Promise<MutationResponse>
+	delete: (request: DeleteRequest) => Promise<MutationResponse>
 }

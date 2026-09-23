@@ -15,13 +15,14 @@ export interface V1CliOutcome {
 	stderr: string
 }
 
-const RESOURCES = ['workspace', 'graph', 'story', 'feature', 'rule'] as const
+const RESOURCES = ['workspace', 'graph', 'story', 'feature', 'rule', 'scenario'] as const
 const OPERATIONS: Record<string, readonly string[]> = {
 	workspace: ['init', 'validate'],
 	graph: ['export', 'get', 'list', 'incoming', 'outgoing', 'set-relation-targets'],
 	story: ['create', 'update', 'delete'],
 	feature: ['create', 'update', 'delete'],
 	rule: ['create', 'update', 'delete', 'reparent', 'reorder'],
+	scenario: ['create', 'update', 'delete'],
 }
 
 const HELP = [
@@ -33,6 +34,7 @@ const HELP = [
 	'  story create|update|delete',
 	'  feature create|update|delete',
 	'  rule create|update|delete|reparent|reorder',
+	'  scenario create|update|delete',
 	'Requests: JSON object on stdin; output defaults to JSON.',
 ].join('\n')
 
@@ -239,6 +241,15 @@ export async function runV1Cli(argv: readonly string[], io: V1CliIO): Promise<V1
 				break
 			case 'rule/reorder':
 				result = await client.rule.reorder(request as never)
+				break
+			case 'scenario/create':
+				result = await client.scenario.create(request as never)
+				break
+			case 'scenario/update':
+				result = await client.scenario.update(request as never)
+				break
+			case 'scenario/delete':
+				result = await client.scenario.delete(request as never)
 				break
 			default:
 				requestError('argv', 'unsupported', 'Unsupported v1 operation.')
