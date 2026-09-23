@@ -93,6 +93,48 @@ async function main() {
 		check('runtime dependency no longer contains Commander', !Object.hasOwn(installedManifest.dependencies ?? {}, 'commander'))
 		check('published files only expose dist and skills', JSON.stringify(installedManifest.files) === '["dist","skills"]')
 
+		check('manifest exposes public ESM and published .d.mts declarations', installedManifest.exports?.['.']?.import === './dist/index.mjs'
+		&& installedManifest.exports?.['.']?.types === './dist/index.d.mts'
+		&& installedManifest.main === './dist/index.mjs'
+		&& installedManifest.types === './dist/index.d.mts')
+		const bareProbePath = join(consumer, 'public-import.mjs')
+		writeFileSync(bareProbePath, `${[
+			'import * as api from \'@deviltea/spec-tool\'',
+			'console.log(JSON.stringify(Object.keys(api).sort()))',
+		].join('\n')}\n`)
+		const bareProbe = run(process.execPath, [bareProbePath], consumer)
+		check('an external Node ESM consumer resolves the bare @deviltea/spec-tool package specifier', bareProbe.status === 0
+		&& bareProbe.stderr === ''
+		&& bareProbe.stdout.trim() === JSON.stringify(['SpecClient', 'SpecError', 'createSpecClient'].sort()), bareProbe.stdout + bareProbe.stderr)
+
+		const typeProbePath = join(consumer, 'public-types.mts')
+		writeFileSync(typeProbePath, `${[
+			'import { createSpecClient, SpecError, type SpecClient, type ContractCreateRequest, type MutationResponse, type NormalizedIr } from \'@deviltea/spec-tool\'',
+			'declare const request: ContractCreateRequest',
+			'const client: SpecClient = createSpecClient(\'.\')',
+			'const changed: Promise<MutationResponse> = client.contract.create(request)',
+			'const snapshot: Promise<{ revision: string, data: NormalizedIr }> = client.graph.export()',
+			'const error: SpecError = new SpecError(\'invalid_request\', \'test\')',
+			'void changed',
+			'void snapshot',
+			'void error',
+		].join('\n')}\n`)
+		const tsconfigPath = join(consumer, 'tsconfig.json')
+		writeFileSync(tsconfigPath, JSON.stringify({
+			compilerOptions: {
+				module: 'NodeNext',
+				moduleResolution: 'NodeNext',
+				target: 'ES2022',
+				strict: true,
+				skipLibCheck: true,
+				noEmit: true,
+				types: [],
+			},
+			include: ['public-types.mts'],
+		}, null, 2))
+		const publicTypecheck = run(packageTool, ['exec', 'tsc', '--project', tsconfigPath], repositoryRoot, { shell: process.platform === 'win32', timeout: 120000 })
+		check('external TypeScript NodeNext consumer resolves published request and IR declarations', publicTypecheck.status === 0, publicTypecheck.stdout + publicTypecheck.stderr)
+
 		const api = await import(pathToFileURL(indexEntry).href)
 		check('public runtime exports are only frozen-v1 primitives', JSON.stringify(Object.keys(api)
 			.sort()) === JSON.stringify(['SpecClient', 'SpecError', 'createSpecClient'].sort()))
