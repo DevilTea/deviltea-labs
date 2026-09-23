@@ -5,7 +5,7 @@ export type WorkspaceFormatVersion = typeof WORKSPACE_FORMAT_VERSION
 export type IrFormatVersion = typeof IR_FORMAT_VERSION
 
 export type NodeKind = 'story' | 'feature' | 'contract' | 'scenario' | 'rule' | 'clause'
-export type SliceNodeKind = 'story' | 'feature' | 'rule' | 'scenario'
+export type SliceNodeKind = 'story' | 'feature' | 'rule' | 'scenario' | 'contract' | 'clause'
 export type RelationType = 'motivates' | 'demonstrates' | 'constrains'
 
 export interface SourceReference {
@@ -183,6 +183,38 @@ export interface RuleReparentRequest extends ExpectedRevisionRequest {
 	newOwnerId: string
 }
 
+export interface ContractCreateRequest extends ExpectedRevisionRequest {
+	title: string
+	summary: string
+	constrains: string[]
+}
+
+export interface ContractUpdateRequest extends ExpectedRevisionRequest {
+	id: string
+	changes: { title?: string, summary?: string }
+}
+
+export interface ClauseCreateRequest extends ExpectedRevisionRequest {
+	ownerId: string
+	statement: string
+	constrains?: string[]
+}
+
+export interface ClauseUpdateRequest extends ExpectedRevisionRequest {
+	id: string
+	changes: { statement?: string }
+}
+
+export interface ClauseReorderRequest extends ExpectedRevisionRequest {
+	ownerId: string
+	orderedIds: string[]
+}
+
+export interface ClauseReparentRequest extends ExpectedRevisionRequest {
+	id: string
+	newOwnerId: string
+}
+
 export interface DeleteRequest extends ExpectedRevisionRequest {
 	id: string
 }
@@ -190,7 +222,7 @@ export interface DeleteRequest extends ExpectedRevisionRequest {
 export interface SetRelationTargetsRequest extends ExpectedRevisionRequest {
 	sourceId: string
 	type: RelationType
-	targets: string[]
+	targets: string[] | null
 }
 
 export interface WorkspaceResource {
@@ -231,4 +263,18 @@ export interface ScenarioResource {
 	create: (request: ScenarioCreateRequest) => Promise<MutationResponse>
 	update: (request: ScenarioUpdateRequest) => Promise<MutationResponse>
 	delete: (request: DeleteRequest) => Promise<MutationResponse>
+}
+
+export interface ContractResource {
+	create: (request: ContractCreateRequest) => Promise<MutationResponse>
+	update: (request: ContractUpdateRequest) => Promise<MutationResponse>
+	delete: (request: DeleteRequest) => Promise<MutationResponse>
+}
+
+export interface ClauseResource {
+	create: (request: ClauseCreateRequest) => Promise<MutationResponse>
+	update: (request: ClauseUpdateRequest) => Promise<MutationResponse>
+	delete: (request: DeleteRequest) => Promise<MutationResponse>
+	reorder: (request: ClauseReorderRequest) => Promise<MutationResponse>
+	reparent: (request: ClauseReparentRequest) => Promise<MutationResponse>
 }

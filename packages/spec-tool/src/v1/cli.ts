@@ -15,7 +15,7 @@ export interface V1CliOutcome {
 	stderr: string
 }
 
-const RESOURCES = ['workspace', 'graph', 'story', 'feature', 'rule', 'scenario'] as const
+const RESOURCES = ['workspace', 'graph', 'story', 'feature', 'rule', 'scenario', 'contract', 'clause'] as const
 const OPERATIONS: Record<string, readonly string[]> = {
 	workspace: ['init', 'validate'],
 	graph: ['export', 'get', 'list', 'incoming', 'outgoing', 'set-relation-targets'],
@@ -23,6 +23,8 @@ const OPERATIONS: Record<string, readonly string[]> = {
 	feature: ['create', 'update', 'delete'],
 	rule: ['create', 'update', 'delete', 'reparent', 'reorder'],
 	scenario: ['create', 'update', 'delete'],
+	contract: ['create', 'update', 'delete'],
+	clause: ['create', 'update', 'delete', 'reparent', 'reorder'],
 }
 
 const HELP = [
@@ -35,6 +37,8 @@ const HELP = [
 	'  feature create|update|delete',
 	'  rule create|update|delete|reparent|reorder',
 	'  scenario create|update|delete',
+	'  contract create|update|delete',
+	'  clause create|update|delete|reparent|reorder',
 	'Requests: JSON object on stdin; output defaults to JSON.',
 ].join('\n')
 
@@ -250,6 +254,30 @@ export async function runV1Cli(argv: readonly string[], io: V1CliIO): Promise<V1
 				break
 			case 'scenario/delete':
 				result = await client.scenario.delete(request as never)
+				break
+			case 'contract/create':
+				result = await client.contract.create(request as never)
+				break
+			case 'contract/update':
+				result = await client.contract.update(request as never)
+				break
+			case 'contract/delete':
+				result = await client.contract.delete(request as never)
+				break
+			case 'clause/create':
+				result = await client.clause.create(request as never)
+				break
+			case 'clause/update':
+				result = await client.clause.update(request as never)
+				break
+			case 'clause/delete':
+				result = await client.clause.delete(request as never)
+				break
+			case 'clause/reparent':
+				result = await client.clause.reparent(request as never)
+				break
+			case 'clause/reorder':
+				result = await client.clause.reorder(request as never)
 				break
 			default:
 				requestError('argv', 'unsupported', 'Unsupported v1 operation.')

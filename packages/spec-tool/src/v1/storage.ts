@@ -18,6 +18,21 @@ export interface FeatureData {
 	rules: RuleData[]
 }
 
+export interface ClauseData {
+	id: string
+	statement: string
+	/** Absent means inherit Contract scope; an override is a complete, non-empty set. */
+	constrains?: string[]
+}
+
+export interface ContractData {
+	id: string
+	title: string
+	summary: string
+	clauses: ClauseData[]
+	constrains: string[]
+}
+
 export interface StoryData {
 	id: string
 	title: string
@@ -34,10 +49,11 @@ export interface Stored<T> {
 	body: string
 }
 
-type ArtifactKind = 'feature' | 'story'
+type ArtifactKind = 'feature' | 'story' | 'contract'
 const FIELDS: Record<ArtifactKind, string[]> = {
 	feature: ['id', 'title', 'summary', 'rules'],
 	story: ['id', 'title', 'actor', 'goal', 'value', 'motivates'],
+	contract: ['id', 'title', 'summary', 'clauses', 'constrains'],
 }
 
 export function addIssue(
@@ -174,6 +190,102 @@ export function decodeFeature(
 	return { path, body, value: { id, title, summary, rules } }
 }
 
+function decodeTargets(
+	value: unknown,
+	path: string,
+	field: string,
+	issues: ValidationIssue[],
+	optional = false,
+): string[] | null {
+	if (optional && value === undefined)
+		return null
+	if (!Array.isArray(value) || value.length === 0) {
+		addIssue(issues, path, field, value === undefined ? 'missing' : Array.isArray(value) ? 'empty' : 'invalid_format', 'Targets must be a non-empty UUIDv7 array.')
+		return null
+	}
+	const result: string[] = []
+	const seen = new Set<string>()
+	let valid = true
+	for (const target of value) {
+		if (!isUuidV7(target)) {
+			addIssue(issues, path, field, 'invalid_format', 'Every target must be a canonical lowercase UUIDv7.')
+			valid = false
+		}
+		else if (seen.has(target)) {
+			addIssue(issues, path, field, 'duplicate', 'Relation targets must be unique.')
+			valid = false
+		}
+		else {
+			seen.add(target)
+			result.push(target)
+		}
+	}
+	if (result.some((id, index) => index > 0 && compareText(result[index - 1]!, id) >= 0)) {
+		addIssue(issues, path, field, 'invariant', 'Relation targets must be sorted lexicographically.')
+		valid = false
+	}
+	return valid ? result : null
+}
+
+export function decodeContract(
+	path: string,
+	raw: string,
+	filenameId: string,
+	issues: ValidationIssue[],
+): Stored<ContractData> | null {
+	const parsed = decodeFrontmatter(path, raw, 'contract', issues)
+	if (!parsed)
+		return null
+	const { fields, body } = parsed
+	const id = recordId(fields, filenameId, path, issues)
+	const title = requiredText(fields, 'title', path, issues)
+	const summary = requiredText(fields, 'summary', path, issues)
+	const constrains = decodeTargets(fields.constrains, path, 'constrains', issues)
+	const clauses: ClauseData[] = []
+	if (!Array.isArray(fields.clauses)) {
+		addIssue(issues, path, 'clauses', fields.clauses === undefined ? 'missing' : 'invalid_format', 'Clauses must be an array.')
+	}
+	else {
+		for (const [index, item] of fields.clauses.entries()) {
+			const field = `clauses[${index}]`
+			if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+				addIssue(issues, path, field, 'invalid_format', 'Clause must be a YAML mapping.')
+				continue
+			}
+			const keys = Object.keys(item)
+			if (keys.join(',') !== 'id,statement' && keys.join(',') !== 'id,statement,constrains') {
+				addIssue(issues, path, field, 'invalid_format', 'Clause keys must be id, statement, optional constrains in canonical order.')
+				continue
+			}
+			const record = item as Record<string, unknown>
+			let valid = true
+			if (!isUuidV7(record.id)) {
+				addIssue(issues, path, `${field}.id`, 'invalid_format', 'Clause ID must be a canonical lowercase UUIDv7.')
+				valid = false
+			}
+			if (typeof record.statement !== 'string' || !record.statement.trim()) {
+				addIssue(issues, path, `${field}.statement`, 'empty', 'Clause statement must be non-empty.')
+				valid = false
+			}
+			const override = keys.length === 3
+				? decodeTargets(record.constrains, path, `${field}.constrains`, issues)
+				: undefined
+			if (keys.length === 3 && override === null)
+				valid = false
+			if (valid) {
+				clauses.push(override === undefined
+					? { id: record.id as string, statement: record.statement as string }
+					: { id: record.id as string, statement: record.statement as string, constrains: override! })
+			}
+		}
+	}
+	if (!id || title === null || summary === null || !constrains || !Array.isArray(fields.clauses)
+		|| clauses.length !== fields.clauses.length) {
+		return null
+	}
+	return { path, body, value: { id, title, summary, clauses, constrains } }
+}
+
 export function decodeStory(
 	path: string,
 	raw: string,
@@ -209,6 +321,22 @@ export function decodeStory(
 	if (!id || title === null || actor === null || goal === null || value === null || !Array.isArray(motivates) || motivates.length < 1 || !motivates.every(isUuidV7))
 		return null
 	return { path, body, value: { id, title, actor, goal, value, motivates } }
+}
+
+export function encodeContract(contract: ContractData, body = '\n'): string {
+	return `---\n${stringify({
+		id: contract.id,
+		title: contract.title,
+		summary: contract.summary,
+		clauses: contract.clauses.map((clause) => {
+			const canonical = { id: clause.id, statement: clause.statement }
+			return clause.constrains === undefined
+				? canonical
+				: { ...canonical, constrains: [...clause.constrains].sort(compareText) }
+		}),
+		constrains: [...contract.constrains].sort(compareText),
+	})
+		.trimEnd()}\n---${body}`
 }
 
 export function encodeFeature(feature: FeatureData, body = '\n'): string {

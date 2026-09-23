@@ -1,4 +1,12 @@
 import type {
+	ClauseCreateRequest,
+	ClauseReorderRequest,
+	ClauseReparentRequest,
+	ClauseResource,
+	ClauseUpdateRequest,
+	ContractCreateRequest,
+	ContractResource,
+	ContractUpdateRequest,
 	DeleteRequest,
 	FeatureCreateRequest,
 	FeatureResource,
@@ -36,6 +44,7 @@ import { isUuidV7, newUuidV7 } from './identity'
 import { deleteScenarioFromContainer, renderNewScenarioFile, updateScenarioInContainer } from './scenario'
 import {
 	compareText,
+	encodeContract,
 	encodeFeature,
 	encodeStory,
 	removeSemanticFile,
@@ -155,9 +164,30 @@ function assertDemonstrates(snapshot: WorkspaceSnapshot, sourceId: string, targe
 	if (new Set(targets).size !== targets.length)
 		throw relationInvalid('duplicate_target', sourceId, 'demonstrates', targets)
 	for (const id of targets) {
-		if (!snapshot.features.has(id) && !snapshot.rules.has(id)) {
+		if (!snapshot.features.has(id) && !snapshot.rules.has(id)
+			&& !snapshot.contracts.has(id) && !snapshot.clauses.has(id)) {
 			if (snapshot.ir.nodes.some(node => node.id === id))
 				throw relationInvalid('target_kind', sourceId, 'demonstrates', targets)
+			throw notFound(id)
+		}
+	}
+	return [...targets].sort(compareText)
+}
+
+function assertConstrains(
+	snapshot: WorkspaceSnapshot,
+	sourceId: string,
+	targets: string[],
+	allowRules: boolean,
+): string[] {
+	if (targets.length === 0)
+		throw relationInvalid('cardinality', sourceId, 'constrains', targets)
+	if (new Set(targets).size !== targets.length)
+		throw relationInvalid('duplicate_target', sourceId, 'constrains', targets)
+	for (const id of targets) {
+		if (!snapshot.features.has(id) && !(allowRules && snapshot.rules.has(id))) {
+			if (snapshot.ir.nodes.some(node => node.id === id))
+				throw relationInvalid('target_kind', sourceId, 'constrains', targets)
 			throw notFound(id)
 		}
 	}
@@ -238,6 +268,10 @@ function scenarioPath(storageId: string): string {
 	return `.spec/scenarios/${storageId}.feature`
 }
 
+function contractPath(id: string): string {
+	return `.spec/contracts/${id}.md`
+}
+
 function storyPath(id: string): string {
 	return `.spec/stories/${id}.md`
 }
@@ -246,7 +280,7 @@ function createId(snapshot: WorkspaceSnapshot): string {
 	let id: string
 	do {
 		id = newUuidV7()
-	} while (snapshot.features.has(id) || snapshot.stories.has(id) || snapshot.rules.has(id) || snapshot.scenarios.has(id))
+	} while (snapshot.features.has(id) || snapshot.stories.has(id) || snapshot.rules.has(id) || snapshot.scenarios.has(id) || snapshot.contracts.has(id) || snapshot.clauses.has(id))
 	return id
 }
 
@@ -258,6 +292,8 @@ export class SpecClient {
 	readonly feature: FeatureResource
 	readonly rule: RuleResource
 	readonly scenario: ScenarioResource
+	readonly contract: ContractResource
+	readonly clause: ClauseResource
 
 	constructor(root: string) {
 		if (typeof root !== 'string' || !root.trim())
@@ -320,6 +356,18 @@ export class SpecClient {
 			create: request => this.createScenario(request),
 			update: request => this.updateScenario(request),
 			delete: request => this.deleteScenario(request),
+		}
+		this.contract = {
+			create: request => this.createContract(request),
+			update: request => this.updateContract(request),
+			delete: request => this.deleteContract(request),
+		}
+		this.clause = {
+			create: request => this.createClause(request),
+			update: request => this.updateClause(request),
+			delete: request => this.deleteClause(request),
+			reorder: request => this.reorderClauses(request),
+			reparent: request => this.reparentClause(request),
 		}
 	}
 
@@ -388,6 +436,189 @@ export class SpecClient {
 			if (stored.value.rules.length > 0)
 				fail('id', 'conflict', 'Feature with Rule children cannot be ordinary-deleted.')
 			await removeSemanticFile(this.root, stored.path)
+			return true
+		})
+	}
+
+	private async createContract(request: ContractCreateRequest): Promise<MutationResponse> {
+		assertShape(request, ['title', 'summary', 'constrains', 'expectedRevision'])
+		assertText(request.title, 'title')
+		assertText(request.summary, 'summary')
+		assertRelations(request.constrains, 'constrains')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const id = createId(snapshot)
+			const constrains = assertConstrains(snapshot, id, request.constrains, false)
+			await writeSemanticFile(this.root, contractPath(id), encodeContract({
+				id,
+				title: request.title,
+				summary: request.summary,
+				clauses: [],
+				constrains,
+			}))
+			return true
+		})
+	}
+
+	private async updateContract(request: ContractUpdateRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'changes', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertShape(request.changes, ['title', 'summary'], [])
+		if ('title' in request.changes)
+			assertText(request.changes.title, 'changes.title')
+		if ('summary' in request.changes)
+			assertText(request.changes.summary, 'changes.summary')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.contracts.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'contract')
+			const updated = { ...stored.value, ...request.changes }
+			if (updated.title === stored.value.title && updated.summary === stored.value.summary)
+				return false
+			await writeSemanticFile(this.root, stored.path, encodeContract(updated, stored.body))
+			return true
+		})
+	}
+
+	private async deleteContract(request: DeleteRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'expectedRevision'])
+		assertId(request.id, 'id')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.contracts.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'contract')
+			const inbound = snapshot.ir.edges.filter(edge => edge.to === request.id)
+			if (inbound.length > 0)
+				throw referencedUnit(request.id, inbound)
+			if (stored.value.clauses.length > 0)
+				fail('id', 'conflict', 'Contract with Clause children cannot be ordinary-deleted.')
+			await removeSemanticFile(this.root, stored.path)
+			return true
+		})
+	}
+
+	private async createClause(request: ClauseCreateRequest): Promise<MutationResponse> {
+		assertShape(request, ['ownerId', 'statement', 'constrains', 'expectedRevision'], ['ownerId', 'statement', 'expectedRevision'])
+		assertId(request.ownerId, 'ownerId')
+		assertText(request.statement, 'statement')
+		if (request.constrains !== undefined)
+			assertRelations(request.constrains, 'constrains')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const owner = snapshot.contracts.get(request.ownerId)
+			if (!owner)
+				throw notFound(request.ownerId, 'contract')
+			const id = createId(snapshot)
+			const override = request.constrains === undefined
+				? undefined
+				: assertConstrains(snapshot, id, request.constrains, true)
+			const clause = override === undefined
+				? { id, statement: request.statement }
+				: { id, statement: request.statement, constrains: override }
+			await writeSemanticFile(this.root, owner.path, encodeContract({
+				...owner.value,
+				clauses: [...owner.value.clauses, clause],
+			}, owner.body))
+			return true
+		})
+	}
+
+	private async updateClause(request: ClauseUpdateRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'changes', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertShape(request.changes, ['statement'], [])
+		if ('statement' in request.changes)
+			assertText(request.changes.statement, 'changes.statement')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.clauses.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'clause')
+			if (request.changes.statement === undefined || request.changes.statement === stored.value.statement)
+				return false
+			const owner = snapshot.contracts.get(stored.ownerId)!
+			await writeSemanticFile(this.root, owner.path, encodeContract({
+				...owner.value,
+				clauses: owner.value.clauses.map(clause => clause.id === request.id
+					? { ...clause, statement: request.changes.statement! }
+					: clause),
+			}, owner.body))
+			return true
+		})
+	}
+
+	private async deleteClause(request: DeleteRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'expectedRevision'])
+		assertId(request.id, 'id')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.clauses.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'clause')
+			const inbound = snapshot.ir.edges.filter(edge => edge.to === request.id)
+			if (inbound.length > 0)
+				throw referencedUnit(request.id, inbound)
+			const owner = snapshot.contracts.get(stored.ownerId)!
+			await writeSemanticFile(this.root, owner.path, encodeContract({
+				...owner.value,
+				clauses: owner.value.clauses.filter(clause => clause.id !== request.id),
+			}, owner.body))
+			return true
+		})
+	}
+
+	private async reorderClauses(request: ClauseReorderRequest): Promise<MutationResponse> {
+		assertShape(request, ['ownerId', 'orderedIds', 'expectedRevision'])
+		assertId(request.ownerId, 'ownerId')
+		if (!Array.isArray(request.orderedIds) || !request.orderedIds.every(isUuidV7))
+			fail('orderedIds', 'invalid_format', 'orderedIds must be a complete UUIDv7 array.')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const owner = snapshot.contracts.get(request.ownerId)
+			if (!owner)
+				throw notFound(request.ownerId, 'contract')
+			const current = owner.value.clauses
+			if (request.orderedIds.length !== current.length
+				|| new Set(request.orderedIds).size !== current.length
+				|| request.orderedIds.some(id => !current.some(clause => clause.id === id))) {
+				fail('orderedIds', 'conflict', 'orderedIds must contain exactly the current Clause IDs.')
+			}
+			if (request.orderedIds.every((id, index) => id === current[index]!.id))
+				return false
+			const byId = new Map(current.map(clause => [clause.id, clause]))
+			await writeSemanticFile(this.root, owner.path, encodeContract({
+				...owner.value,
+				clauses: request.orderedIds.map(id => byId.get(id)!),
+			}, owner.body))
+			return true
+		})
+	}
+
+	private async reparentClause(request: ClauseReparentRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'newOwnerId', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertId(request.newOwnerId, 'newOwnerId')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.clauses.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'clause')
+			const target = snapshot.contracts.get(request.newOwnerId)
+			if (!target)
+				throw notFound(request.newOwnerId, 'contract')
+			if (stored.ownerId === request.newOwnerId)
+				return false
+			const source = snapshot.contracts.get(stored.ownerId)!
+			await replaceSemanticFiles(this.root, [
+				{
+					path: source.path,
+					content: encodeContract({
+						...source.value,
+						clauses: source.value.clauses.filter(clause => clause.id !== stored.value.id),
+					}, source.body),
+				},
+				{
+					path: target.path,
+					content: encodeContract({
+						...target.value,
+						clauses: [...target.value.clauses, stored.value],
+					}, target.body),
+				},
+			], async () => { await readSnapshot(this.root, true) })
 			return true
 		})
 	}
@@ -641,12 +872,21 @@ export class SpecClient {
 		assertId(request.sourceId, 'sourceId')
 		if (!RELATIONS.includes(request.type))
 			fail('type', 'unsupported', 'Unsupported relation type.')
-		assertRelations(request.targets)
+		if (request.targets === null) {
+			if (request.type !== 'constrains')
+				fail('targets', 'invalid_format', 'Only Clause constrains supports null inheritance.')
+		}
+		else {
+			assertRelations(request.targets)
+		}
+		const requested = request.targets
 		return mutate(this.root, request.expectedRevision, async (snapshot) => {
 			assertSourceExists(snapshot, request.sourceId)
 			const story = snapshot.stories.get(request.sourceId)
 			if (request.type === 'motivates' && story) {
-				const targets = assertMotivates(snapshot, request.sourceId, request.targets)
+				if (requested === null)
+					fail('targets', 'invalid_format', 'motivates requires UUID targets.')
+				const targets = assertMotivates(snapshot, request.sourceId, requested)
 				if (sameTargets(story.value.motivates, targets))
 					return false
 				await writeSemanticFile(this.root, story.path, encodeStory({
@@ -657,7 +897,9 @@ export class SpecClient {
 			}
 			const scenario = snapshot.scenarios.get(request.sourceId)
 			if (request.type === 'demonstrates' && scenario) {
-				const targets = assertDemonstrates(snapshot, request.sourceId, request.targets)
+				if (requested === null)
+					fail('targets', 'invalid_format', 'demonstrates requires UUID targets.')
+				const targets = assertDemonstrates(snapshot, request.sourceId, requested)
 				if (sameTargets(scenario.value.demonstrates, targets))
 					return false
 				await writeSemanticFile(this.root, scenario.path, updateScenarioInContainer(
@@ -668,7 +910,41 @@ export class SpecClient {
 				))
 				return true
 			}
-			throw relationInvalid('source_kind', request.sourceId, request.type, request.targets)
+			const contract = snapshot.contracts.get(request.sourceId)
+			if (request.type === 'constrains' && contract) {
+				if (requested === null)
+					fail('targets', 'invalid_format', 'Contract requires one or more Feature targets.')
+				const targets = assertConstrains(snapshot, request.sourceId, requested, false)
+				if (sameTargets(contract.value.constrains, targets))
+					return false
+				await writeSemanticFile(this.root, contract.path, encodeContract({
+					...contract.value,
+					constrains: targets,
+				}, contract.body))
+				return true
+			}
+			const clause = snapshot.clauses.get(request.sourceId)
+			if (request.type === 'constrains' && clause) {
+				const targets = requested === null
+					? null
+					: assertConstrains(snapshot, request.sourceId, requested, true)
+				if ((targets === null && clause.value.constrains === undefined)
+					|| (targets !== null && clause.value.constrains !== undefined
+						&& sameTargets(clause.value.constrains, targets))) {
+					return false
+				}
+				const owner = snapshot.contracts.get(clause.ownerId)!
+				await writeSemanticFile(this.root, owner.path, encodeContract({
+					...owner.value,
+					clauses: owner.value.clauses.map(value => value.id !== clause.value.id
+						? value
+						: targets === null
+							? { id: value.id, statement: value.statement }
+							: { id: value.id, statement: value.statement, constrains: targets }),
+				}, owner.body))
+				return true
+			}
+			throw relationInvalid('source_kind', request.sourceId, request.type, requested ?? [])
 		})
 	}
 }
