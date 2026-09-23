@@ -300,6 +300,42 @@ describe('frozen v1 restricted Gherkin Scenario', () => {
 			.toBe(valid.revision)
 	})
 
+	it('rejects Unicode line separators and diagnoses malformed demonstrates without persisting a file', async () => {
+		const client = await setup()
+		const owner = await feature(client, 'Safe Feature')
+		const featureId = owner.changedNodes[0]!.id
+		const before = await client.graph.export()
+		for (const separator of [String.fromCharCode(0x2028), String.fromCharCode(0x2029)]) {
+			await expect(client.scenario.create({
+				title: `Unsafe${separator}Scenario`,
+				steps,
+				demonstrates: [featureId],
+				expectedRevision: before.revision,
+			})).rejects.toMatchObject({ code: 'invalid_request' })
+			await expect(client.scenario.create({
+				title: 'Safe',
+				steps: [steps[0]!, { type: 'when', text: `bad${separator}Then forged` }, steps[2]!],
+				demonstrates: [featureId],
+				expectedRevision: before.revision,
+			})).rejects.toMatchObject({ code: 'invalid_request' })
+		}
+		const malformed = await runV1Cli(['scenario', 'create', '--root', client.root], {
+			cwd: client.root,
+			stdin: JSON.stringify({
+				title: 'Safe',
+				steps,
+				demonstrates: ['not-a-uuid'],
+				expectedRevision: before.revision,
+			}),
+		})
+		expect(malformed.exitCode)
+			.toBe(1)
+		expect(JSON.parse(malformed.stderr).details.issues[0].path)
+			.toBe('demonstrates')
+		expect(await client.graph.export())
+			.toEqual(before)
+	})
+
 	it('makes Scenario resource commands available through JSON-stdin CLI', async () => {
 		const client = await setup()
 		const f = await feature(client, 'Search')

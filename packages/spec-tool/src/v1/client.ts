@@ -40,6 +40,7 @@ import {
 	encodeStory,
 	removeSemanticFile,
 	replaceSemanticFiles,
+	withSemanticMutationJournal,
 	writeSemanticFile,
 } from './storage'
 import { initWorkspace, readSnapshot, validateWorkspace } from './workspace'
@@ -102,7 +103,7 @@ function assertText(value: unknown, path: string): asserts value is string {
 
 function assertScenarioLine(value: unknown, path: string): asserts value is string {
 	assertText(value, path)
-	if (/[\r\n]/.test(value))
+	if (/[\r\n\u2028\u2029]/u.test(value))
 		fail(path, 'invalid_format', 'Gherkin titles and step text must fit on one line.')
 }
 
@@ -116,9 +117,9 @@ function assertRevision(value: unknown): asserts value is string {
 		fail('expectedRevision', 'invalid_format', 'expectedRevision must be a lowercase SHA-256 hex digest.')
 }
 
-function assertRelations(value: unknown): asserts value is string[] {
+function assertRelations(value: unknown, path = 'targets'): asserts value is string[] {
 	if (!Array.isArray(value) || !value.every(isUuidV7))
-		fail('targets', 'invalid_format', 'Relation targets must be an array of canonical UUIDv7 strings.')
+		fail(path, 'invalid_format', 'Relation targets must be an array of canonical UUIDv7 strings.')
 }
 
 function assertScenarioSteps(value: unknown): asserts value is ScenarioStep[] {
@@ -222,8 +223,10 @@ async function mutate(
 		const before = await readSnapshot(root, true)
 		if (before.revision !== expectedRevision)
 			throw revisionConflict(expectedRevision, before.revision)
-		const changed = await change(before)
-		return changed ? delta(before, await readSnapshot(root, true)) : emptyMutation(before.revision)
+		return withSemanticMutationJournal(root, async () => {
+			const changed = await change(before)
+			return changed ? delta(before, await readSnapshot(root, true)) : emptyMutation(before.revision)
+		})
 	}))
 }
 
@@ -512,7 +515,7 @@ export class SpecClient {
 		assertShape(request, ['title', 'steps', 'demonstrates', 'expectedRevision'])
 		assertScenarioLine(request.title, 'title')
 		assertScenarioSteps(request.steps)
-		assertRelations(request.demonstrates)
+		assertRelations(request.demonstrates, 'demonstrates')
 		return mutate(this.root, request.expectedRevision, async (snapshot) => {
 			const id = createId(snapshot)
 			const demonstrates = assertDemonstrates(snapshot, id, request.demonstrates)

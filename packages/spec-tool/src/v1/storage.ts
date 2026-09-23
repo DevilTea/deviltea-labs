@@ -1,7 +1,8 @@
 import type { ValidationIssue } from './types'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import { lstat, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { isMap, parseDocument, stringify } from 'yaml'
 import { isUuidV7 } from './identity'
 
@@ -232,8 +233,70 @@ export function encodeStory(story: StoryData, body = '\n'): string {
 		.trimEnd()}\n---${body}`
 }
 
+interface MutationJournal {
+	root: string
+	originals: Map<string, string | null>
+	restoring: boolean
+}
+
+const mutationJournal = new AsyncLocalStorage<MutationJournal>()
+
+async function rememberOriginal(root: string, relativePath: string): Promise<void> {
+	const journal = mutationJournal.getStore()
+	if (!journal || journal.restoring || journal.root !== resolve(root) || journal.originals.has(relativePath))
+		return
+	let original: string | null
+	try {
+		original = await readFile(join(root, relativePath), 'utf8')
+	}
+	catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+			throw error
+		original = null
+	}
+	journal.originals.set(relativePath, original)
+}
+
+/**
+ * Record exact pre-mutation bytes of touched semantic files and restore them
+ * on any ordinary mutation/post-validation error while holding the write lock.
+ * A process crash still requires external recovery; no cross-file disk commit
+ * can be crash-atomic without a persistent transaction protocol.
+ */
+export async function withSemanticMutationJournal<T>(root: string, action: () => Promise<T>): Promise<T> {
+	const journal: MutationJournal = {
+		root: resolve(root),
+		originals: new Map(),
+		restoring: false,
+	}
+	return mutationJournal.run(journal, async () => {
+		try {
+			return await action()
+		}
+		catch (error) {
+			journal.restoring = true
+			const rollbackErrors: unknown[] = []
+			for (const [path, original] of [...journal.originals].reverse()) {
+				try {
+					if (original === null)
+						await rm(join(root, path), { force: true })
+					else
+						await writeSemanticFile(root, path, original)
+				}
+				catch (rollbackError) {
+					rollbackErrors.push(rollbackError)
+				}
+			}
+			if (rollbackErrors.length)
+				throw new AggregateError([error, ...rollbackErrors], 'Semantic mutation failed and rollback was incomplete.')
+			throw error
+		}
+	})
+}
+
 /** Stage outside .spec so a reader never encounters temporary illegal .spec entries. */
 export async function writeSemanticFile(root: string, relativePath: string, content: string): Promise<void> {
+	await rememberOriginal(root, relativePath)
 	const destination = join(root, relativePath)
 	await mkdir(dirname(destination), { recursive: true })
 	const temporary = join(root, `.spec-write-${randomUUID()}`)
@@ -257,6 +320,8 @@ export async function replaceSemanticFiles(
 	verify: () => Promise<void>,
 ): Promise<void> {
 	const stages: string[] = []
+	for (const item of writes)
+		await rememberOriginal(root, item.path)
 	const originals = await Promise.all(writes.map(async item => readFile(join(root, item.path), 'utf8')))
 	let published = 0
 	try {
@@ -291,6 +356,7 @@ export async function replaceSemanticFiles(
 }
 
 export async function removeSemanticFile(root: string, relativePath: string): Promise<void> {
+	await rememberOriginal(root, relativePath)
 	await unlink(join(root, relativePath))
 }
 
