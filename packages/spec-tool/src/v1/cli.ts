@@ -15,7 +15,6 @@ export interface V1CliOutcome {
 	stderr: string
 }
 
-const RESOURCES = ['workspace', 'graph', 'story', 'feature', 'rule', 'scenario', 'contract', 'clause'] as const
 const OPERATIONS: Record<string, readonly string[]> = {
 	workspace: ['init', 'validate'],
 	graph: ['export', 'get', 'list', 'incoming', 'outgoing', 'set-relation-targets'],
@@ -95,20 +94,6 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
 	if (!help && positionals.length !== 2)
 		requestError('argv', 'invalid_format', 'Exactly one resource and one operation are required.')
 	return { root, format, resource: positionals[0], operation: positionals[1], help }
-}
-
-export function isV1Command(argv: readonly string[]): boolean {
-	for (let index = 0; index < argv.length; index++) {
-		const token = argv[index]!
-		if (token === '--root' || token === '--format') {
-			index++
-			continue
-		}
-		if (token.startsWith('-'))
-			continue
-		return (RESOURCES as readonly string[]).includes(token)
-	}
-	return false
 }
 
 function repositoryRoot(args: ParsedArgs, io: V1CliIO): string {

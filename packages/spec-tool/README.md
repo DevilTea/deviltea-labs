@@ -1,136 +1,145 @@
 # @deviltea/spec-tool
 
-> ESM-only Node.js CLI.
+Git-native, file-backed semantic specifications for agents and developers. Spec Tool owns **specification authority**, not implementation planning, task management, test execution, or code generation. Its normalized, read-only graph is designed for reliable downstream tooling.
 
-Spec is a Git-native engineering specification maintenance tool. The
-Spec-native MVP stores one workspace under `.spec/`; it does not read, migrate,
-or provide compatibility mode for `.engineering/` EF workspaces. Existing
-`.engineering/` workspaces are outside Spec's supported format.
-
-The product-design authority is [GitHub Discussion #65 — `spec-tool: canonical design discussion`](https://github.com/DevilTea/deviltea-labs/discussions/65).
-The retained `docs/ef-core/` tree is implementation history only.
-
-## Storage
-
-`.spec/config.yaml` has exactly this shape:
-
-```yaml
-schema: spec/config@1
-```
-
-Artifact files use the canonical path `.spec/<plural-kind>/<uuid>.md`. The
-supported directories are `projects`, `prds`, `stories`, `use-cases`,
-`features`, `requirements`, `decisions`, `policies`, and `changes`; local
-Artifact-owned Resources live under `.spec/resources/<owner-uuid>/...`.
-
-Every Artifact, including the single `kind: project` Artifact, has an opaque
-UUIDv7 identity. Its frontmatter envelope contains exactly:
-
-```yaml
-schema: ...
-kind: ...
-id: ...
-title: ...
-status: ...
-relations: []
-resources: []
-```
-
-`relations` contain source-owned `{type, target}` entries. `resources` contain
-Artifact-owned `{location, role, mediaType, description}` descriptors.
-
-## CLI
+The canonical product design is [Discussion #65, Thread 4](https://github.com/DevilTea/deviltea-labs/discussions/65). This package implements the frozen v1 model; there is **no compatibility mode** for the previous Artifact/lifecycle/Resource ontology.
 
 Requires Node.js `^22.14.0 || ^24.0.0`.
 
-```bash
-npm install -g @deviltea/spec-tool
-spec init
-spec validate
-spec version
+## Quick start
 
-spec artifact create --kind story --title "A story"
-spec artifact get <uuid>
-spec artifact update <uuid> --body-file story.md
-spec artifact delete <uuid>
-spec artifact list --kind story --status draft
+Install the package or run the repository's `spec` binary. Initialize an empty workspace at an existing repository root:
 
-spec relation add <source-uuid> <target-uuid> --type refines
-spec relation remove <source-uuid> <target-uuid> --type refines
-spec relation list --artifact <uuid> --direction all
-
-spec lifecycle activate <uuid>
-spec lifecycle complete <change-uuid>
-spec lifecycle retire <uuid>
-spec lifecycle supersede <replacement-uuid> <replaced-uuid>
-
-spec resource add <artifact-uuid> \
-  --location .spec/resources/<artifact-uuid>/contract.json \
-  --role contract --media-type application/json
-spec resource remove <artifact-uuid> <location>
-spec resource list --artifact <artifact-uuid>
-spec resource read <artifact-uuid> <location>
-
-spec search <text> --kind story --status active
-spec trace <artifact-uuid> --direction both
+```sh
+spec workspace init --root .
+spec workspace validate --root .
+spec graph export --root .
 ```
 
-`spec init` creates all canonical directories, the exact config, and a valid
-active PROJECT Artifact. `spec validate` checks the current `.spec/` workspace
-for layout, config, UUIDv7 identity, uniqueness, schema/kind and kind/status
-compatibility, canonical placement, required active/completed body sections,
-relation graph invariants, and Resource descriptor/filesystem integrity. It does
-not judge natural-language semantic quality or Git history.
+Initialization creates **only** `.spec/spec.yaml` with exactly:
 
-`spec search` performs deterministic case-insensitive substring matching over
-Artifact titles and bodies; it does not rank results. `spec trace` follows only
-the canonical `refines` graph: `up` follows stored outgoing edges toward Story,
-`down` follows derived incoming edges toward Requirement, and `both` returns the
-complete connected refinement closure.
-
-Artifact, relation, lifecycle, Resource, search, trace, and validation commands
-return deterministic human output by default. Add `--format json` for stable
-machine-readable result envelopes; CLI usage/parse failures requested in JSON
-mode use `spec/error-result@1` with diagnostics. `spec relation list` without
-`--artifact` enumerates the global stored edge set; `--direction` only changes
-filtering when a focal `--artifact` is supplied because the global incoming and
-outgoing sets contain the same stored edges. CHG completion is explicit via
-`spec lifecycle complete`; chained supersession transfers current replacement
-targets to the new active replacement. Terminal Artifacts are immutable, and
-only draft Artifacts may be physically deleted.
-
-`resource read` only reads local files and never fetches `https://` locations.
-Byte-safe UTF-8 files return `encoding: utf8`; other byte sequences return
-`encoding: base64`, preserving the original content and byte count. Mutating CLI
-commands use an ephemeral per-workspace lock outside `.spec/` to reject
-concurrent Spec writers rather than silently lose updates. Initialization stages
-a complete workspace outside `.spec/` and publishes it only after staging
-succeeds.
-
-## Agent Skills
-
-The published package includes two Spec-native Agent Skills:
-
-- `maintain-spec-workspace` — semantic layer selection plus invariant-aware
-  Artifact authoring, lifecycle, relation, Resource, search/trace, and validation
-  operations.
-- `review-spec-workspace` — read-only structural and semantic review of the
-  current `.spec/` workspace, including refinement quality and layer-boundary
-  checks.
-
-The same skills are mirrored at the repository-standard `skills/<name>/SKILL.md`
-locations so the repository can be used directly with the Skills CLI:
-
-```bash
-npx skills@latest add DevilTea/deviltea-labs --list
-npx skills@latest add DevilTea/deviltea-labs --skill maintain-spec-workspace --skill review-spec-workspace
+```yaml
+formatVersion: 1
 ```
 
-The inherited EF skill names and EF workflow guidance are not part of the Spec
-package surface. Historical `docs/ef-core/` material remains repository-only and
-is not shipped in the npm package.
+Empty storage directories are optional. The workspace is valid even when it contains no semantic units.
 
-## License
+Commands use **JSON on stdin** for structured requests. JSON is the default output format; `--format human` is explicit opt-in. Successful operations write JSON to stdout and exit 0; errors write JSON to stderr and exit nonzero. A failed `workspace validate` writes its `valid: false` diagnostics to stderr.
 
-[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/spec-tool/LICENSE)
-License © 2023-PRESENT [DevilTea](https://github.com/DevilTea).
+To create a Feature, copy the current revision from `spec graph export` or `spec workspace validate`, then submit:
+
+```sh
+printf '%s\n' '{"title":"Search","summary":"Find matching items","expectedRevision":"<current-sha256>"}' \
+  | spec feature create --root .
+```
+
+Each successful mutation returns `revision`, `changedNodes[]`, `deletedIds[]`, and `changedEdges: { added: [], removed: [] }`. Refresh `expectedRevision` after a semantic change. A stale revision returns `revision_conflict`; do not blindly retry without rereading the graph.
+
+## Semantic model
+
+| Semantic unit | Purpose | Persistence |
+| --- | --- | --- |
+| Story | Actor, goal, and user value | `.spec/stories/<uuid>.md` |
+| Feature | Capability semantics and invariants | `.spec/features/<uuid>.md` |
+| Rule | Stable-addressable behavioral obligation owned by one Feature | Embedded in its Feature's `rules[]` |
+| Scenario | Ordered observable interaction, not test execution status | `.spec/scenarios/<storage-uuid>.feature` |
+| Contract | Independently governed cross-Feature normative authority | `.spec/contracts/<uuid>.md` |
+| Clause | Stable-addressable obligation owned by one Contract | Embedded in its Contract's `clauses[]` |
+
+Every semantic unit has a **workspace-global canonical lowercase UUIDv7**. File paths, display titles, Rule/Clause array order, and Scenario container filenames do not define semantic identity. A Scenario's semantic UUID is independent of its storage UUID, and imported `.feature` files may contain multiple Scenarios.
+
+Create standalone Contracts only when authority both crosses Feature boundaries **and** requires separate ownership/lifecycle. Local Feature obligations are Rules; a shared use alone does not automatically justify a Contract. A Use Case may inform design, but it is **not** a persisted v1 semantic unit.
+
+### Canonical relations
+
+| From | Relation | Allowed targets | Cardinality |
+| --- | --- | --- | --- |
+| Story | `motivates` | Feature | 1..N |
+| Scenario | `demonstrates` | Rule, Clause, Feature, Contract | 1..N |
+| Contract | `constrains` | Feature | 1..N |
+| Clause | `constrains` | Feature, Rule | Inherit or nonempty override |
+
+Relations are source-owned and persist **target UUIDs only**. Clause `constrains` omitted from its YAML object means inherit its owning Contract's Feature scope. An explicit nonempty array completely **replaces**, not unions with, the inherited scope. `graph set-relation-targets` accepts `targets: null` only for Clause `constrains`, restoring inheritance. Effective inherited edges are materialized in the normalized graph.
+
+`demonstrates` records specification meaning, **not** a claim that a test ran, passed, or covered a target. Prefer demonstrating an existing Rule/Clause; use Feature/Contract directly only when that authority is indivisible.
+
+### Restricted Gherkin
+
+Scenario files use a strict English subset: one `Feature:` header, then one or more `Scenario:` blocks. Each Scenario has a metadata group, ordered `Given* → When+ → Then+` steps, and ≥1 demonstrates target. `And`/`But` inherit the preceding effective step phase; normalized IR exposes only `given`, `when`, `then`. Background, Scenario Outline, tables, Doc Strings and arbitrary tags are unsupported.
+
+```gherkin
+Feature: Search experience
+  @spec:id:<scenario-uuid>
+  @spec:demonstrates:<rule-or-feature-uuid>
+  Scenario: A user searches
+    Given searchable items exist
+    When the user submits a query
+    Then matching results appear
+```
+
+The `@spec:demonstrates` UUIDs must be sorted. Gherkin comments and the storage-only Feature header do not enter the semantic revision.
+
+## Public operations
+
+The resource-first CLI namespaces are `workspace`, `graph`, `story`, `feature`, `rule`, `scenario`, `contract` and `clause`. Run `spec --help` for the full operation list.
+
+```text
+workspace init | validate
+graph export | get | list | incoming | outgoing | set-relation-targets
+story create | update | delete
+feature create | update | delete | delete-with-children
+rule create | update | delete | reorder | reparent | promote
+scenario create | update | delete
+contract create | update | delete | delete-with-children
+clause create | update | delete | reorder | reparent | demote
+```
+
+All mutations require the current `expectedRevision`. Create operations allocate UUIDv7 automatically; no caller-selected ID. Rule/Clause reorder requires **the complete current ordered child-ID set**. Reparent keeps the UUID and appends to its new owner's array.
+
+Cross-kind conversion is explicit: `rule promote` requires `{ id, newOwnerId, relations: { constrains: null | UUID[] }, expectedRevision }`; `clause demote` requires `{ id, newOwnerId, relations: {}, expectedRevision }`. Conversion refuses any incompatible inbound references rather than silently cleaning up relations. Feature/Contract ordinary delete refuses attached children. `delete-with-children` needs `{ ownerId, childIds, expectedRevision }`, and `childIds` must exactly equal all current children; owner/child inbound references block the entire operation.
+
+### TypeScript API
+
+```ts
+import { createSpecClient, SpecError } from '@deviltea/spec-tool'
+
+const client = createSpecClient('/absolute/repository/root')
+const { revision, data } = await client.graph.export()
+
+const feature = await client.feature.create({
+	title: 'Search',
+	summary: 'Return matching items',
+	expectedRevision: revision,
+})
+
+const rule = await client.rule.create({
+	ownerId: feature.changedNodes[0]!.id,
+	statement: 'Results are deterministic',
+	expectedRevision: feature.revision,
+})
+
+const graph = await client.graph.export()
+console.log(rule.changedNodes, graph.data.edges)
+
+try {
+	await client.workspace.validate()
+}
+catch (error) {
+	if (error instanceof SpecError)
+		console.error(error.toJSON())
+}
+```
+
+The public runtime exports are `createSpecClient`, `SpecClient` and `SpecError`. Public TypeScript request/response, normalized IR and diagnostic types are exported from the package root.
+
+## Files, validation, and concurrency
+
+`.spec/` is closed-world: only `spec.yaml` and the four flat semantic roots are allowed. Markdown files carry exact, ordered YAML frontmatter; their explanatory bodies are noncanonical and preserved during unrelated semantic rewrites. Rule and Clause identities are global even though their records are embedded.
+
+`workspace validate` returns `{valid, revision?, issues[]}`, including stable source paths and diagnostic reasons. Invalid workspaces have **no semantic revision** and block general semantic reads/writes. Repair invalid persistence externally and validate again; v1 provides no repair or migration API.
+
+The graph exposes deterministic UUID-sorted nodes and source/type/target-sorted edges. A semantic SHA-256 revision excludes `source.path`, Scenario grouping/storage UUIDs, Markdown notes, comments and presentation-only child ordering; it includes normalized semantic fields, ownership and effective relation edges. Reordering alone is a no-op semantically.
+
+Spec Tool's ephemeral repository-root `.spec-tool-v1.lock` and `.spec-tool-v1.readers` coordinate its own readers/writers across processes. Mutations perform optimistic revision checks under the lock and roll back normally failed writes. A process crash or power loss is **not** guaranteed crash-atomic across files; stale tokens fail closed and require operator verification before manual cleanup. Direct external file edits do not participate in the locks.
+
+For detailed commands and persistence examples see [full v1 documentation](https://github.com/DevilTea/deviltea-labs/tree/main/packages/spec-tool/docs). Agent-facing workflows are in the shipped `maintain-spec-workspace` and `review-spec-workspace` skills.

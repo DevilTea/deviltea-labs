@@ -1,32 +1,19 @@
 #!/usr/bin/env node
 
-import { readFileSync, realpathSync } from 'node:fs'
+import type { V1CliOutcome } from './v1/cli'
+import { realpathSync } from 'node:fs'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { runCli } from './cli/program'
-import { isV1Command, runV1Cli } from './v1/cli'
+import { runV1Cli } from './v1/cli'
 
-function readPackageVersion(): string {
-	try {
-		const packageJsonPath = fileURLToPath(new URL('../package.json', import.meta.url))
-		const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { version?: string }
-		return packageJson.version ?? '0.0.0'
+/** The installed spec executable exposes only the frozen-v1 resource-first CLI. */
+export async function main(argv: readonly string[]): Promise<V1CliOutcome> {
+	const chunks: string[] = []
+	if (!process.stdin.isTTY && !argv.includes('--help') && !argv.includes('-h')) {
+		for await (const chunk of process.stdin)
+			chunks.push(String(chunk))
 	}
-	catch {
-		return '0.0.0'
-	}
-}
-
-export async function main(argv: readonly string[]): Promise<{ exitCode: number, stdout: string, stderr: string }> {
-	if (isV1Command(argv)) {
-		const chunks: string[] = []
-		if (!process.stdin.isTTY) {
-			for await (const chunk of process.stdin)
-				chunks.push(String(chunk))
-		}
-		return runV1Cli(argv, { cwd: process.cwd(), stdin: chunks.join('') })
-	}
-	return runCli(argv, { cwd: process.cwd() }, { version: readPackageVersion() })
+	return runV1Cli(argv, { cwd: process.cwd(), stdin: chunks.join('') })
 }
 
 function isDirectExecution(): boolean {
@@ -49,8 +36,12 @@ if (isDirectExecution()) {
 				process.stderr.write(outcome.stderr)
 			process.exitCode = outcome.exitCode
 		})
-		.catch((error: unknown) => {
-			process.stderr.write(`Internal CLI failure: ${(error as Error).message}\n`)
-			process.exitCode = 3
+		.catch(() => {
+			process.stderr.write(`${JSON.stringify({
+				code: 'validation_failed',
+				message: 'Spec operation failed.',
+				details: {},
+			})}\n`)
+			process.exitCode = 1
 		})
 }

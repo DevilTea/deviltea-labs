@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { isV1Command, runV1Cli } from './cli'
+import { runV1Cli } from './cli'
 import { SpecClient } from './client'
 
 const roots: string[] = []
@@ -135,7 +135,7 @@ describe('v1 resource-first CLI adapter', () => {
 			.toBe(0)
 	})
 
-	it('offers human output only via --format human and dispatches new namespaces without hiding legacy commands', async () => {
+	it('offers human output only via --format human and rejects superseded CLI namespaces', async () => {
 		const root = await tempRoot()
 		await runV1Cli(['workspace', 'init', '--root', root], { cwd: root, stdin: '{}' })
 		const human = await runV1Cli(['workspace', 'validate', '--root', root, '--format', 'human'], { cwd: root, stdin: '{}' })
@@ -143,10 +143,19 @@ describe('v1 resource-first CLI adapter', () => {
 			.toMatchObject({ exitCode: 0, stderr: '' })
 		expect(human.stdout)
 			.toMatch(/^Workspace valid\nRevision: [0-9a-f]{64}\n$/)
-		expect(isV1Command(['--root', root, 'graph', 'get']))
-			.toBe(true)
-		expect(isV1Command(['artifact', 'create']))
-			.toBe(false)
+		const oldCommand = await runV1Cli(['artifact', 'create', '--root', root], {
+			cwd: root,
+			stdin: '{}',
+		})
+		expect(oldCommand.exitCode)
+			.toBe(1)
+		expect(oldCommand.stdout)
+			.toBe('')
+		expect(JSON.parse(oldCommand.stderr))
+			.toMatchObject({
+				code: 'invalid_request',
+				details: { issues: [{ reason: 'unsupported' }] },
+			})
 		expect((await runV1Cli(['--root', root, 'workspace', 'init'], { cwd: root, stdin: '{}' })).exitCode)
 			.toBe(1)
 	})

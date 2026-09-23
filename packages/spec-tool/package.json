@@ -41,7 +41,6 @@
 		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit"
 	},
 	"dependencies": {
-		"commander": "catalog:",
 		"yaml": "catalog:"
 	},
 	"devDependencies": {
