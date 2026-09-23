@@ -248,6 +248,17 @@ export function deleteScenarioFromContainer(container: ScenarioContainer, entry:
 		while (start > 0 && container.lines[start - 1] === '')
 			start--
 	}
-	const next = [...container.lines.slice(0, start), ...container.lines.slice(end)]
+	// Comments between this block's final step and the next Scenario metadata
+	// may describe that next Scenario. Preserve them rather than deleting them
+	// with the removed sibling's metadata and steps.
+	const siblingPreamble = index < container.entries.length - 1
+		? container.lines.slice(entry.lastStepLine + 1, end)
+				.filter(isComment)
+		: []
+	const next = [
+		...container.lines.slice(0, start),
+		...siblingPreamble,
+		...container.lines.slice(end),
+	]
 	return next.join('\n') + (container.trailingNewline ? '\n' : '')
 }

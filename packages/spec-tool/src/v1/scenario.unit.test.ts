@@ -198,7 +198,7 @@ describe('frozen v1 restricted Gherkin Scenario', () => {
 			.replace('    Then I see matching items', '    # Sibling comment\n    Then I see matching items')
 		const path = `.spec/scenarios/${newUuidV7()}.feature`
 		await writeSemanticFile(client.root, path, `${renderNewScenarioFile(one)
-			.trimEnd()}\n\n${sibling}`)
+			.trimEnd()}\n\n# Sibling preamble\n${sibling}`)
 		const before = await client.graph.export()
 		expect(before.data.nodes.filter(n => n.kind === 'scenario'))
 			.toHaveLength(2)
@@ -222,6 +222,8 @@ describe('frozen v1 restricted Gherkin Scenario', () => {
 			.toMatchObject({ title: 'Second' })
 		expect(await readFile(join(client.root, path), 'utf8'))
 			.toContain('Sibling comment')
+		expect(await readFile(join(client.root, path), 'utf8'))
+			.toContain('# Sibling preamble')
 	})
 
 	it('rejects unsupported Gherkin grammar, incorrect metadata and illegal step phases', () => {
