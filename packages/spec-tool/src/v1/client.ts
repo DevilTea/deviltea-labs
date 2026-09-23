@@ -8,6 +8,11 @@ import type {
 	NormalizedEdge,
 	ReadResponse,
 	RelationType,
+	RuleCreateRequest,
+	RuleReorderRequest,
+	RuleReparentRequest,
+	RuleResource,
+	RuleUpdateRequest,
 	SetRelationTargetsRequest,
 	StoryCreateRequest,
 	StoryResource,
@@ -29,6 +34,7 @@ import {
 	encodeFeature,
 	encodeStory,
 	removeSemanticFile,
+	replaceSemanticFiles,
 	writeSemanticFile,
 } from './storage'
 import { initWorkspace, readSnapshot, validateWorkspace } from './workspace'
@@ -180,7 +186,7 @@ function createId(snapshot: WorkspaceSnapshot): string {
 	let id: string
 	do {
 		id = newUuidV7()
-	} while (snapshot.features.has(id) || snapshot.stories.has(id))
+	} while (snapshot.features.has(id) || snapshot.stories.has(id) || snapshot.rules.has(id))
 	return id
 }
 
@@ -190,6 +196,7 @@ export class SpecClient {
 	readonly graph: GraphResource
 	readonly story: StoryResource
 	readonly feature: FeatureResource
+	readonly rule: RuleResource
 
 	constructor(root: string) {
 		if (typeof root !== 'string' || !root.trim())
@@ -240,6 +247,13 @@ export class SpecClient {
 			create: request => this.createStory(request),
 			update: request => this.updateStory(request),
 			delete: request => this.deleteStory(request),
+		}
+		this.rule = {
+			create: request => this.createRule(request),
+			update: request => this.updateRule(request),
+			delete: request => this.deleteRule(request),
+			reorder: request => this.reorderRules(request),
+			reparent: request => this.reparentRule(request),
 		}
 	}
 
@@ -305,7 +319,128 @@ export class SpecClient {
 			const inbound = snapshot.ir.edges.filter(edge => edge.to === request.id)
 			if (inbound.length > 0)
 				throw referencedUnit(request.id, inbound)
+			if (stored.value.rules.length > 0)
+				fail('id', 'conflict', 'Feature with Rule children cannot be ordinary-deleted.')
 			await removeSemanticFile(this.root, stored.path)
+			return true
+		})
+	}
+
+	private async createRule(request: RuleCreateRequest): Promise<MutationResponse> {
+		assertShape(request, ['ownerId', 'statement', 'expectedRevision'])
+		assertId(request.ownerId, 'ownerId')
+		assertText(request.statement, 'statement')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const feature = snapshot.features.get(request.ownerId)
+			if (!feature)
+				throw notFound(request.ownerId, 'feature')
+			const rule = { id: createId(snapshot), statement: request.statement }
+			await writeSemanticFile(this.root, feature.path, encodeFeature({
+				...feature.value,
+				rules: [...feature.value.rules, rule],
+			}, feature.body))
+			return true
+		})
+	}
+
+	private async updateRule(request: RuleUpdateRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'changes', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertShape(request.changes, ['statement'], [])
+		if ('statement' in request.changes)
+			assertText(request.changes.statement, 'changes.statement')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.rules.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'rule')
+			if (request.changes.statement === undefined || request.changes.statement === stored.value.statement)
+				return false
+			const feature = snapshot.features.get(stored.ownerId)!
+			await writeSemanticFile(this.root, feature.path, encodeFeature({
+				...feature.value,
+				rules: feature.value.rules.map(rule => rule.id === request.id
+					? { ...rule, statement: request.changes.statement! }
+					: rule),
+			}, feature.body))
+			return true
+		})
+	}
+
+	private async deleteRule(request: DeleteRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'expectedRevision'])
+		assertId(request.id, 'id')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.rules.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'rule')
+			const inbound = snapshot.ir.edges.filter(edge => edge.to === request.id)
+			if (inbound.length > 0)
+				throw referencedUnit(request.id, inbound)
+			const feature = snapshot.features.get(stored.ownerId)!
+			await writeSemanticFile(this.root, feature.path, encodeFeature({
+				...feature.value,
+				rules: feature.value.rules.filter(rule => rule.id !== request.id),
+			}, feature.body))
+			return true
+		})
+	}
+
+	private async reorderRules(request: RuleReorderRequest): Promise<MutationResponse> {
+		assertShape(request, ['ownerId', 'orderedIds', 'expectedRevision'])
+		assertId(request.ownerId, 'ownerId')
+		if (!Array.isArray(request.orderedIds) || !request.orderedIds.every(isUuidV7))
+			fail('orderedIds', 'invalid_format', 'orderedIds must be a complete UUIDv7 array.')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const feature = snapshot.features.get(request.ownerId)
+			if (!feature)
+				throw notFound(request.ownerId, 'feature')
+			const current = feature.value.rules
+			if (request.orderedIds.length !== current.length
+				|| new Set(request.orderedIds).size !== current.length
+				|| request.orderedIds.some(id => !current.some(rule => rule.id === id))) {
+				fail('orderedIds', 'conflict', 'orderedIds must contain exactly the current Rule IDs.')
+			}
+			if (request.orderedIds.every((id, index) => id === current[index]!.id))
+				return false
+			const byId = new Map(current.map(rule => [rule.id, rule]))
+			await writeSemanticFile(this.root, feature.path, encodeFeature({
+				...feature.value,
+				rules: request.orderedIds.map(id => byId.get(id)!),
+			}, feature.body))
+			return true
+		})
+	}
+
+	private async reparentRule(request: RuleReparentRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'newOwnerId', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertId(request.newOwnerId, 'newOwnerId')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const stored = snapshot.rules.get(request.id)
+			if (!stored)
+				throw notFound(request.id, 'rule')
+			const target = snapshot.features.get(request.newOwnerId)
+			if (!target)
+				throw notFound(request.newOwnerId, 'feature')
+			if (stored.ownerId === request.newOwnerId)
+				return false
+			const source = snapshot.features.get(stored.ownerId)!
+			await replaceSemanticFiles(this.root, [
+				{
+					path: source.path,
+					content: encodeFeature({
+						...source.value,
+						rules: source.value.rules.filter(rule => rule.id !== stored.value.id),
+					}, source.body),
+				},
+				{
+					path: target.path,
+					content: encodeFeature({
+						...target.value,
+						rules: [...target.value.rules, stored.value],
+					}, target.body),
+				},
+			], async () => { await readSnapshot(this.root) })
 			return true
 		})
 	}

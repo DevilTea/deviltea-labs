@@ -5,11 +5,16 @@ import { dirname, join } from 'node:path'
 import { isMap, parseDocument, stringify } from 'yaml'
 import { isUuidV7 } from './identity'
 
+export interface RuleData {
+	id: string
+	statement: string
+}
+
 export interface FeatureData {
 	id: string
 	title: string
 	summary: string
-	rules: Array<{ id: string, statement: string }>
+	rules: RuleData[]
 }
 
 export interface StoryData {
@@ -139,15 +144,33 @@ export function decodeFeature(
 	const id = recordId(fields, filenameId, path, issues)
 	const title = requiredText(fields, 'title', path, issues)
 	const summary = requiredText(fields, 'summary', path, issues)
+	const rules: RuleData[] = []
 	if (!Array.isArray(fields.rules)) {
 		addIssue(issues, path, 'rules', fields.rules === undefined ? 'missing' : 'invalid_format', 'Rules must be an array.')
 	}
-	else if (fields.rules.length > 0) {
-		addIssue(issues, path, 'rules', 'unsupported', 'Rule persistence is implemented in Slice 2.')
+	else {
+		for (const [index, item] of fields.rules.entries()) {
+			const field = `rules[${index}]`
+			if (item === null || typeof item !== 'object' || Array.isArray(item)
+				|| Object.keys(item)
+					.join(',') !== 'id,statement') {
+				addIssue(issues, path, field, 'invalid_format', 'Rule must contain exactly id and statement in canonical order.')
+				continue
+			}
+			const rule = item as Record<string, unknown>
+			if (!isUuidV7(rule.id)) {
+				addIssue(issues, path, `${field}.id`, 'invalid_format', 'Rule id must be canonical lowercase UUIDv7.')
+			}
+			if (typeof rule.statement !== 'string' || !rule.statement.trim()) {
+				addIssue(issues, path, `${field}.statement`, 'empty', 'Rule statement must be non-empty text.')
+			}
+			if (isUuidV7(rule.id) && typeof rule.statement === 'string' && rule.statement.trim())
+				rules.push({ id: rule.id, statement: rule.statement })
+		}
 	}
-	if (!id || title === null || summary === null || !Array.isArray(fields.rules) || fields.rules.length > 0)
+	if (!id || title === null || summary === null || !Array.isArray(fields.rules) || rules.length !== fields.rules.length)
 		return null
-	return { path, body, value: { id, title, summary, rules: [] } }
+	return { path, body, value: { id, title, summary, rules } }
 }
 
 export function decodeStory(
@@ -220,6 +243,50 @@ export async function writeSemanticFile(root: string, relativePath: string, cont
 	}
 	finally {
 		await rm(temporary, { force: true })
+	}
+}
+
+/**
+ * A multi-file semantic mutation stages every output before publishing, then
+ * restores the exact prior bytes if a publication or post-write validation fails.
+ * Must only run under the workspace write lock. Crash recovery remains external.
+ */
+export async function replaceSemanticFiles(
+	root: string,
+	writes: Array<{ path: string, content: string }>,
+	verify: () => Promise<void>,
+): Promise<void> {
+	const stages: string[] = []
+	const originals = await Promise.all(writes.map(async item => readFile(join(root, item.path), 'utf8')))
+	let published = 0
+	try {
+		for (const item of writes) {
+			const temporary = join(root, `.spec-write-${randomUUID()}`)
+			stages.push(temporary)
+			await writeFile(temporary, item.content, { flag: 'wx' })
+		}
+		for (const [index, item] of writes.entries()) {
+			await rename(stages[index]!, join(root, item.path))
+			published++
+		}
+		await verify()
+	}
+	catch (error) {
+		const rollbackErrors: unknown[] = []
+		for (let index = published - 1; index >= 0; index--) {
+			try {
+				await writeSemanticFile(root, writes[index]!.path, originals[index]!)
+			}
+			catch (rollbackError) {
+				rollbackErrors.push(rollbackError)
+			}
+		}
+		if (rollbackErrors.length > 0)
+			throw new AggregateError([error, ...rollbackErrors], 'Semantic mutation failed and rollback was incomplete.')
+		throw error
+	}
+	finally {
+		await Promise.all(stages.map(stage => rm(stage, { force: true })))
 	}
 }
 

@@ -15,12 +15,13 @@ export interface V1CliOutcome {
 	stderr: string
 }
 
-const RESOURCES = ['workspace', 'graph', 'story', 'feature'] as const
+const RESOURCES = ['workspace', 'graph', 'story', 'feature', 'rule'] as const
 const OPERATIONS: Record<string, readonly string[]> = {
 	workspace: ['init', 'validate'],
 	graph: ['export', 'get', 'list', 'incoming', 'outgoing', 'set-relation-targets'],
 	story: ['create', 'update', 'delete'],
 	feature: ['create', 'update', 'delete'],
+	rule: ['create', 'update', 'delete', 'reparent', 'reorder'],
 }
 
 const HELP = [
@@ -31,6 +32,7 @@ const HELP = [
 	'  graph export|get|list|incoming|outgoing|set-relation-targets',
 	'  story create|update|delete',
 	'  feature create|update|delete',
+	'  rule create|update|delete|reparent|reorder',
 	'Requests: JSON object on stdin; output defaults to JSON.',
 ].join('\n')
 
@@ -222,6 +224,21 @@ export async function runV1Cli(argv: readonly string[], io: V1CliIO): Promise<V1
 				break
 			case 'feature/delete':
 				result = await client.feature.delete(request as never)
+				break
+			case 'rule/create':
+				result = await client.rule.create(request as never)
+				break
+			case 'rule/update':
+				result = await client.rule.update(request as never)
+				break
+			case 'rule/delete':
+				result = await client.rule.delete(request as never)
+				break
+			case 'rule/reparent':
+				result = await client.rule.reparent(request as never)
+				break
+			case 'rule/reorder':
+				result = await client.rule.reorder(request as never)
 				break
 			default:
 				requestError('argv', 'unsupported', 'Unsupported v1 operation.')

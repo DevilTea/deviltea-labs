@@ -1,4 +1,4 @@
-import type { FeatureData, Stored, StoryData } from './storage'
+import type { FeatureData, RuleData, Stored, StoryData } from './storage'
 import type { MutationResponse, NormalizedEdge, NormalizedIr, NormalizedNode, ValidationIssue, ValidationResult } from './types'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
@@ -17,6 +17,7 @@ type StorageRoot = typeof STORAGE_ROOTS[number]
 export interface WorkspaceSnapshot {
 	root: string
 	features: Map<string, Stored<FeatureData>>
+	rules: Map<string, { ownerId: string, path: string, value: RuleData }>
 	stories: Map<string, Stored<StoryData>>
 	ir: NormalizedIr
 	revision: string
@@ -145,6 +146,18 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 	await inspectManifest(root, issues)
 	for (const name of STORAGE_ROOTS)
 		await scanRoot(root, name, features, stories, ids, issues)
+	const rules = new Map<string, { ownerId: string, path: string, value: RuleData }>()
+	for (const feature of features.values()) {
+		for (const [index, rule] of feature.value.rules.entries()) {
+			if (ids.has(rule.id)) {
+				addIssue(issues, feature.path, `rules[${index}].id`, 'duplicate', 'Rule UUID duplicates a semantic unit in this workspace.')
+			}
+			else {
+				ids.set(rule.id, feature.path)
+				rules.set(rule.id, { ownerId: feature.value.id, path: feature.path, value: rule })
+			}
+		}
+	}
 	for (const story of stories.values()) {
 		for (const target of story.value.motivates) {
 			if (!features.has(target)) {
@@ -160,6 +173,13 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 			kind: 'feature' as const,
 			title: value.title,
 			summary: value.summary,
+			source: { path },
+		})),
+		...[...rules.values()].map(({ ownerId, value, path }) => ({
+			id: value.id,
+			kind: 'rule' as const,
+			statement: value.statement,
+			ownerId,
 			source: { path },
 		})),
 		...[...stories.values()].map(({ value, path }) => ({
@@ -185,7 +205,7 @@ export async function inspectWorkspace(root: string): Promise<WorkspaceInspectio
 	const revision = createHash('sha256')
 		.update(JSON.stringify(semanticProjection), 'utf8')
 		.digest('hex')
-	return { issues: [], snapshot: { root, features, stories, ir, revision } }
+	return { issues: [], snapshot: { root, features, rules, stories, ir, revision } }
 }
 
 export async function readSnapshot(root: string): Promise<WorkspaceSnapshot> {
