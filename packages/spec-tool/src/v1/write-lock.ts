@@ -52,8 +52,14 @@ async function waitForReaders(readerDirectory: string, deadline: number): Promis
 }
 
 /** Safe against another reader creating a token while an empty directory is removed. */
-async function releaseReader(readerDirectory: string, token: string): Promise<void> {
-	await unlink(token)
+async function releaseReader(readerDirectory: string, token: string, allowMissingToken = false): Promise<void> {
+	try {
+		await unlink(token)
+	}
+	catch (error) {
+		if (!allowMissingToken || (error as NodeJS.ErrnoException).code !== 'ENOENT')
+			throw error
+	}
 	try {
 		await rmdir(readerDirectory)
 	}
@@ -94,6 +100,9 @@ export async function withWorkspaceReadLock<T>(root: string, action: () => Promi
 			// through the writer-lock check instead of assuming registration.
 			if ((error as NodeJS.ErrnoException).code === 'ENOENT')
 				continue
+			// A token write may create a file before failing (EIO/ENOSPC).
+			// Clean up our partial registration so writers cannot be blocked forever.
+			await releaseReader(readerDirectory, token, true)
 			throw error
 		}
 		if (await exists(writeLock)) {
