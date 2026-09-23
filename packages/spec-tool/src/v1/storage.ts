@@ -428,8 +428,9 @@ export async function writeSemanticFile(root: string, relativePath: string, cont
 	const destination = join(root, relativePath)
 	await mkdir(dirname(destination), { recursive: true })
 	const temporary = join(root, `.spec-write-${randomUUID()}`)
-	await writeFile(temporary, content, { flag: 'wx' })
 	try {
+		// The stage write can partially create the temp file before throwing.
+		await writeFile(temporary, content, { flag: 'wx' })
 		await rename(temporary, destination)
 	}
 	finally {

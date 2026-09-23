@@ -2,6 +2,7 @@
 
 /* Packed-consumer smoke test for the frozen v1 CLI and TypeScript library. */
 
+import { Buffer } from 'node:buffer'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -152,6 +153,19 @@ async function main() {
 		check('init starts with no extra canonical storage roots', readdirSync(join(project, '.spec'))
 			.join(',') === 'spec.yaml')
 		check('init returns zero node/edge changes', initialized.changedNodes.length === 0 && initialized.changedEdges.added.length === 0)
+
+		// A malformed UTF-8 JSON byte sequence must not silently turn into U+FFFD.
+		const invalidStdin = Buffer.concat([
+			Buffer.from('{"title":"'),
+			Buffer.from([0xFF]),
+			Buffer.from(`","summary":"Invalid","expectedRevision":"${initialized.revision}"}`),
+		])
+		const invalidEncoding = run(process.execPath, [cliEntry, 'feature', 'create', '--root', project], consumer, { input: invalidStdin })
+		check('CLI rejects invalid UTF-8 request bytes with a structured stdin error', invalidEncoding.status !== 0
+		&& invalidEncoding.stdout === ''
+		&& JSON.parse(invalidEncoding.stderr).code === 'invalid_request'
+		&& JSON.parse(invalidEncoding.stderr).details.issues[0].path === 'stdin')
+		check('malformed UTF-8 request cannot mutate canonical workspace', (await api.createSpecClient(project).graph.export()).revision === initialized.revision)
 
 		const invoke = (resource, operation, input = {}, extra = []) => {
 			const result = run(process.execPath, [cliEntry, resource, operation, '--root', project, ...extra], consumer, { input: JSON.stringify(input) })
