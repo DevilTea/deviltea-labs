@@ -17,6 +17,8 @@ An existing repository becomes a Spec workspace with exactly `.spec/spec.yaml` c
 
 Each semantic ID is workspace-global canonical lowercase UUIDv7, **including embedded** Rule and Clause IDs. Story/Feature/Contract filename stem equals frontmatter `id`. Scenario storage UUID is independent of all Scenario semantic IDs, even when a single file stores multiple Scenarios. Titles are not unique; rename, reordering, storage moves and wording edits do not allocate fresh identities.
 
+All canonical source files must contain valid UTF-8 bytes; malformed sequences are rejected before semantic reads or rewrites to prevent corruption of noncanonical notes and comments. The workspace manifest must match its canonical contents byte for byte.
+
 No extra files, subdirectories, symlinks or unknown frontmatter fields are legal. An empty workspace needs **only** its manifest and remains valid.
 
 ## Canonical Markdown frontmatter

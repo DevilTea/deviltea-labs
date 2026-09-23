@@ -44,6 +44,23 @@ function sortedIssues(issues: ValidationIssue[]): ValidationIssue[] {
 	return issues.sort(compareIssue)
 }
 
+/**
+ * Node's readFile(..., 'utf8') silently substitutes U+FFFD for malformed
+ * bytes. Reject invalid UTF-8 before parsing so any future semantic rewrite
+ * cannot corrupt noncanonical Markdown bodies or Scenario comments.
+ */
+async function readCanonicalUtf8(absolute: string, relative: string, issues: ValidationIssue[]): Promise<string | null> {
+	const bytes = await readFile(absolute)
+	try {
+		return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+			.decode(bytes)
+	}
+	catch {
+		addIssue(issues, relative, relative, 'invalid_format', 'Canonical source must contain valid UTF-8 bytes.')
+		return null
+	}
+}
+
 async function inspectManifest(root: string, issues: ValidationIssue[]): Promise<boolean> {
 	const path = join(root, MANIFEST)
 	const stat = await statOrNull(path)
@@ -55,7 +72,9 @@ async function inspectManifest(root: string, issues: ValidationIssue[]): Promise
 		addIssue(issues, MANIFEST, MANIFEST, 'invalid_format', 'Workspace manifest must be a regular file.')
 		return false
 	}
-	const content = await readFile(path, 'utf8')
+	const content = await readCanonicalUtf8(path, MANIFEST, issues)
+	if (content === null)
+		return false
 	const document = parseDocument(content, { uniqueKeys: true })
 	if (document.errors.length > 0 || !isMap(document.contents)) {
 		addIssue(issues, MANIFEST, MANIFEST, 'invalid_format', 'Workspace manifest must be a valid YAML mapping.')
@@ -67,6 +86,10 @@ async function inspectManifest(root: string, issues: ValidationIssue[]): Promise
 	}
 	if (document.contents.items[0]?.value?.toJSON() !== 1) {
 		addIssue(issues, MANIFEST, 'formatVersion', 'unsupported', 'Only workspace formatVersion 1 is supported.')
+		return false
+	}
+	if (content !== 'formatVersion: 1\n') {
+		addIssue(issues, MANIFEST, MANIFEST, 'invalid_format', 'Workspace manifest must have the exact canonical v1 content: formatVersion: 1 plus LF.')
 		return false
 	}
 	return true
@@ -105,7 +128,9 @@ async function scanRoot(
 			continue
 		}
 		const filenameId = filename.slice(0, -extension.length)
-		const raw = await readFile(absolute, 'utf8')
+		const raw = await readCanonicalUtf8(absolute, relative, issues)
+		if (raw === null)
+			continue
 		if (name === 'scenarios') {
 			const container = parseScenarioFile(relative, raw, issues)
 			if (!container)
