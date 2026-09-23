@@ -1,0 +1,381 @@
+import type { ScenarioStored } from './scenario'
+import type { ClauseData, ContractData, FeatureData, RuleData, Stored, StoryData } from './storage'
+import type { MutationResponse, NormalizedEdge, NormalizedIr, NormalizedNode, ValidationIssue, ValidationResult } from './types'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { isMap, parseDocument } from 'yaml'
+import { invalidRequest, validationFailed } from './errors'
+import { isUuidV7 } from './identity'
+import { parseScenarioFile } from './scenario'
+import { addIssue, compareText, decodeContract, decodeFeature, decodeStory, statOrNull } from './storage'
+import { withWorkspaceReadLock, withWorkspaceWriteLock } from './write-lock'
+
+const SPEC = '.spec'
+const MANIFEST = '.spec/spec.yaml'
+const STORAGE_ROOTS = ['stories', 'features', 'contracts', 'scenarios'] as const
+type StorageRoot = typeof STORAGE_ROOTS[number]
+
+export interface WorkspaceSnapshot {
+	root: string
+	features: Map<string, Stored<FeatureData>>
+	rules: Map<string, { ownerId: string, path: string, value: RuleData }>
+	stories: Map<string, Stored<StoryData>>
+	contracts: Map<string, Stored<ContractData>>
+	clauses: Map<string, { ownerId: string, path: string, value: ClauseData }>
+	scenarios: Map<string, ScenarioStored>
+	ir: NormalizedIr
+	revision: string
+}
+
+export interface WorkspaceInspection {
+	issues: ValidationIssue[]
+	snapshot?: WorkspaceSnapshot
+}
+
+function compareIssue(left: ValidationIssue, right: ValidationIssue): number {
+	return compareText(left.source.path, right.source.path)
+		|| compareText(left.path, right.path)
+		|| compareText(left.reason, right.reason)
+		|| compareText(left.message, right.message)
+}
+
+function sortedIssues(issues: ValidationIssue[]): ValidationIssue[] {
+	return issues.sort(compareIssue)
+}
+
+/**
+ * Node's readFile(..., 'utf8') silently substitutes U+FFFD for malformed
+ * bytes. Reject invalid UTF-8 before parsing so any future semantic rewrite
+ * cannot corrupt noncanonical Markdown bodies or Scenario comments.
+ */
+async function readCanonicalUtf8(absolute: string, relative: string, issues: ValidationIssue[]): Promise<string | null> {
+	const bytes = await readFile(absolute)
+	try {
+		return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+			.decode(bytes)
+	}
+	catch {
+		addIssue(issues, relative, relative, 'invalid_format', 'Canonical source must contain valid UTF-8 bytes.')
+		return null
+	}
+}
+
+async function inspectManifest(root: string, issues: ValidationIssue[]): Promise<boolean> {
+	const path = join(root, MANIFEST)
+	const stat = await statOrNull(path)
+	if (!stat) {
+		addIssue(issues, MANIFEST, MANIFEST, 'missing', 'Workspace manifest is required.')
+		return false
+	}
+	if (!stat.isFile() || stat.isSymbolicLink()) {
+		addIssue(issues, MANIFEST, MANIFEST, 'invalid_format', 'Workspace manifest must be a regular file.')
+		return false
+	}
+	const content = await readCanonicalUtf8(path, MANIFEST, issues)
+	if (content === null)
+		return false
+	const document = parseDocument(content, { uniqueKeys: true })
+	if (document.errors.length > 0 || !isMap(document.contents)) {
+		addIssue(issues, MANIFEST, MANIFEST, 'invalid_format', 'Workspace manifest must be a valid YAML mapping.')
+		return false
+	}
+	if (document.contents.items.length !== 1 || document.contents.items[0]?.key?.toJSON() !== 'formatVersion') {
+		addIssue(issues, MANIFEST, MANIFEST, 'unsupported', 'Manifest supports only formatVersion.')
+		return false
+	}
+	if (document.contents.items[0]?.value?.toJSON() !== 1) {
+		addIssue(issues, MANIFEST, 'formatVersion', 'unsupported', 'Only workspace formatVersion 1 is supported.')
+		return false
+	}
+	if (content !== 'formatVersion: 1\n') {
+		addIssue(issues, MANIFEST, MANIFEST, 'invalid_format', 'Workspace manifest must have the exact canonical v1 content: formatVersion: 1 plus LF.')
+		return false
+	}
+	return true
+}
+
+async function scanRoot(
+	root: string,
+	name: StorageRoot,
+	features: Map<string, Stored<FeatureData>>,
+	stories: Map<string, Stored<StoryData>>,
+	contracts: Map<string, Stored<ContractData>>,
+	scenarios: Map<string, ScenarioStored>,
+	ids: Map<string, string>,
+	issues: ValidationIssue[],
+): Promise<void> {
+	const directory = join(root, SPEC, name)
+	const stat = await statOrNull(directory)
+	if (!stat)
+		return
+	if (!stat.isDirectory() || stat.isSymbolicLink()) {
+		addIssue(issues, `${SPEC}/${name}`, `${SPEC}/${name}`, 'invalid_format', 'Storage root must be a real directory.')
+		return
+	}
+	const entries = (await readdir(directory)).sort(compareText)
+	for (const filename of entries) {
+		const relative = `${SPEC}/${name}/${filename}`
+		const absolute = join(directory, filename)
+		const fileStat = await statOrNull(absolute)
+		if (!fileStat || !fileStat.isFile() || fileStat.isSymbolicLink()) {
+			addIssue(issues, relative, relative, 'invalid_format', 'Storage root must be flat and contain regular files only.')
+			continue
+		}
+		const extension = name === 'scenarios' ? '.feature' : '.md'
+		if (!filename.endsWith(extension) || !isUuidV7(filename.slice(0, -extension.length))) {
+			addIssue(issues, relative, relative, 'invalid_format', 'Filename must contain a canonical lowercase UUIDv7 and the expected extension.')
+			continue
+		}
+		const filenameId = filename.slice(0, -extension.length)
+		const raw = await readCanonicalUtf8(absolute, relative, issues)
+		if (raw === null)
+			continue
+		if (name === 'scenarios') {
+			const container = parseScenarioFile(relative, raw, issues)
+			if (!container)
+				continue
+			for (const entry of container.entries) {
+				if (ids.has(entry.value.id)) {
+					addIssue(issues, relative, 'id', 'duplicate', 'Scenario UUID duplicates a workspace semantic unit.')
+					continue
+				}
+				ids.set(entry.value.id, relative)
+				scenarios.set(entry.value.id, { path: relative, value: entry.value, entry, container })
+			}
+			continue
+		}
+		const decoded = name === 'features'
+			? decodeFeature(relative, raw, filenameId, issues)
+			: name === 'contracts'
+				? decodeContract(relative, raw, filenameId, issues)
+				: decodeStory(relative, raw, filenameId, issues)
+		if (!decoded)
+			continue
+		if (ids.has(decoded.value.id)) {
+			addIssue(issues, relative, 'id', 'duplicate', 'Semantic ID duplicates an existing workspace unit.')
+			continue
+		}
+		ids.set(decoded.value.id, relative)
+		if (name === 'features')
+			features.set(decoded.value.id, decoded as Stored<FeatureData>)
+		else if (name === 'contracts')
+			contracts.set(decoded.value.id, decoded as Stored<ContractData>)
+		else
+			stories.set(decoded.value.id, decoded as Stored<StoryData>)
+	}
+}
+
+/**
+ * Inspect canonical persistence without returning an incomplete semantic graph.
+ * All observations and diagnostics are deterministic for a stable working tree.
+ */
+export async function inspectWorkspace(root: string): Promise<WorkspaceInspection> {
+	const issues: ValidationIssue[] = []
+	const features = new Map<string, Stored<FeatureData>>()
+	const stories = new Map<string, Stored<StoryData>>()
+	const contracts = new Map<string, Stored<ContractData>>()
+	const scenarios = new Map<string, ScenarioStored>()
+	const ids = new Map<string, string>()
+	const stat = await statOrNull(join(root, SPEC))
+	if (!stat) {
+		addIssue(issues, MANIFEST, MANIFEST, 'missing', 'Spec workspace is not initialized.')
+		return { issues }
+	}
+	if (!stat.isDirectory() || stat.isSymbolicLink()) {
+		addIssue(issues, SPEC, SPEC, 'invalid_format', 'Spec workspace must be a real directory.')
+		return { issues }
+	}
+	const rootEntries = await readdir(join(root, SPEC))
+	for (const name of rootEntries.sort(compareText)) {
+		if (name !== 'spec.yaml' && !(STORAGE_ROOTS as readonly string[]).includes(name))
+			addIssue(issues, `${SPEC}/${name}`, `${SPEC}/${name}`, 'unsupported', 'Unknown entry in closed-world .spec root.')
+	}
+	await inspectManifest(root, issues)
+	for (const name of STORAGE_ROOTS)
+		await scanRoot(root, name, features, stories, contracts, scenarios, ids, issues)
+	const rules = new Map<string, { ownerId: string, path: string, value: RuleData }>()
+	for (const feature of features.values()) {
+		for (const [index, rule] of feature.value.rules.entries()) {
+			if (ids.has(rule.id)) {
+				addIssue(issues, feature.path, `rules[${index}].id`, 'duplicate', 'Rule UUID duplicates a semantic unit in this workspace.')
+			}
+			else {
+				ids.set(rule.id, feature.path)
+				rules.set(rule.id, { ownerId: feature.value.id, path: feature.path, value: rule })
+			}
+		}
+	}
+	const clauses = new Map<string, { ownerId: string, path: string, value: ClauseData }>()
+	for (const contract of contracts.values()) {
+		for (const [index, clause] of contract.value.clauses.entries()) {
+			if (ids.has(clause.id)) {
+				addIssue(issues, contract.path, `clauses[${index}].id`, 'duplicate', 'Clause UUID duplicates a semantic unit in this workspace.')
+			}
+			else {
+				ids.set(clause.id, contract.path)
+				clauses.set(clause.id, {
+					ownerId: contract.value.id,
+					path: contract.path,
+					value: clause,
+				})
+			}
+		}
+	}
+	for (const contract of contracts.values()) {
+		for (const target of contract.value.constrains) {
+			if (!features.has(target)) {
+				addIssue(issues, contract.path, 'constrains', ids.has(target) ? 'invariant' : 'unresolved', `Contract may constrain only existing Features: ${target}`)
+			}
+		}
+	}
+	for (const clause of clauses.values()) {
+		if (!clause.value.constrains)
+			continue
+		for (const target of clause.value.constrains) {
+			if (!features.has(target) && !rules.has(target)) {
+				addIssue(issues, clause.path, 'clauses.constrains', ids.has(target) ? 'invariant' : 'unresolved', `Clause override may constrain only existing Features or Rules: ${target}`)
+			}
+		}
+	}
+	for (const story of stories.values()) {
+		for (const target of story.value.motivates) {
+			if (!features.has(target)) {
+				addIssue(issues, story.path, 'motivates', 'unresolved', `Story must motivate an existing Feature: ${target}`)
+			}
+		}
+	}
+	for (const scenario of scenarios.values()) {
+		for (const target of scenario.value.demonstrates) {
+			if (!features.has(target) && !rules.has(target)
+				&& !contracts.has(target) && !clauses.has(target)) {
+				addIssue(issues, scenario.path, 'demonstrates', ids.has(target) ? 'invariant' : 'unresolved', `Scenario demonstrates must target an existing Rule or Feature: ${target}`)
+			}
+		}
+	}
+	if (issues.length > 0)
+		return { issues: sortedIssues(issues) }
+	const nodes: NormalizedNode[] = [
+		...[...features.values()].map(({ value, path }) => ({
+			id: value.id,
+			kind: 'feature' as const,
+			title: value.title,
+			summary: value.summary,
+			source: { path },
+		})),
+		...[...rules.values()].map(({ ownerId, value, path }) => ({
+			id: value.id,
+			kind: 'rule' as const,
+			statement: value.statement,
+			ownerId,
+			source: { path },
+		})),
+		...[...contracts.values()].map(({ value, path }) => ({
+			id: value.id,
+			kind: 'contract' as const,
+			title: value.title,
+			summary: value.summary,
+			source: { path },
+		})),
+		...[...clauses.values()].map(({ ownerId, value, path }) => ({
+			id: value.id,
+			kind: 'clause' as const,
+			statement: value.statement,
+			ownerId,
+			source: { path },
+		})),
+		...[...scenarios.values()].map(({ value, path }) => ({
+			id: value.id,
+			kind: 'scenario' as const,
+			title: value.title,
+			steps: value.steps,
+			source: { path },
+		})),
+		...[...stories.values()].map(({ value, path }) => ({
+			id: value.id,
+			kind: 'story' as const,
+			title: value.title,
+			actor: value.actor,
+			goal: value.goal,
+			value: value.value,
+			source: { path },
+		})),
+	].sort((left, right) => compareText(left.id, right.id))
+	const edges: NormalizedEdge[] = [
+		...[...stories.values()].flatMap(({ value }) =>
+			value.motivates.map(to => ({ from: value.id, type: 'motivates' as const, to }))),
+		...[...scenarios.values()].flatMap(({ value }) =>
+			value.demonstrates.map(to => ({ from: value.id, type: 'demonstrates' as const, to }))),
+		...[...contracts.values()].flatMap(({ value }) =>
+			value.constrains.map(to => ({ from: value.id, type: 'constrains' as const, to }))),
+		...[...clauses.values()].flatMap(({ value, ownerId }) =>
+			(value.constrains ?? contracts.get(ownerId)!.value.constrains)
+				.map(to => ({ from: value.id, type: 'constrains' as const, to }))),
+	]
+		.sort((left, right) => compareText(left.from, right.from) || compareText(left.type, right.type) || compareText(left.to, right.to))
+	const ir: NormalizedIr = { formatVersion: 1, nodes, edges }
+	const semanticNodes = nodes.map((node) => {
+		const copy: Record<string, unknown> = { ...node }
+		delete copy.source
+		return copy
+	})
+	const semanticProjection = { workspaceFormatVersion: 1, formatVersion: ir.formatVersion, nodes: semanticNodes, edges }
+	const revision = createHash('sha256')
+		.update(JSON.stringify(semanticProjection), 'utf8')
+		.digest('hex')
+	return { issues: [], snapshot: { root, features, rules, stories, contracts, clauses, scenarios, ir, revision } }
+}
+
+export async function readSnapshot(root: string, insideWriteLock = false): Promise<WorkspaceSnapshot> {
+	const inspect = async () => {
+		const inspection = await inspectWorkspace(root)
+		if (!inspection.snapshot)
+			throw validationFailed(inspection.issues)
+		return inspection.snapshot
+	}
+	return insideWriteLock ? inspect() : withWorkspaceReadLock(root, inspect)
+}
+
+export async function validateWorkspace(root: string): Promise<ValidationResult> {
+	return withWorkspaceReadLock(root, async () => {
+		const inspection = await inspectWorkspace(root)
+		return inspection.snapshot
+			? { valid: true, revision: inspection.snapshot.revision, issues: [] }
+			: { valid: false, issues: inspection.issues }
+	})
+}
+
+export async function initWorkspace(root: string): Promise<MutationResponse> {
+	return withWorkspaceWriteLock(root, async () => {
+		if (await statOrNull(join(root, SPEC))) {
+			throw invalidRequest([{
+				path: SPEC,
+				reason: 'conflict',
+				message: 'Cannot initialize when a .spec entry already exists.',
+			}])
+		}
+		const temporary = join(root, `.spec-init-${randomUUID()}`)
+		await mkdir(temporary)
+		try {
+			await writeFile(join(temporary, 'spec.yaml'), 'formatVersion: 1\n', { flag: 'wx' })
+			if (await statOrNull(join(root, SPEC))) {
+				throw invalidRequest([{
+					path: SPEC,
+					reason: 'conflict',
+					message: 'Cannot initialize when a .spec entry already exists.',
+				}])
+			}
+			await rename(temporary, join(root, SPEC))
+		}
+		finally {
+			await rm(temporary, { recursive: true, force: true })
+		}
+		const snapshot = await readSnapshot(root, true)
+		return {
+			revision: snapshot.revision,
+			changedNodes: [],
+			deletedIds: [],
+			changedEdges: { added: [], removed: [] },
+		}
+	})
+}

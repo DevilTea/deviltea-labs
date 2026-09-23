@@ -19,7 +19,6 @@ catalog:
   '@types/node': ^24.13.2
   '@vitest/coverage-v8': ^4.1.11
   bumpp: 11.1.0
-  commander: ^15.0.0
   eslint: 10.6.0
   lint-staged: ^15.5.2
   pathe: ^2.0.3

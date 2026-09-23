@@ -21,9 +21,6 @@ catalogs:
     bumpp:
       specifier: 11.1.0
       version: 11.1.0
-    commander:
-      specifier: ^15.0.0
-      version: 15.0.0
     eslint:
       specifier: 10.6.0
       version: 10.6.0
@@ -189,9 +186,6 @@ importers:
 
   packages/spec-tool:
     dependencies:
-      commander:
-        specifier: 'catalog:'
-        version: 15.0.0
       yaml:
         specifier: 'catalog:'
         version: 2.9.0
@@ -1742,10 +1736,6 @@ packages:
   commander@13.1.0:
     resolution: {integrity: sha512-/rFeCpNJQbhSZjGVwO9RFV3xPqbnERS8MmIQzCtD/zl6gpJuV/bMLuN92oG3F7d8oDEHHRrujSXNUr8fpjntKw==}
     engines: {node: '>=18'}
-
-  commander@15.0.0:
-    resolution: {integrity: sha512-z67u4ZhzCL/Tydu1lJARtEZYWbWaN7oYLHbsuzocr6y4N6WZAagG3RQ4FW61V1/0+jImpj293XfrcYnd1qxtPg==}
-    engines: {node: '>=22.12.0'}
 
   commander@8.3.0:
     resolution: {integrity: sha512-OkTL9umf+He2DZkUq8f8J9of7yL6RJKI24dVITBmNfZBmri9zYZQrKkuXiKhyfPSu8tUhnVBB1iKXevvnlR4Ww==}
@@ -4651,8 +4641,6 @@ snapshots:
   comma-separated-tokens@2.0.3: {}
 
   commander@13.1.0: {}
-
-  commander@15.0.0: {}
 
   commander@8.3.0: {}
 

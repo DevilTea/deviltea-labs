@@ -18,6 +18,16 @@
 		"url": "https://github.com/DevilTea/deviltea-labs/issues"
 	},
 	"keywords": [],
+	"sideEffects": false,
+	"exports": {
+		".": {
+			"types": "./dist/index.d.mts",
+			"import": "./dist/index.mjs"
+		}
+	},
+	"main": "./dist/index.mjs",
+	"module": "./dist/index.mjs",
+	"types": "./dist/index.d.mts",
 	"bin": {
 		"spec": "./dist/cli.mjs"
 	},
@@ -35,13 +45,12 @@
 		"dev": "tsdown --watch",
 		"lint": "eslint .",
 		"test": "pnpm --workspace-root exec vitest run --root packages/spec-tool --config vitest.config.ts",
-		"test:package": "pnpm build && node test/package-smoke.mjs",
+		"test:package": "pnpm build && node test/package-smoke.mjs && node test/v1-process-race.mjs && node test/v1-resource-smoke.mjs && node test/v1-contract-smoke.mjs && node test/v1-lifecycle-smoke.mjs",
 		"typecheck": "pnpm typecheck:package && pnpm typecheck:test",
 		"typecheck:package": "tsc --project ./tsconfig.package.json --noEmit",
 		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit"
 	},
 	"dependencies": {
-		"commander": "catalog:",
 		"yaml": "catalog:"
 	},
 	"devDependencies": {

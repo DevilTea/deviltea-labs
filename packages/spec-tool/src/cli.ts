@@ -1,23 +1,44 @@
 #!/usr/bin/env node
 
-import { readFileSync, realpathSync } from 'node:fs'
+import type { V1CliOutcome } from './v1/cli'
+import { Buffer } from 'node:buffer'
+import { realpathSync } from 'node:fs'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { runCli } from './cli/program'
+import { runV1Cli } from './v1/cli'
 
-function readPackageVersion(): string {
+/** The installed spec executable exposes only the frozen-v1 resource-first CLI. */
+export async function main(argv: readonly string[]): Promise<V1CliOutcome> {
+	const chunks: Buffer[] = []
+	if (!process.stdin.isTTY && !argv.includes('--help') && !argv.includes('-h')) {
+		for await (const chunk of process.stdin) {
+			chunks.push(typeof chunk === 'string'
+				? Buffer.from(chunk, 'utf8')
+				: Buffer.from(chunk))
+		}
+	}
+	let stdin: string
 	try {
-		const packageJsonPath = fileURLToPath(new URL('../package.json', import.meta.url))
-		const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as { version?: string }
-		return packageJson.version ?? '0.0.0'
+		// String(Buffer) would silently replace malformed byte sequences.
+		stdin = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+			.decode(Buffer.concat(chunks))
 	}
 	catch {
-		return '0.0.0'
+		return {
+			exitCode: 1,
+			stdout: '',
+			stderr: `${JSON.stringify({
+				code: 'invalid_request',
+				message: 'Invalid CLI request.',
+				details: { issues: [{
+					path: 'stdin',
+					reason: 'invalid_format',
+					message: 'stdin must contain valid UTF-8 JSON bytes.',
+				}] },
+			})}\n`,
+		}
 	}
-}
-
-export async function main(argv: readonly string[]): Promise<{ exitCode: number, stdout: string, stderr: string }> {
-	return runCli(argv, { cwd: process.cwd() }, { version: readPackageVersion() })
+	return runV1Cli(argv, { cwd: process.cwd(), stdin })
 }
 
 function isDirectExecution(): boolean {
@@ -40,8 +61,12 @@ if (isDirectExecution()) {
 				process.stderr.write(outcome.stderr)
 			process.exitCode = outcome.exitCode
 		})
-		.catch((error: unknown) => {
-			process.stderr.write(`Internal CLI failure: ${(error as Error).message}\n`)
-			process.exitCode = 3
+		.catch(() => {
+			process.stderr.write(`${JSON.stringify({
+				code: 'validation_failed',
+				message: 'Spec operation failed.',
+				details: {},
+			})}\n`)
+			process.exitCode = 1
 		})
 }

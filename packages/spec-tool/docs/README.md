@@ -1,48 +1,10 @@
-# Spec Tool documentation authority
+# Spec Tool v1 documentation
 
-The canonical design authority for Spec / `@deviltea/spec-tool` / `spec` is:
+This directory documents the **shipped** frozen-v1 Spec Tool package. [GitHub Discussion #65, Thread 4](https://github.com/DevilTea/deviltea-labs/discussions/65) remains the design authority; implementation/docs are not independent design ledgers.
 
-- GitHub Discussion #65 — `spec-tool: canonical design discussion`
-  https://github.com/DevilTea/deviltea-labs/discussions/65
+- [CLI and TypeScript API](v1-cli-api.md): exact resource-first operations, JSON stdin/stdout/stderr, optimistic revision, relational updates, cross-kind lifecycle, public exports.
+- [Canonical persistence and graph](v1-persistence.md): workspace layout, YAML frontmatter, Scenario/Gherkin subset, normalized IR, effective Clause applicability, validation and file safety.
+- [Package README](../README.md): installation, quick start, use cases, semantic model.
+- [Maintain skill](../skills/maintain-spec-workspace/SKILL.md) and [Review skill](../skills/review-spec-workspace/SKILL.md): bounded agent workflows.
 
-Design precedence is intentionally explicit:
-
-1. The current accepted direction recorded in Discussion #65.
-2. Shipped code and tests, which describe current implementation behavior but do not define future product direction.
-3. `docs/ef-core/`, retained only as inherited EF implementation/history reference.
-4. Historical issues and archived EF design material.
-
-When these sources conflict, the higher-precedence source wins. Standalone
-planning documents are intentionally not maintained in this package; new design
-exploration, alternatives, and accepted decisions belong in Discussion #65.
-
-## Current Spec-native MVP
-
-The implemented MVP is rooted at `.spec/` and uses UUIDv7 Artifact identities
-with the Spec-native kind model. It provides:
-
-- workspace initialization and current-workspace validation;
-- Artifact create/get/update/delete/list;
-- lifecycle activate/complete/retire/supersede;
-- relation add/remove/list with graph invariants;
-- local and HTTPS Resource descriptors plus local-only Resource reads;
-- deterministic title/body search;
-- deterministic `refines` trace in `up`, `down`, or `both` directions;
-- stable human and versioned JSON command results.
-
-The MVP does not read or migrate `.engineering/` workspaces and does not carry
-EF schema aliases, sequential IDs, linked-repository semantics, integration-ref
-or Git transition/range/bootstrap authority, CHG exactly-once effects, or
-implementation-linkage behavior.
-
-Published Agent Skills are `maintain-spec-workspace` and
-`review-spec-workspace`. They describe the complete current MVP rather than the
-inherited EF workflow.
-
-## Inherited EF Core documentation
-
-`docs/ef-core/` is historical source material only. It is **not** the Spec
-product model, is not included in the published npm package, and must not be
-used to override Discussion #65 or current Spec behavior. Its assumptions about
-identity, workspace layout, lifecycle orchestration, Git authority,
-implementation linkage, and change transactions are intentionally non-binding.
+**There is no 0.0.1 compatibility layer.** The previous Artifact ontology, status transitions, Resources, `refines` commands, `.spec/config.yaml` layout and `docs/ef-core/` references are removed. Migration, arbitrary raw-file CRUD, comments API, test execution, Scenario repacking and invalid-state repair are not part of v1.
