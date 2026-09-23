@@ -215,6 +215,23 @@ export interface ClauseReparentRequest extends ExpectedRevisionRequest {
 	newOwnerId: string
 }
 
+export interface RulePromoteRequest extends ExpectedRevisionRequest {
+	id: string
+	newOwnerId: string
+	relations: { constrains: string[] | null }
+}
+
+export interface ClauseDemoteRequest extends ExpectedRevisionRequest {
+	id: string
+	newOwnerId: string
+	relations: Record<string, never>
+}
+
+export interface CompoundDeleteRequest extends ExpectedRevisionRequest {
+	ownerId: string
+	childIds: string[]
+}
+
 export interface DeleteRequest extends ExpectedRevisionRequest {
 	id: string
 }
@@ -249,10 +266,12 @@ export interface FeatureResource {
 	create: (request: FeatureCreateRequest) => Promise<MutationResponse>
 	update: (request: FeatureUpdateRequest) => Promise<MutationResponse>
 	delete: (request: DeleteRequest) => Promise<MutationResponse>
+	deleteWithChildren: (request: CompoundDeleteRequest) => Promise<MutationResponse>
 }
 
 export interface RuleResource {
 	create: (request: RuleCreateRequest) => Promise<MutationResponse>
+	promote: (request: RulePromoteRequest) => Promise<MutationResponse>
 	update: (request: RuleUpdateRequest) => Promise<MutationResponse>
 	delete: (request: DeleteRequest) => Promise<MutationResponse>
 	reorder: (request: RuleReorderRequest) => Promise<MutationResponse>
@@ -267,12 +286,14 @@ export interface ScenarioResource {
 
 export interface ContractResource {
 	create: (request: ContractCreateRequest) => Promise<MutationResponse>
+	deleteWithChildren: (request: CompoundDeleteRequest) => Promise<MutationResponse>
 	update: (request: ContractUpdateRequest) => Promise<MutationResponse>
 	delete: (request: DeleteRequest) => Promise<MutationResponse>
 }
 
 export interface ClauseResource {
 	create: (request: ClauseCreateRequest) => Promise<MutationResponse>
+	demote: (request: ClauseDemoteRequest) => Promise<MutationResponse>
 	update: (request: ClauseUpdateRequest) => Promise<MutationResponse>
 	delete: (request: DeleteRequest) => Promise<MutationResponse>
 	reorder: (request: ClauseReorderRequest) => Promise<MutationResponse>

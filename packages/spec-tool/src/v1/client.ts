@@ -1,9 +1,11 @@
 import type {
 	ClauseCreateRequest,
+	ClauseDemoteRequest,
 	ClauseReorderRequest,
 	ClauseReparentRequest,
 	ClauseResource,
 	ClauseUpdateRequest,
+	CompoundDeleteRequest,
 	ContractCreateRequest,
 	ContractResource,
 	ContractUpdateRequest,
@@ -17,6 +19,7 @@ import type {
 	ReadResponse,
 	RelationType,
 	RuleCreateRequest,
+	RulePromoteRequest,
 	RuleReorderRequest,
 	RuleReparentRequest,
 	RuleResource,
@@ -194,6 +197,23 @@ function assertConstrains(
 	return [...targets].sort(compareText)
 }
 
+function assertExactChildren(childIds: unknown, actual: string[]): asserts childIds is string[] {
+	if (!Array.isArray(childIds) || !childIds.every(isUuidV7))
+		fail('childIds', 'invalid_format', 'childIds must contain only canonical UUIDv7 identifiers.')
+	if (childIds.length !== actual.length || new Set(childIds).size !== actual.length
+		|| childIds.some(id => !actual.includes(id))) {
+		fail('childIds', 'conflict', 'childIds must match the complete current child set.')
+	}
+}
+
+function assertNoInbound(snapshot: WorkspaceSnapshot, ids: string[]): void {
+	for (const id of ids) {
+		const inbound = snapshot.ir.edges.filter(edge => edge.to === id)
+		if (inbound.length > 0)
+			throw referencedUnit(id, inbound)
+	}
+}
+
 function assertSourceExists(snapshot: WorkspaceSnapshot, id: string): void {
 	if (!snapshot.ir.nodes.some(node => node.id === id))
 		throw notFound(id)
@@ -339,6 +359,7 @@ export class SpecClient {
 			create: request => this.createFeature(request),
 			update: request => this.updateFeature(request),
 			delete: request => this.deleteFeature(request),
+			deleteWithChildren: request => this.deleteFeatureWithChildren(request),
 		}
 		this.story = {
 			create: request => this.createStory(request),
@@ -351,6 +372,7 @@ export class SpecClient {
 			delete: request => this.deleteRule(request),
 			reorder: request => this.reorderRules(request),
 			reparent: request => this.reparentRule(request),
+			promote: request => this.promoteRule(request),
 		}
 		this.scenario = {
 			create: request => this.createScenario(request),
@@ -361,6 +383,7 @@ export class SpecClient {
 			create: request => this.createContract(request),
 			update: request => this.updateContract(request),
 			delete: request => this.deleteContract(request),
+			deleteWithChildren: request => this.deleteContractWithChildren(request),
 		}
 		this.clause = {
 			create: request => this.createClause(request),
@@ -368,6 +391,7 @@ export class SpecClient {
 			delete: request => this.deleteClause(request),
 			reorder: request => this.reorderClauses(request),
 			reparent: request => this.reparentClause(request),
+			demote: request => this.demoteClause(request),
 		}
 	}
 
@@ -440,6 +464,22 @@ export class SpecClient {
 		})
 	}
 
+	private async deleteFeatureWithChildren(request: CompoundDeleteRequest): Promise<MutationResponse> {
+		assertShape(request, ['ownerId', 'childIds', 'expectedRevision'])
+		assertId(request.ownerId, 'ownerId')
+		if (!Array.isArray(request.childIds) || !request.childIds.every(isUuidV7))
+			fail('childIds', 'invalid_format', 'childIds must be an array of canonical UUIDv7.')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const owner = snapshot.features.get(request.ownerId)
+			if (!owner)
+				throw notFound(request.ownerId, 'feature')
+			assertExactChildren(request.childIds, owner.value.rules.map(rule => rule.id))
+			assertNoInbound(snapshot, [request.ownerId, ...request.childIds])
+			await removeSemanticFile(this.root, owner.path)
+			return true
+		})
+	}
+
 	private async createContract(request: ContractCreateRequest): Promise<MutationResponse> {
 		assertShape(request, ['title', 'summary', 'constrains', 'expectedRevision'])
 		assertText(request.title, 'title')
@@ -492,6 +532,22 @@ export class SpecClient {
 			if (stored.value.clauses.length > 0)
 				fail('id', 'conflict', 'Contract with Clause children cannot be ordinary-deleted.')
 			await removeSemanticFile(this.root, stored.path)
+			return true
+		})
+	}
+
+	private async deleteContractWithChildren(request: CompoundDeleteRequest): Promise<MutationResponse> {
+		assertShape(request, ['ownerId', 'childIds', 'expectedRevision'])
+		assertId(request.ownerId, 'ownerId')
+		if (!Array.isArray(request.childIds) || !request.childIds.every(isUuidV7))
+			fail('childIds', 'invalid_format', 'childIds must be an array of canonical UUIDv7.')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const owner = snapshot.contracts.get(request.ownerId)
+			if (!owner)
+				throw notFound(request.ownerId, 'contract')
+			assertExactChildren(request.childIds, owner.value.clauses.map(clause => clause.id))
+			assertNoInbound(snapshot, [request.ownerId, ...request.childIds])
+			await removeSemanticFile(this.root, owner.path)
 			return true
 		})
 	}
@@ -616,6 +672,94 @@ export class SpecClient {
 					content: encodeContract({
 						...target.value,
 						clauses: [...target.value.clauses, stored.value],
+					}, target.body),
+				},
+			], async () => { await readSnapshot(this.root, true) })
+			return true
+		})
+	}
+
+	private async promoteRule(request: RulePromoteRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'newOwnerId', 'relations', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertId(request.newOwnerId, 'newOwnerId')
+		assertShape(request.relations, ['constrains'])
+		const requested = request.relations.constrains
+		if (requested !== null)
+			assertRelations(requested, 'relations.constrains')
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const rule = snapshot.rules.get(request.id)
+			if (!rule)
+				throw notFound(request.id, 'rule')
+			const target = snapshot.contracts.get(request.newOwnerId)
+			if (!target)
+				throw notFound(request.newOwnerId, 'contract')
+			const override = requested === null
+				? undefined
+				: assertConstrains(snapshot, request.id, requested, true)
+			// The Rule changes kind to Clause, so existing Clause→Rule edges
+			// would become illegal in the final graph. Never silently remove them.
+			const illegalInbound = snapshot.ir.edges.find(edge =>
+				edge.to === rule.value.id && edge.type === 'constrains')
+			if (illegalInbound)
+				throw relationInvalid('target_kind', illegalInbound.from, 'constrains', [rule.value.id])
+			if (override?.includes(rule.value.id))
+				throw relationInvalid('target_kind', rule.value.id, 'constrains', [rule.value.id])
+			const source = snapshot.features.get(rule.ownerId)!
+			const clause = override === undefined
+				? { id: rule.value.id, statement: rule.value.statement }
+				: { id: rule.value.id, statement: rule.value.statement, constrains: override }
+			await replaceSemanticFiles(this.root, [
+				{
+					path: source.path,
+					content: encodeFeature({
+						...source.value,
+						rules: source.value.rules.filter(child => child.id !== rule.value.id),
+					}, source.body),
+				},
+				{
+					path: target.path,
+					content: encodeContract({
+						...target.value,
+						clauses: [...target.value.clauses, clause],
+					}, target.body),
+				},
+			], async () => { await readSnapshot(this.root, true) })
+			return true
+		})
+	}
+
+	private async demoteClause(request: ClauseDemoteRequest): Promise<MutationResponse> {
+		assertShape(request, ['id', 'newOwnerId', 'relations', 'expectedRevision'])
+		assertId(request.id, 'id')
+		assertId(request.newOwnerId, 'newOwnerId')
+		// An explicit empty final relation object resolves (and removes)
+		// the outgoing Clause-only constrains relation during conversion.
+		assertShape(request.relations, [], [])
+		return mutate(this.root, request.expectedRevision, async (snapshot) => {
+			const clause = snapshot.clauses.get(request.id)
+			if (!clause)
+				throw notFound(request.id, 'clause')
+			const target = snapshot.features.get(request.newOwnerId)
+			if (!target)
+				throw notFound(request.newOwnerId, 'feature')
+			const source = snapshot.contracts.get(clause.ownerId)!
+			await replaceSemanticFiles(this.root, [
+				{
+					path: source.path,
+					content: encodeContract({
+						...source.value,
+						clauses: source.value.clauses.filter(child => child.id !== clause.value.id),
+					}, source.body),
+				},
+				{
+					path: target.path,
+					content: encodeFeature({
+						...target.value,
+						rules: [...target.value.rules, {
+							id: clause.value.id,
+							statement: clause.value.statement,
+						}],
 					}, target.body),
 				},
 			], async () => { await readSnapshot(this.root, true) })

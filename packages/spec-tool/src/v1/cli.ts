@@ -20,11 +20,11 @@ const OPERATIONS: Record<string, readonly string[]> = {
 	workspace: ['init', 'validate'],
 	graph: ['export', 'get', 'list', 'incoming', 'outgoing', 'set-relation-targets'],
 	story: ['create', 'update', 'delete'],
-	feature: ['create', 'update', 'delete'],
-	rule: ['create', 'update', 'delete', 'reparent', 'reorder'],
+	feature: ['create', 'update', 'delete', 'delete-with-children'],
+	rule: ['create', 'update', 'delete', 'reparent', 'reorder', 'promote'],
 	scenario: ['create', 'update', 'delete'],
-	contract: ['create', 'update', 'delete'],
-	clause: ['create', 'update', 'delete', 'reparent', 'reorder'],
+	contract: ['create', 'update', 'delete', 'delete-with-children'],
+	clause: ['create', 'update', 'delete', 'reparent', 'reorder', 'demote'],
 }
 
 const HELP = [
@@ -34,11 +34,11 @@ const HELP = [
 	'  workspace init|validate',
 	'  graph export|get|list|incoming|outgoing|set-relation-targets',
 	'  story create|update|delete',
-	'  feature create|update|delete',
-	'  rule create|update|delete|reparent|reorder',
+	'  feature create|update|delete|delete-with-children',
+	'  rule create|update|delete|reparent|reorder|promote',
 	'  scenario create|update|delete',
-	'  contract create|update|delete',
-	'  clause create|update|delete|reparent|reorder',
+	'  contract create|update|delete|delete-with-children',
+	'  clause create|update|delete|reparent|reorder|demote',
 	'Requests: JSON object on stdin; output defaults to JSON.',
 ].join('\n')
 
@@ -231,6 +231,9 @@ export async function runV1Cli(argv: readonly string[], io: V1CliIO): Promise<V1
 			case 'feature/delete':
 				result = await client.feature.delete(request as never)
 				break
+			case 'feature/delete-with-children':
+				result = await client.feature.deleteWithChildren(request as never)
+				break
 			case 'rule/create':
 				result = await client.rule.create(request as never)
 				break
@@ -242,6 +245,9 @@ export async function runV1Cli(argv: readonly string[], io: V1CliIO): Promise<V1
 				break
 			case 'rule/reparent':
 				result = await client.rule.reparent(request as never)
+				break
+			case 'rule/promote':
+				result = await client.rule.promote(request as never)
 				break
 			case 'rule/reorder':
 				result = await client.rule.reorder(request as never)
@@ -264,6 +270,9 @@ export async function runV1Cli(argv: readonly string[], io: V1CliIO): Promise<V1
 			case 'contract/delete':
 				result = await client.contract.delete(request as never)
 				break
+			case 'contract/delete-with-children':
+				result = await client.contract.deleteWithChildren(request as never)
+				break
 			case 'clause/create':
 				result = await client.clause.create(request as never)
 				break
@@ -275,6 +284,9 @@ export async function runV1Cli(argv: readonly string[], io: V1CliIO): Promise<V1
 				break
 			case 'clause/reparent':
 				result = await client.clause.reparent(request as never)
+				break
+			case 'clause/demote':
+				result = await client.clause.demote(request as never)
 				break
 			case 'clause/reorder':
 				result = await client.clause.reorder(request as never)
