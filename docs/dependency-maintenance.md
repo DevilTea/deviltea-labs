@@ -10,7 +10,7 @@ The workspace uses a single pnpm catalog and lockfile. Node.js 24 LTS is the pre
 4. Retain the 72-hour release age, trust policy, strict dependency build policy, and existing security overrides. Never bypass a trust failure just to upgrade a package. Review security overrides periodically against upstream advisories.
 5. Run `pnpm install --frozen-lockfile`, `pnpm check`, and `pnpm test:mutation`. Review lockfile and packed consumer results before merging.
 
-Major upgrades or changes to public compatibility (including a change of Node or TypeScript major) require independent review and migration notes. Do not use blanket latest updates to bypass the supported version boundaries. TypeScript 7, automatic Renovate PRs, and Antfu 10 migration are deferred; keep Node types on the preferred Node 24 line and retain the existing VitePress prerelease until its migration is reviewed.
+Major upgrades or changes to public compatibility (including a change of Node or TypeScript major) require independent review and migration notes. Do not use blanket latest updates to bypass the supported version boundaries. TypeScript 7 and automatic Renovate PRs are deferred. Keep Node types on the preferred Node 24 line. VitePress stays on the newest verified prerelease permitted by the trust policy (alpha.20 as of this review; alpha.21 requires @docsearch/js 4.7.1, which pnpm rejected for a trust downgrade). Vitest 5.1.2 was released within the 72-hour cooling period; keep Vitest and coverage at 5.1.1 until eligible.
 
 ## Compatibility checks
 

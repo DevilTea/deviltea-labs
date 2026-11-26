@@ -19,6 +19,7 @@ const defaultOptions = {
 		overrides: {
 			'style/newline-per-chained-call': ['error', { ignoreChainWithDepth: 1 }],
 			'antfu/consistent-chaining': 'off',
+			'antfu/reasonable-newline': 'off',
 		},
 	},
 	javascript: {
@@ -106,6 +107,7 @@ describe('@deviltea/eslint-config', () => {
 				overrides: {
 					'style/newline-per-chained-call': 'off',
 					'style/user-rule': 'warn',
+					'antfu/reasonable-newline': 'error',
 				},
 			},
 			javascript: {
@@ -143,6 +145,7 @@ describe('@deviltea/eslint-config', () => {
 					overrides: {
 						'style/newline-per-chained-call': 'off',
 						'antfu/consistent-chaining': 'off',
+						'antfu/reasonable-newline': 'error',
 						'style/user-rule': 'warn',
 					},
 				},
