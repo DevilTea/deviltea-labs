@@ -9,18 +9,18 @@
 
 ## Installation
 
-To install the package, use either `npm`, `yarn`, or `pnpm`:
+Install Core and Vue Adapter at the same version. The adapter requires the exact matching Core as a peer so both imports share one definition registry. Use either `npm`, `yarn`, or `pnpm`:
 
 ```bash
-npm install @deviltea/tiny-state-machine-vue
+npm install @deviltea/tiny-state-machine @deviltea/tiny-state-machine-vue vue
 ```
 
 ```bash
-yarn add @deviltea/tiny-state-machine-vue
+yarn add @deviltea/tiny-state-machine @deviltea/tiny-state-machine-vue vue
 ```
 
 ```bash
-pnpm add @deviltea/tiny-state-machine-vue
+pnpm add @deviltea/tiny-state-machine @deviltea/tiny-state-machine-vue vue
 ```
 
 ## Usage
@@ -65,7 +65,7 @@ Previously `autoDestroy` defaulted to true and the state ref was writable. Owner
 
 ## License
 
-[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tiny-state-machine-vue/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
+[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tiny-state-machine/vue/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
 
 <!-- Badges -->
 

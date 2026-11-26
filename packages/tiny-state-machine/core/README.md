@@ -190,7 +190,7 @@ The workspace uses Vitest, fast-check property-based tests (generated machine gr
 
 ## License
 
-[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tiny-state-machine/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
+[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tiny-state-machine/core/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
 
 <!-- Badges -->
 

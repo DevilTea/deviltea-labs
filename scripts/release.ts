@@ -1,7 +1,7 @@
 import process from 'node:process'
 import { cancel, confirm, intro, isCancel, log, outro } from '@clack/prompts'
 import { $ } from 'zx'
-import { assertReleaseTagAllowed, fail, packageEntry, packageIds, packageVersion, workspaceRoot } from './release-package'
+import { assertReleaseTagAllowed, fail, packageEntry, packageIds, releaseMembers, releaseVersion, workspaceRoot } from './release-package'
 
 const REPOSITORY = 'DevilTea/deviltea-labs'
 const PUBLISH_WORKFLOW_URL = `https://github.com/${REPOSITORY}/actions/workflows/publish.yml`
@@ -67,28 +67,31 @@ async function askToProceed(message: string, autoConfirm: boolean, onCancel?: ()
 }
 
 async function openReleasePullRequest(id: string, release: string, autoConfirm: boolean) {
-	const entry = packageEntry(id)
-	const previousVersion = packageVersion(id)
+	const names = releaseMembers(id)
+		.map(member => packageEntry(member).name)
+		.join(', ')
+	const manifests = releaseMembers(id)
+		.map(member => `${packageEntry(member).directory}/package.json`)
+	const previousVersion = releaseVersion(id)
 
-	intro(`Release ${entry.name}`)
+	intro(`Release ${names}`)
 
 	await assertGitHubCliReady()
 	await assertCleanWorktree()
 	await assertSyncedMain()
 
-	await $`pnpm exec bumpp ${`${entry.directory}/package.json`} --release ${release} --no-commit --no-tag --no-push --yes`
-
 	const restoreBump = async () => {
-		await git('restore', '--', `${entry.directory}/package.json`, 'pnpm-lock.yaml')
+		await git('restore', '--', ...manifests, 'pnpm-lock.yaml')
 	}
 
 	let version: string
 	let tag: string
 	let branch: string
 	try {
-		version = packageVersion(id)
+		await $`pnpm exec bumpp ${manifests} --current-version ${previousVersion} --release ${release} --no-commit --no-tag --no-push --yes`
+		version = releaseVersion(id)
 		if (version === previousVersion)
-			fail(`Bumpp left ${entry.name} at ${previousVersion}.`)
+			fail(`Bumpp left ${names} at ${previousVersion}.`)
 
 		tag = `${id}@${version}`
 		branch = `release/${id}/v${version}`
@@ -103,13 +106,13 @@ async function openReleasePullRequest(id: string, release: string, autoConfirm: 
 		throw error
 	}
 
-	log.step(`${entry.name}: ${previousVersion} → ${version}`)
+	log.step(`${names}: ${previousVersion} → ${version}`)
 	log.info(`Branch \`${branch}\`, release tag \`${tag}\`.`)
 
 	await askToProceed('Open the release pull request?', autoConfirm, restoreBump)
 
 	await git('switch', '--create', branch)
-	await git('add', '--', `${entry.directory}/package.json`, 'pnpm-lock.yaml')
+	await git('add', '--', ...manifests, 'pnpm-lock.yaml')
 
 	if (await succeeds($$`git diff --cached --quiet`))
 		fail('Bumpp did not change the release version.')
@@ -134,16 +137,18 @@ async function openReleasePullRequest(id: string, release: string, autoConfirm: 
 }
 
 async function pushReleaseTag(id: string, autoConfirm: boolean) {
-	const entry = packageEntry(id)
+	const names = releaseMembers(id)
+		.map(member => packageEntry(member).name)
+		.join(', ')
 
-	intro(`Tag ${entry.name}`)
+	intro(`Tag ${names}`)
 
 	await assertCleanWorktree()
 	await git('fetch', 'origin', 'main', '--tags')
 	await git('switch', 'main')
 	await git('merge', '--ff-only', 'origin/main')
 
-	const version = packageVersion(id)
+	const version = releaseVersion(id)
 	assertReleaseTagAllowed(id, version)
 	const tag = `${id}@${version}`
 
@@ -155,11 +160,11 @@ async function pushReleaseTag(id: string, autoConfirm: boolean) {
 	const head = await git('rev-parse', '--short', 'HEAD')
 	const subject = await git('log', '-1', '--pretty=%s')
 
-	log.step(`${entry.name}@${version} → tag \`${tag}\``)
+	log.step(`${names} at ${version} → tag \`${tag}\``)
 	log.info(`main is at ${head} (${subject}).`)
-	log.warn('Pushing this tag publishes the package to npm.')
+	log.warn(`Pushing this tag publishes ${names} to npm.`)
 
-	await askToProceed(`Push \`${tag}\` and publish ${entry.name}@${version}?`, autoConfirm)
+	await askToProceed(`Push \`${tag}\` and publish ${names} at ${version}?`, autoConfirm)
 
 	await git('tag', '--annotate', tag, '--message', tag)
 	await git('push', 'origin', tag)
@@ -185,7 +190,7 @@ try {
 	const [id, release] = operands
 
 	if (id != null)
-		packageEntry(id)
+		releaseMembers(id)
 
 	switch (command) {
 		case 'open':

@@ -1,8 +1,9 @@
 # DevilTea Labs
 
 DevilTea Labs is the monorepo for maintained DevilTea packages. Each package
-keeps its own npm identity and version while sharing workspace tooling,
-continuous integration, and release orchestration.
+keeps its own npm identity while sharing workspace tooling,
+continuous integration, and release orchestration. The FSM Core and Vue Adapter
+share one lockstep release version; other packages are independently versioned.
 
 Package documentation is available at
 [deviltea.github.io/deviltea-labs](https://deviltea.github.io/deviltea-labs/).
@@ -13,8 +14,8 @@ Package documentation is available at
 | `@deviltea/tsconfig` | [`packages/tsconfig`](packages/tsconfig) |
 | `@deviltea/vue-router-middleware` | [`packages/vue-router-middleware`](packages/vue-router-middleware) |
 | `vue-temp-var` | [`packages/vue-temp-var`](packages/vue-temp-var) |
-| `@deviltea/tiny-state-machine` | [`packages/tiny-state-machine`](packages/tiny-state-machine) |
-| `@deviltea/tiny-state-machine-vue` | [`packages/tiny-state-machine-vue`](packages/tiny-state-machine-vue) |
+| `@deviltea/tiny-state-machine` | [`packages/tiny-state-machine/core`](packages/tiny-state-machine/core) |
+| `@deviltea/tiny-state-machine-vue` | [`packages/tiny-state-machine/vue`](packages/tiny-state-machine/vue) |
 | `@deviltea/spec-tool` | [`packages/spec-tool`](packages/spec-tool) |
 
 ## Agent Skills
@@ -54,6 +55,10 @@ pnpm release <package> <patch|minor|major|prerelease|version>  # bump and open t
 # wait for the pull request to merge, then:
 pnpm release:tag <package>                                     # push the tag and publish
 ```
+
+For both FSM packages, use `pnpm release tiny-state-machine <release>` and
+`pnpm release:tag tiny-state-machine` once. Separate Vue releases are disabled.
+CI verifies matching manifest versions and the exact Core peer dependency.
 
 See [`docs/migration/release-cutover.md`](docs/migration/release-cutover.md)
 for the full procedure.

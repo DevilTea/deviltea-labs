@@ -1,8 +1,8 @@
 {
 	"extends": [
 		"./docs/site/tsconfig.json",
-		"./packages/tiny-state-machine/tsconfig.json",
-		"./packages/tiny-state-machine-vue/tsconfig.json"
+		"./packages/tiny-state-machine/core/tsconfig.json",
+		"./packages/tiny-state-machine/vue/tsconfig.json"
 	],
 	"references": [
 		{

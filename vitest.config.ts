@@ -16,8 +16,8 @@ export default defineConfig({
 			include: [
 				'packages/spec-tool/src/**/*.ts',
 				'packages/eslint-config/src/**/*.ts',
-				'packages/tiny-state-machine/src/**/*.ts',
-				'packages/tiny-state-machine-vue/src/**/*.ts',
+				'packages/tiny-state-machine/core/src/**/*.ts',
+				'packages/tiny-state-machine/vue/src/**/*.ts',
 				'packages/vue-router-middleware/src/**/*.ts',
 				'packages/vue-temp-var/src/**/*.ts',
 				'packages/vue-temp-var/src/**/*.vue',

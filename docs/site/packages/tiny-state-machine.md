@@ -2,4 +2,4 @@
 title: '@deviltea/tiny-state-machine'
 ---
 
-<!--@include: ../../../packages/tiny-state-machine/README.md-->
+<!--@include: ../../../packages/tiny-state-machine/core/README.md-->

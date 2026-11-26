@@ -14,6 +14,8 @@ This ESM-only package implements the framework-agnostic finite-state-machine API
 
 `destroy()` runs `onBeforeDestroyed` handlers while state/context remain readable, clears destruction registrations and internal state, marks the machine destroyed, then runs `onAfterDestroyed` handlers. Destruction requested during notification is deferred until that notification completes and pending events are discarded. Cleanup completes despite synchronous handler errors. Once destroyed, state/context access and operational registration/sending/destroying throw `Error('The machine has been destroyed.')`; `isDestroyed` remains readable. Unsubscribe functions are safe to call after removal or destruction.
 
+Core and Vue share one version and release identifier (`tiny-state-machine`). Never bump either manifest independently.
+
 ## Commands
 
 Run from this directory or with `pnpm --filter @deviltea/tiny-state-machine` from the repository root:
