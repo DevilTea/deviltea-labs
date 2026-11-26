@@ -21,13 +21,15 @@
 		".": {
 			"types": "./dist/index.d.mts",
 			"import": "./dist/index.mjs"
-		}
+		},
+		"./schema.json": "./schema.json"
 	},
 	"main": "dist/index.mjs",
 	"module": "dist/index.mjs",
 	"types": "dist/index.d.mts",
 	"files": [
-		"dist"
+		"dist",
+		"schema.json"
 	],
 	"engines": {
 		"node": "^22.14.0 || ^24.0.0"
@@ -39,11 +41,17 @@
 		"test": "vitest run --config vitest.config.ts",
 		"typecheck": "pnpm typecheck:package && pnpm typecheck:test",
 		"typecheck:package": "tsc --project ./tsconfig.package.json --noEmit",
-		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit"
+		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit",
+		"schema:generate": "tsx scripts/generate-schema.ts"
+	},
+	"dependencies": {
+		"valibot": "catalog:"
 	},
 	"devDependencies": {
+		"@valibot/to-json-schema": "catalog:",
 		"fast-check": "catalog:",
 		"tsdown": "catalog:",
+		"tsx": "catalog:",
 		"vitest": "catalog:"
 	}
 }

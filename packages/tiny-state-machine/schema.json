@@ -1,0 +1,64 @@
+{
+	"type": "object",
+	"properties": {
+		"id": {
+			"type": "string"
+		},
+		"initial": {
+			"type": "string"
+		},
+		"states": {
+			"type": "object",
+			"propertyNames": {
+				"type": "string"
+			},
+			"additionalProperties": {
+				"anyOf": [
+					{
+						"type": "object",
+						"properties": {
+							"type": {
+								"not": {}
+							},
+							"on": {
+								"type": "object",
+								"propertyNames": {
+									"type": "string"
+								},
+								"additionalProperties": {
+									"type": "string"
+								}
+							}
+						},
+						"required": []
+					},
+					{
+						"type": "object",
+						"properties": {
+							"type": {
+								"const": "final"
+							},
+							"on": {
+								"type": "object",
+								"propertyNames": {
+									"type": "string"
+								},
+								"additionalProperties": {
+									"not": {}
+								}
+							}
+						},
+						"required": [
+							"type"
+						]
+					}
+				]
+			}
+		}
+	},
+	"required": [
+		"initial",
+		"states"
+	],
+	"$schema": "http://json-schema.org/draft-07/schema#"
+}

@@ -5,6 +5,9 @@
 	},
 	"include": [
 		"./src/index.ts",
-		"./src/**/*.unit.test.ts"
+		"./src/**/*.unit.test.ts",
+		"./src/definition.ts",
+		"./src/graph.ts",
+		"./schema.json"
 	]
 }

@@ -97,6 +97,70 @@ machine.send('done') // Logs: Transitioned from loading to finished via event 'd
 unsubscribe()
 ```
 
+## Definitions and pure graph analysis
+
+A definition remains a flat JSON-compatible adjacency map. Define it separately from its runtime instances:
+
+```ts
+import { createMachine, defineMachine, getReachableStates, getTransitions, transition } from '@deviltea/tiny-state-machine'
+
+const definition = defineMachine({
+	initial: 'idle',
+	states: {
+		idle: { on: { start: 'running' } },
+		running: { on: { finish: 'done' } },
+		done: { type: 'final' },
+		unused: {},
+	},
+})
+
+const first = createMachine(definition)
+const second = createMachine(definition)
+first.send('start')
+// second.currentState remains 'idle'
+
+getReachableStates(definition) // ['idle', 'running', 'done']
+getTransitions(definition) // [{ source: 'idle', event: 'start', target: 'running' }, ...]
+transition(definition, 'idle', 'start') // 'running'
+transition(definition, 'done', 'start') // undefined
+```
+
+`defineMachine` validates the configuration and returns the original object with its exact inferred TypeScript type. It does not freeze, clone, or start a machine. Treat definitions as data; each runtime instance independently validates and snapshots the graph. Graph helpers validate the current input on every call and do not mutate it or execute callbacks.
+
+| Pure function | Result |
+| --- | --- |
+| `getStates(config)` | State keys |
+| `getEvents(config, state)` | Events accepted by the specified state |
+| `getTransitions(config)` | All typed source/event/target records, including self-transitions |
+| `transition(config, state, event)` | Target state, or `undefined` if the event is unavailable |
+| `getReachableStates(config, start?)` | Reachable states, including the start, in breadth-first discovery order |
+| `getUnreachableStates(config, start?)` | States not reachable from the start |
+| `getFinalStates(config)` | Explicitly declared final states |
+| `getDeadEndStates(config)` | Non-final states with no outgoing edges, including unreachable ones |
+
+The default traversal start is the initial state. Unknown source states throw. Other lists follow JavaScript own-key enumeration order. Cycles, unreachable states, and non-final dead ends are valid; analysis reports them rather than rejecting the definition. Each helper compiles its input once per call (linear in the size of the graph); the running machine retains its own indexed graph.
+
+## Validation and JSON Schema
+
+```ts
+import { machineConfigSchema, parseMachineConfig, safeParseMachineConfig } from '@deviltea/tiny-state-machine'
+
+const result = safeParseMachineConfig(JSON.parse(jsonText))
+if (result.success) {
+	const machine = createMachine(result.output)
+}
+else {
+	for (const issue of result.issues) {
+		console.error(issue.message, issue.path)
+	}
+}
+```
+
+- `machineConfigSchema` is a Valibot schema (also usable through Standard Schema). `parseMachineConfig(input)` throws a Valibot ValiError; `safeParseMachineConfig(input)` returns structured issues without throwing for malformed JSON data. Successful parsing preserves the input object; it does not sanitize or clone it.
+- Validation checks the declared shape, string IDs if present, existing initial and target states, and forbids outgoing transitions from explicit final states. Extra fields are not interpreted by the FSM. The runtime and graph helpers use the same validation. Own enumerable state/event keys, including empty strings and reserved object names, are preserved.
+- A portable draft-07 JSON Schema is shipped at `@deviltea/tiny-state-machine/schema.json` (package-relative JSON file). Use it for editor autocomplete and structural validation. JSON Schema cannot verify that a dynamic initial or target string names an existing state; use the Valibot schema for those semantic checks. Regenerate the JSON file with `pnpm schema:generate` from this package; a test detects schema drift.
+- Valibot is a runtime dependency; its JSON Schema converter is development-only.
+
 ## Runtime contract
 
 - The declarative machine definition is validated and copied at construction. Unknown initial states, missing targets, invalid state definitions, and outgoing transitions from explicit final states throw.

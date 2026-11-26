@@ -1,3 +1,8 @@
+import { compile } from './definition'
+
+export { defineMachine, machineConfigSchema, parseMachineConfig, safeParseMachineConfig } from './definition'
+export { getDeadEndStates, getEvents, getFinalStates, getReachableStates, getStates, getTransitions, getUnreachableStates, transition } from './graph'
+
 type Prettify<T> = { [Key in keyof T]: T[Key] } & {}
 
 type MachineState<StateKey extends string>
@@ -40,7 +45,7 @@ type EventTargetStateKeyOf<
 	Event extends EventKeyOf<Config, StateKey>,
 > = StateEventTarget<Config['states'][StateKey], Event>
 
-type AllPossibleTransitionDataOf<Config extends MachineConfig> = {
+export type AllPossibleTransitionDataOf<Config extends MachineConfig> = {
 	[StateKey in StateKeyOf<Config>]: {
 		[EventKey in EventKeyOf<Config, StateKey>]: {
 			readonly source: StateKey
@@ -109,38 +114,6 @@ type RuntimePayload = Readonly<{
 	send: ((event: string) => void) | null
 }>
 type RuntimeHandler = (payload: RuntimePayload) => unknown
-interface RuntimeState { final: boolean, transitions: Map<string, string> }
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function compile(config: MachineConfig) {
-	if (!isRecord(config) || !isRecord(config.states) || typeof config.initial !== 'string')
-		throw new Error('Invalid machine configuration.')
-	const states = new Map<string, RuntimeState>()
-	for (const [key, state] of Object.entries(config.states)) {
-		if (!isRecord(state) || (state.type !== undefined && state.type !== 'final'))
-			throw new Error(`Invalid state: ${key}.`)
-		const transitions = new Map<string, string>()
-		if (state.on !== undefined) {
-			if (!isRecord(state.on))
-				throw new Error(`Invalid transitions for state: ${key}.`)
-			for (const [event, target] of Object.entries(state.on)) {
-				if (typeof target !== 'string' || !Object.prototype.propertyIsEnumerable.call(config.states, target))
-					throw new Error(`Invalid transition: ${key} -> ${event}.`)
-				transitions.set(event, target)
-			}
-		}
-		if (state.type === 'final' && transitions.size > 0)
-			throw new Error(`Final state cannot have transitions: ${key}.`)
-		states.set(key, { final: state.type === 'final', transitions })
-	}
-	if (!states.has(config.initial))
-		throw new Error(`Invalid initial state: ${config.initial}.`)
-	return { initial: config.initial, states }
-}
-
 function notify<T>(handlers: Set<(value: T) => unknown>, value: T, errors: unknown[]) {
 	for (const handler of [...handlers]) {
 		if (!handlers.has(handler))
@@ -162,7 +135,7 @@ function throwErrors(errors: unknown[]) {
 }
 
 export class Machine<Config extends MachineConfig, Context extends MachineContext> {
-	private _states: Map<string, RuntimeState>
+	private _states: ReturnType<typeof compile>['states']
 	private _context: Context
 	private _currentState: string
 	private _transitionHandlers = new Set<RuntimeHandler>()

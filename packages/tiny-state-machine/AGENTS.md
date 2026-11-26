@@ -4,7 +4,9 @@
 
 This ESM-only package implements the framework-agnostic finite-state-machine API. Keep runtime implementation and colocated behavioral tests in `src/`:
 
-- `src/index.ts` exports `Machine`, `createMachine`, and the public configuration/context types.
+- `src/index.ts` exports the runtime, definition/validation, and graph APIs and public configuration/context types.
+- `src/definition.ts` owns Valibot validation and the shared compiler; `src/graph.ts` owns pure graph operations. Keep reserved own keys intact, since Valibot record parsing drops several reserved keys.
+- `schema.json` is a generated, published structural schema. Regenerate using `pnpm schema:generate`; its test ensures parity with the Valibot structural schema. Cross-reference checks belong in full validation.
 - `src/index.unit.test.ts` is the Vitest behavioral suite; do not add a separate `tests/` tree for unit tests.
 - `tsdown.config.ts` builds `src/index.ts` to ESM plus declarations in `dist/`; `dist/` is generated and must not be edited.
 
