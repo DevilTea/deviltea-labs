@@ -89,11 +89,10 @@ jobs:
       - name: Validate tsconfig contracts
         run: node packages/tsconfig/scripts/test-contracts.mjs --typescript 6
 
-  typescript-canary:
-    name: Verify tsconfig (TypeScript next canary)
+  eslint-config-latest:
+    name: Verify eslint-config (latest supported ESLint and TypeScript 6)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -107,8 +106,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Validate tsconfig contracts
-        run: node packages/tsconfig/scripts/test-contracts.mjs --typescript next
+      - name: Validate packed ESLint config
+        env:
+          ESLINT_VERSION: ^10.4.0
+          TYPESCRIPT_VERSION: '6'
+        run: pnpm --filter @deviltea/eslint-config test:package
 
   spec-tool-pack:
     name: Pack @deviltea/spec-tool (Node 24)

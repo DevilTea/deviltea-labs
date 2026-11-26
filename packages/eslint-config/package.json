@@ -53,7 +53,13 @@
 		"test:package": "pnpm build && node test/package-smoke.mjs"
 	},
 	"peerDependencies": {
-		"eslint": "^10.4.0"
+		"eslint": "^10.4.0",
+		"typescript": ">=6.0.0 <7.0.0"
+	},
+	"peerDependenciesMeta": {
+		"typescript": {
+			"optional": true
+		}
 	},
 	"dependencies": {
 		"@antfu/eslint-config": "catalog:"

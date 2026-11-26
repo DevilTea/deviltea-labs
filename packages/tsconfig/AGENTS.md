@@ -31,3 +31,5 @@ This JSON-only package does not participate in Vitest or root coverage reporting
 
 - This is a package in the root pnpm workspace; versions are maintained in the root catalog and this package has no local lockfile.
 - The supported TypeScript peer range is `>=6.0.0 <7.0.0`; update the explicit TypeScript version in the contract command only as part of an intentional compatibility review.
+
+The minimum stable TypeScript 6 release (6.0.2) is tested locally; CI also checks the latest stable 6.x. Do not introduce TypeScript 7 or next/canary into routine dependency updates.

@@ -38,3 +38,7 @@ Established-package releases are driven locally: `pnpm release <package> <releas
 - Follow the nearest package `AGENTS.md` for package-specific constraints. `CLAUDE.md` mirrors it by reference for compatible agent tooling.
 - Do not hand-edit generated `dist/` artifacts or TypeScript build-info files. Keep changes scoped to the package being changed.
 - Before handoff, run the narrowest relevant unit test, then lint/typecheck or the package validation command when practical.
+
+## Dependency maintenance
+
+Use Node.js 24 LTS as the preferred workspace environment and TypeScript 6.x for the compiler baseline. Keep the root catalog and lockfile authoritative; published packages declare their own runtime and peer ranges. Follow [docs/dependency-maintenance.md](docs/dependency-maintenance.md) for routine dependency updates. Do not migrate to TypeScript 7 or introduce Renovate without a separate decision.

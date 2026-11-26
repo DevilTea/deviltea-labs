@@ -40,7 +40,7 @@
 	"scripts": {
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
-		"test:contracts": "node ./scripts/test-contracts.mjs --typescript 6.0.3",
+		"test:contracts": "node ./scripts/test-contracts.mjs --typescript 6.0.2",
 		"validate": "pnpm lint && pnpm test:contracts"
 	},
 	"peerDependencies": {

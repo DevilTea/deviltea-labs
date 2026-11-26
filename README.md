@@ -33,6 +33,8 @@ sync.
 
 ## Development
 
+Use Node.js 24 LTS (24.11+) for development; Node.js 22.22.1+ also remains supported by the workspace toolchain. Use the pnpm version declared in the root package manifest.
+
 ```sh
 corepack enable
 pnpm install --frozen-lockfile
@@ -58,6 +60,7 @@ for the full procedure.
 
 ## Compatibility
 
-- Node.js 22.14+ and 24.x are supported LTS lines.
-- `@deviltea/tsconfig@1` supports TypeScript 6 (`>=6.0.0 <7.0.0`). TypeScript
-  `next` is checked as a non-blocking compatibility canary.
+- Published packages declare their own Node.js and peer dependency requirements. Workspace tooling requirements do not automatically raise library runtime requirements.
+- The workspace and current TypeScript tooling packages use TypeScript 6 (`>=6.0.0 <7.0.0`); TypeScript 5 is no longer supported by the current ESLint config.
+- Minimum and latest supported TypeScript 6 versions are checked in packed consumers. TypeScript 7 is deferred.
+- See [dependency maintenance](docs/dependency-maintenance.md) for the routine update process.

@@ -56,7 +56,8 @@ function main() {
 
 		const consumerDirectory = join(temporaryDirectory, 'consumer')
 		const tarballUrl = pathToFileURL(join(temporaryDirectory, tarballName)).href
-		const eslintVersion = process.env.ESLINT_VERSION ?? '^10.4.0'
+		const eslintVersion = process.env.ESLINT_VERSION ?? '10.4.0'
+		const typescriptVersion = process.env.TYPESCRIPT_VERSION ?? '6.0.2'
 
 		mkdirSync(consumerDirectory)
 
@@ -68,7 +69,7 @@ function main() {
 			devDependencies: {
 				'@deviltea/eslint-config': tarballUrl,
 				'eslint': eslintVersion,
-				'typescript': '~5.9.3',
+				'typescript': typescriptVersion,
 			},
 		})
 
@@ -104,6 +105,7 @@ function main() {
 		run(pnpm, ['exec', 'eslint', 'fixture.js', 'fixture.ts', 'SmokeFixture.vue'], {
 			cwd: consumerDirectory,
 		})
+		process.stdout.write(`Packed ESLint config consumer passed with ESLint ${eslintVersion} and TypeScript ${typescriptVersion}.\n`)
 	}
 	finally {
 		rmSync(temporaryDirectory, { force: true, recursive: true })
