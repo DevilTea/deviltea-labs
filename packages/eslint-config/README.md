@@ -19,13 +19,14 @@ TypeScript and Vue support are enabled by default. They can be disabled explicit
 
 ## Opinionated defaults
 
-The package inherits all defaults from `@antfu/eslint-config@9.5.1` and adds the following rules.
+The package inherits all defaults from `@antfu/eslint-config@10.0.0` and adds the following rules.
 
 ### Stylistic
 
 - Tabs for indentation.
 - Require a newline for chained calls deeper than one level.
 - Disable `antfu/consistent-chaining` in favor of `style/newline-per-chained-call`.
+- Disable `antfu/reasonable-newline` to retain the existing line-break policy rather than forcing nested array and object entries onto separate lines. Users can opt in via stylistic overrides.
 
 ### JavaScript and TypeScript
 

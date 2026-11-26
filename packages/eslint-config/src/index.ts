@@ -14,6 +14,7 @@ const deviltea: FactoryFn = (options?, ...userConfigs) => antfu(
 					overrides: {
 						'style/newline-per-chained-call': ['error', { ignoreChainWithDepth: 1 }],
 						'antfu/consistent-chaining': 'off',
+						'antfu/reasonable-newline': 'off',
 						...options?.stylistic?.overrides,
 					},
 				},

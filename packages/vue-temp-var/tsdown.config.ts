@@ -7,7 +7,7 @@ export default defineConfig({
 	platform: 'neutral',
 	target: 'es2022',
 	dts: {
-		vue: true,
+		tsc: { vue: true },
 		tsconfig: './tsconfig.lib.json',
 	},
 	clean: true,
