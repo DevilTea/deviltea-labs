@@ -12,7 +12,7 @@ shellEmulator: true
 strictDepBuilds: true
 
 packages:
-  - 'packages/*'
+  - 'packages/**'
   - 'docs/*'
 
 overrides:
@@ -32,6 +32,7 @@ catalog:
   '@stryker-mutator/vitest-runner': 10.1.1
   '@types/node': ^24.19.2
   '@vitest/coverage-v8': 5.1.1
+  ajv: ^8.20.0
   bumpp: 12.3.0
   eslint: 10.15.0
   fast-check: ^4.11.0

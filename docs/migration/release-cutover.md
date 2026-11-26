@@ -1,7 +1,7 @@
 # Release cutover
 
-The workspace uses independent package versioning and a centralized release
-flow. Established packages publish only in GitHub Actions through npm Trusted
+The workspace uses independent package versioning except for the FSM Core/Vue
+lockstep family, with a centralized release flow. Established packages publish only in GitHub Actions through npm Trusted
 Publishing (OIDC); the one-time `@deviltea/spec-tool@0.0.1` bootstrap exception
 is documented below. No npm credentials or long-lived npm token are stored in
 this repository.
@@ -28,7 +28,7 @@ after its bootstrap `0.0.1` publish:
 | `@deviltea/vue-router-middleware` | `vue-router-middleware` | `vue-router-middleware@0.0.5` |
 | `vue-temp-var` | `vue-temp-var` | `vue-temp-var@2.0.2` |
 | `@deviltea/tiny-state-machine` | `tiny-state-machine` | `tiny-state-machine@0.0.6` |
-| `@deviltea/tiny-state-machine-vue` | `tiny-state-machine-vue` | `tiny-state-machine-vue@0.0.6` |
+| `@deviltea/tiny-state-machine-vue` | `tiny-state-machine` (shared) | `tiny-state-machine@0.0.6` |
 | `@deviltea/spec-tool` | `spec-tool` | `spec-tool@0.0.2` (first normal tagged release) |
 
 `@deviltea/widget-core` and `@deviltea/widget-vue` moved to [`DevilTea/widget`](https://github.com/DevilTea/widget) and are no longer released from this repository.
@@ -67,6 +67,33 @@ automatically. The manual `0.0.1` bootstrap is intentionally **not tagged**: a
 already-existing version again. The next Spec Tool version uses the normal
 tag-driven release flow after Trusted Publishing is configured.
 
+## FSM family lockstep releases
+
+The two packages live under `packages/tiny-state-machine/{core,vue}`. The
+npm package names remain unchanged, but both manifests must have exactly the
+same version. The Vue adapter declares Core as a `workspace:*` peer dependency,
+which pnpm converts to an exact matching version when packing. CI rejects a
+mismatch via `pnpm check:versions`.
+
+Use one release identifier:
+
+```sh
+pnpm release tiny-state-machine patch
+# After the release PR merges:
+pnpm release:tag tiny-state-machine
+```
+
+Both manifests are bumped in the same PR. The only new release tag is
+`tiny-state-machine@<version>`; existing historical Vue tags are preserved.
+The publish workflow verifies both packed versions and the exact peer, retains
+the Vue tarball as an artifact, publishes Core first, and then publishes Vue
+from that artifact in a dependent job. npm publishes are not transactional:
+if Vue fails after Core succeeds, rerun the failed Vue job using the retained
+artifact (available for 14 days). If a publish response is ambiguous, inspect
+npm's exact version and artifact integrity before retrying. Do not bump another
+FSM version while a release is incomplete. Do not create a separate Vue tag or
+attempt to republish an existing version.
+
 ## Release procedure
 
 The normal release commands require a local [GitHub CLI](https://cli.github.com)
@@ -86,13 +113,13 @@ installation authenticated with `gh auth login`.
    example `eslint-config@9.0.1`.
 4. **Publish package** (`publish.yml`) verifies that the tagged commit is on
    `main`, verifies the tag and package version match, runs `pnpm check`,
-   packs exactly one tarball, and publishes it to npm with provenance.
+   packs the release tarball(s), and publishes to npm with provenance. For the FSM family, both tarballs are verified before Core is published; the Vue job then publishes the retained matching tarball.
 
 Both commands accept `--yes` to skip their confirmation prompt. `pnpm release`
 refuses to run when the working tree is dirty, when the current branch is not
 `main`, when `main` is out of sync with `origin/main`, or when the target tag or
 release branch already exists. Nothing is pushed until the confirmation is
-accepted; a declined prompt restores the bumped `package.json`.
+accepted; a declined prompt restores all bumped manifests.
 
 `scripts/release-package.ts` remains the single source of truth for the package
 table and is also invoked as a CLI by `publish.yml`.

@@ -2,7 +2,7 @@ import * as core from '@deviltea/tiny-state-machine'
 import * as fc from 'fast-check'
 import { expect, expectTypeOf, it, vi } from 'vitest'
 import { computed, effectScope, isReadonly, watch } from 'vue'
-import { createMachine, Machine, useMachine } from './index'
+import { assertValidDefinition, createMachine, defineMachine, Machine, useMachine } from './index'
 
 const config = {
 	initial: 'idle',
@@ -12,6 +12,8 @@ const config = {
 		done: { type: 'final' },
 	},
 } as const
+const definition = defineMachine(config)
+assertValidDefinition(definition)
 
 it('re-exports the original core', () => {
 	expect(createMachine)
@@ -21,7 +23,7 @@ it('re-exports the original core', () => {
 })
 
 it('maintains a readonly reactive state and can() across generated event sequences', () => fc.assert(fc.property(fc.array(fc.constantFrom('start', 'stop', 'finish'), { maxLength: 40 }), (events) => {
-	const machine = createMachine(config)
+	const machine = createMachine(definition)
 	const scope = effectScope()
 	const binding = scope.run(() => useMachine(machine))!
 	const canStart = computed(() => binding.can('start'))
@@ -51,7 +53,7 @@ it('maintains a readonly reactive state and can() across generated event sequenc
 }), { seed: 20261126, numRuns: 200 }))
 
 it('stopping one borrowed binding leaves other scopes and machine alive', () => {
-	const machine = createMachine(config)
+	const machine = createMachine(definition)
 	const first = effectScope()
 	const second = effectScope()
 	const a = first.run(() => useMachine(machine))!
@@ -72,7 +74,7 @@ it('stopping one borrowed binding leaves other scopes and machine alive', () => 
 })
 
 it('owned binding destroys the machine on scope disposal', () => {
-	const machine = createMachine(config)
+	const machine = createMachine(definition)
 	const scope = effectScope()
 	const binding = scope.run(() => useMachine(machine, { autoDestroy: true }))!
 	scope.stop()
@@ -84,7 +86,7 @@ it('owned binding destroys the machine on scope disposal', () => {
 })
 
 it('supports explicit disposal outside a scope and external machine destruction', () => {
-	const machine = createMachine(config)
+	const machine = createMachine(definition)
 	const binding = useMachine(machine)
 	binding.dispose()
 	binding.dispose()
@@ -105,7 +107,7 @@ it('supports explicit disposal outside a scope and external machine destruction'
 })
 
 it('handles scope disposal during a synchronous watcher without interrupting notification', () => {
-	const machine = createMachine(config)
+	const machine = createMachine(definition)
 	const scope = effectScope()
 	const binding = scope.run(() => {
 		const binding = useMachine(machine, { autoDestroy: true })
@@ -128,7 +130,7 @@ it('handles scope disposal during a synchronous watcher without interrupting not
 })
 
 it('preserves public event and state types without a cast', () => {
-	const binding = useMachine(createMachine(config))
+	const binding = useMachine(createMachine(definition))
 	expectTypeOf(binding.currentState.value)
 		.toEqualTypeOf<'idle' | 'active' | 'done'>()
 	expectTypeOf(binding.send)
@@ -146,7 +148,7 @@ it('preserves public event and state types without a cast', () => {
 })
 
 it('unsubscribes once on explicit disposal, without warning outside a scope', () => {
-	const machine = createMachine(config)
+	const machine = createMachine(definition)
 	const unsubscribeTransition = vi.fn()
 	const unsubscribeDestroyed = vi.fn()
 	vi.spyOn(machine, 'onTransition')

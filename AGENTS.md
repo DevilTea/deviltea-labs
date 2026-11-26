@@ -2,7 +2,7 @@
 
 ## Monorepo guide
 
-This pnpm workspace publishes reusable packages from `packages/*` and hosts the documentation site in `docs/site`. The Widget project (`@deviltea/widget-core`, `@deviltea/widget-vue`, and Widget Lab) moved to the separate `DevilTea/widget` repository; do not reintroduce it as a nested workspace here. Treat each package as an independently releasable product: preserve its public exports, package boundary, and package-specific build/typecheck commands. Do not describe this repository as a collection of standalone repositories; workspace-wide commands and the root catalog are the source of truth.
+This pnpm workspace publishes reusable packages from `packages/**` and hosts the documentation site in `docs/site`. The Widget project (`@deviltea/widget-core`, `@deviltea/widget-vue`, and Widget Lab) moved to the separate `DevilTea/widget` repository; do not reintroduce it as a nested workspace here. Treat each package as independently releasable unless explicitly grouped. The FSM Core and Vue Adapter are one lockstep release group; preserve each package’s public exports, package boundary, and package-specific build/typecheck commands. Do not describe this repository as a collection of standalone repositories; workspace-wide commands and the root catalog are the source of truth.
 
 ## Commands
 
@@ -20,7 +20,7 @@ pnpm check
 
 ## Releasing
 
-Established-package releases are driven locally: `pnpm release <package> <release>` bumps the package and opens its release pull request with auto-merge enabled, and `pnpm release:tag <package>` pushes the annotated tag after that pull request merges. Normally only the tag push triggers publishing, which happens in `publish.yml` via npm Trusted Publishing. The one-time first `@deviltea/spec-tool@0.0.1` publish is an explicit bootstrap exception: from clean merged `main`, run the full check, build before packing, verify the exact tarball contains the published CLI and skills, publish that tarball manually with npm web authentication, leave `0.0.1` untagged, then configure Trusted Publishing before returning to the normal tagged flow on the next version. Release commands and manual publishing affect `origin` or npm, so never run them without an explicit instruction to release. See [docs/migration/release-cutover.md](docs/migration/release-cutover.md).
+Established-package releases are driven locally: `pnpm release <package> <release>` bumps the package and opens its release pull request with auto-merge enabled, and `pnpm release:tag <package>` pushes the annotated tag after that pull request merges. For the FSM family, the single release identifier and tag prefix are `tiny-state-machine`; bump both manifests together and publish Core before Vue. `pnpm check:versions` rejects version drift and a non-exact Vue core peer. Normally only the tag push triggers publishing, which happens in `publish.yml` via npm Trusted Publishing. The one-time first `@deviltea/spec-tool@0.0.1` publish is an explicit bootstrap exception: from clean merged `main`, run the full check, build before packing, verify the exact tarball contains the published CLI and skills, publish that tarball manually with npm web authentication, leave `0.0.1` untagged, then configure Trusted Publishing before returning to the normal tagged flow on the next version. Release commands and manual publishing affect `origin` or npm, so never run them without an explicit instruction to release. See [docs/migration/release-cutover.md](docs/migration/release-cutover.md).
 
 ## Testing policy
 

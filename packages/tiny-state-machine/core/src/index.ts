@@ -1,3 +1,12 @@
+import type { CompiledGraph } from './compiler'
+import type { ValidDefinition } from './definition'
+import { getCompiledGraph } from './definition'
+
+export type { DeepReadonly, Definition, InvalidDefinition, ValidDefinition } from './definition'
+export { assertValidDefinition, defineMachine } from './definition'
+export type { Diagnostic, DiagnosticCode } from './diagnostics'
+export { getDeadEndStates, getEvents, getFinalStates, getReachableStates, getStates, getTransitions, getUnreachableStates, transition } from './graph'
+
 type Prettify<T> = { [Key in keyof T]: T[Key] } & {}
 
 type MachineState<StateKey extends string>
@@ -40,7 +49,7 @@ type EventTargetStateKeyOf<
 	Event extends EventKeyOf<Config, StateKey>,
 > = StateEventTarget<Config['states'][StateKey], Event>
 
-type AllPossibleTransitionDataOf<Config extends MachineConfig> = {
+export type AllPossibleTransitionDataOf<Config extends MachineConfig> = {
 	[StateKey in StateKeyOf<Config>]: {
 		[EventKey in EventKeyOf<Config, StateKey>]: {
 			readonly source: StateKey
@@ -109,38 +118,6 @@ type RuntimePayload = Readonly<{
 	send: ((event: string) => void) | null
 }>
 type RuntimeHandler = (payload: RuntimePayload) => unknown
-interface RuntimeState { final: boolean, transitions: Map<string, string> }
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function compile(config: MachineConfig) {
-	if (!isRecord(config) || !isRecord(config.states) || typeof config.initial !== 'string')
-		throw new Error('Invalid machine configuration.')
-	const states = new Map<string, RuntimeState>()
-	for (const [key, state] of Object.entries(config.states)) {
-		if (!isRecord(state) || (state.type !== undefined && state.type !== 'final'))
-			throw new Error(`Invalid state: ${key}.`)
-		const transitions = new Map<string, string>()
-		if (state.on !== undefined) {
-			if (!isRecord(state.on))
-				throw new Error(`Invalid transitions for state: ${key}.`)
-			for (const [event, target] of Object.entries(state.on)) {
-				if (typeof target !== 'string' || !Object.prototype.propertyIsEnumerable.call(config.states, target))
-					throw new Error(`Invalid transition: ${key} -> ${event}.`)
-				transitions.set(event, target)
-			}
-		}
-		if (state.type === 'final' && transitions.size > 0)
-			throw new Error(`Final state cannot have transitions: ${key}.`)
-		states.set(key, { final: state.type === 'final', transitions })
-	}
-	if (!states.has(config.initial))
-		throw new Error(`Invalid initial state: ${config.initial}.`)
-	return { initial: config.initial, states }
-}
-
 function notify<T>(handlers: Set<(value: T) => unknown>, value: T, errors: unknown[]) {
 	for (const handler of [...handlers]) {
 		if (!handlers.has(handler))
@@ -162,7 +139,7 @@ function throwErrors(errors: unknown[]) {
 }
 
 export class Machine<Config extends MachineConfig, Context extends MachineContext> {
-	private _states: Map<string, RuntimeState>
+	#states: CompiledGraph['states'] | undefined
 	private _context: Context
 	private _currentState: string
 	private _transitionHandlers = new Set<RuntimeHandler>()
@@ -174,9 +151,9 @@ export class Machine<Config extends MachineConfig, Context extends MachineContex
 	private _destroying = false
 	private _isDestroyed = false
 
-	constructor(config: Config, context: Context) {
-		const { initial, states } = compile(config)
-		this._states = states
+	constructor(definition: ValidDefinition<Config>, context: Context) {
+		const { initial, states } = getCompiledGraph(definition)
+		this.#states = states
 		this._context = context
 		this._currentState = initial
 	}
@@ -236,7 +213,7 @@ export class Machine<Config extends MachineConfig, Context extends MachineContex
 	/** Whether the current state accepts an event. */
 	can(event: string): event is EventKeyOf<Config> {
 		this._throwIfDestroyed()
-		return this._states.get(this._currentState)!.transitions.has(event)
+		return this.#states!.get(this._currentState)!.transitions.has(event)
 	}
 
 	/** Nested sends are queued until all observers have seen the current transition. */
@@ -253,7 +230,7 @@ export class Machine<Config extends MachineConfig, Context extends MachineContex
 			for (let index = 0; index < this._queue.length; index++) {
 				const next = this._queue[index]!
 				const source = this._currentState
-				const target = this._states.get(source)!.transitions.get(next)
+				const target = this.#states!.get(source)!.transitions.get(next)
 				if (target === undefined)
 					continue
 				this._currentState = target
@@ -261,7 +238,7 @@ export class Machine<Config extends MachineConfig, Context extends MachineContex
 					transition: Object.freeze({ source, event: next, target }),
 					machine: this,
 					context: this._context,
-					send: this._states.get(target)!.final ? null : this.send.bind(this) as (event: string) => void,
+					send: this.#states!.get(target)!.final ? null : this.send.bind(this) as (event: string) => void,
 				})
 				notify(this._transitionHandlers, payload, errors)
 				if (this._destroyRequested) {
@@ -300,7 +277,7 @@ export class Machine<Config extends MachineConfig, Context extends MachineContex
 		notify(this._beforeDestroyedHandlers, this, errors)
 		this._beforeDestroyedHandlers.clear()
 		this._transitionHandlers.clear()
-		this._states.clear()
+		this.#states = undefined
 		this._context = null as Context
 		this._isDestroyed = true
 		notify(this._afterDestroyedHandlers, undefined, errors)
@@ -321,15 +298,10 @@ export class Machine<Config extends MachineConfig, Context extends MachineContex
 	}
 }
 
-export function createMachine<
-	const Config extends MachineConfig<State>,
-	State extends keyof Config['states'] & string,
->(config: Config, context?: undefined): Machine<Config, null>
-export function createMachine<
-	const Config extends MachineConfig<State>,
-	State extends keyof Config['states'] & string,
-	Context extends MachineContext,
->(config: Config, context: Context | (() => Context)): Machine<Config, Context>
-export function createMachine(config: MachineConfig, context?: MachineContext | (() => MachineContext)): any {
-	return new Machine(config, typeof context === 'function' ? context() : context ?? null)
+export function createMachine<Config extends MachineConfig>(definition: ValidDefinition<Config>, context?: undefined): Machine<Config, null>
+export function createMachine<Config extends MachineConfig, Context extends MachineContext>(definition: ValidDefinition<Config>, context: Context | (() => Context)): Machine<Config, Context>
+export function createMachine(definition: ValidDefinition, context?: MachineContext | (() => MachineContext)): any {
+	// Reject forged/invalid definitions before running a caller's context factory.
+	getCompiledGraph(definition)
+	return new Machine(definition, typeof context === 'function' ? context() : context ?? null)
 }

@@ -9,26 +9,26 @@
 
 ## Installation
 
-To install the package, use either `npm`, `yarn`, or `pnpm`:
+Install Core and Vue Adapter at the same version. The adapter requires the exact matching Core as a peer so both imports share one definition registry. Use either `npm`, `yarn`, or `pnpm`:
 
 ```bash
-npm install @deviltea/tiny-state-machine-vue
+npm install @deviltea/tiny-state-machine @deviltea/tiny-state-machine-vue vue
 ```
 
 ```bash
-yarn add @deviltea/tiny-state-machine-vue
+yarn add @deviltea/tiny-state-machine @deviltea/tiny-state-machine-vue vue
 ```
 
 ```bash
-pnpm add @deviltea/tiny-state-machine-vue
+pnpm add @deviltea/tiny-state-machine @deviltea/tiny-state-machine-vue vue
 ```
 
 ## Usage
 
 ```ts
-import { createMachine, useMachine } from '@deviltea/tiny-state-machine-vue'
+import { assertValidDefinition, createMachine, defineMachine, useMachine } from '@deviltea/tiny-state-machine-vue'
 
-const machine = createMachine({
+const definition = defineMachine({
 	initial: 'idle',
 	states: {
 		idle: { on: { start: 'loading' } },
@@ -36,6 +36,8 @@ const machine = createMachine({
 		finished: { type: 'final' },
 	},
 })
+assertValidDefinition(definition)
+const machine = createMachine(definition)
 
 const { currentState, isDisposed, send, can, dispose } = useMachine(machine)
 
@@ -57,11 +59,13 @@ dispose()
 
 ### Migration
 
+Core machine creation now requires a valid definition. Define and check the configuration before creating the machine; core definition and graph APIs are re-exported unchanged.
+
 Previously `autoDestroy` defaulted to true and the state ref was writable. Ownership now defaults to borrowed and state can only change through the machine. Opt in to automatic destruction for exclusively owned instances. Disposal errors are propagated instead of logged and swallowed.
 
 ## License
 
-[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tiny-state-machine-vue/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
+[MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tiny-state-machine/vue/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)
 
 <!-- Badges -->
 

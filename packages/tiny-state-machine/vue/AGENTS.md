@@ -32,4 +32,4 @@ Use Vitest and colocate unit tests beside source as `*.unit.test.ts`. Prefer rea
 - cover boundaries, negative conditions, error paths, and exact observable output for every changed behavior;
 - treat coverage as a diagnostic only: coverage alone is not evidence of correctness.
 
-Do not change the core state-machine behavior here; this package adapts it. Keep Vue as an external runtime dependency.
+Do not change the core state-machine behavior here; this package adapts it. Keep Vue and the exact matching Core as external peer dependencies. Core and Vue must always share a version and release together.

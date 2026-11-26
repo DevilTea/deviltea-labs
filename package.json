@@ -11,7 +11,7 @@
 	},
 	"scripts": {
 		"build": "pnpm -r --if-present run build",
-		"check": "pnpm run build && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run publint",
+		"check": "pnpm check:versions && pnpm run build && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run publint",
 		"docs:build": "pnpm --filter docs run build",
 		"docs:dev": "pnpm --filter docs run dev",
 		"docs:preview": "pnpm --filter docs run preview",
@@ -24,7 +24,8 @@
 		"test": "pnpm run test:unit && pnpm --filter @deviltea/eslint-config run test:package && pnpm --filter @deviltea/spec-tool run test:package && pnpm --filter @deviltea/tsconfig run test:contracts",
 		"test:unit": "vitest run",
 		"typecheck": "pnpm -r --if-present run typecheck && pnpm --filter vue-temp-var run type-check",
-		"test:mutation": "stryker run"
+		"test:mutation": "stryker run",
+		"check:versions": "tsx scripts/release-package.ts verify-workspace"
 	},
 	"devDependencies": {
 		"@clack/prompts": "catalog:",

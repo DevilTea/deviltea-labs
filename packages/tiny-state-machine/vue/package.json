@@ -1,5 +1,5 @@
 {
-	"name": "@deviltea/tiny-state-machine",
+	"name": "@deviltea/tiny-state-machine-vue",
 	"type": "module",
 	"publishConfig": {
 		"access": "public"
@@ -7,11 +7,11 @@
 	"version": "0.0.5",
 	"author": "DevilTea <ch19980814@gmail.com>",
 	"license": "MIT",
-	"homepage": "https://github.com/DevilTea/deviltea-labs/tree/main/packages/tiny-state-machine#readme",
+	"homepage": "https://github.com/DevilTea/deviltea-labs/tree/main/packages/tiny-state-machine/vue#readme",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/DevilTea/deviltea-labs.git",
-		"directory": "packages/tiny-state-machine"
+		"directory": "packages/tiny-state-machine/vue"
 	},
 	"bugs": {
 		"url": "https://github.com/DevilTea/deviltea-labs/issues"
@@ -41,9 +41,15 @@
 		"typecheck:package": "tsc --project ./tsconfig.package.json --noEmit",
 		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit"
 	},
+	"peerDependencies": {
+		"@deviltea/tiny-state-machine": "workspace:*",
+		"vue": "^3.5.0"
+	},
 	"devDependencies": {
+		"@deviltea/tiny-state-machine": "workspace:*",
 		"fast-check": "catalog:",
 		"tsdown": "catalog:",
-		"vitest": "catalog:"
+		"vitest": "catalog:",
+		"vue": "catalog:"
 	}
 }

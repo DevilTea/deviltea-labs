@@ -1,5 +1,5 @@
 {
-	"name": "@deviltea/tiny-state-machine-vue",
+	"name": "@deviltea/tiny-state-machine",
 	"type": "module",
 	"publishConfig": {
 		"access": "public"
@@ -7,11 +7,11 @@
 	"version": "0.0.5",
 	"author": "DevilTea <ch19980814@gmail.com>",
 	"license": "MIT",
-	"homepage": "https://github.com/DevilTea/deviltea-labs/tree/main/packages/tiny-state-machine-vue#readme",
+	"homepage": "https://github.com/DevilTea/deviltea-labs/tree/main/packages/tiny-state-machine/core#readme",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/DevilTea/deviltea-labs.git",
-		"directory": "packages/tiny-state-machine-vue"
+		"directory": "packages/tiny-state-machine/core"
 	},
 	"bugs": {
 		"url": "https://github.com/DevilTea/deviltea-labs/issues"
@@ -21,13 +21,15 @@
 		".": {
 			"types": "./dist/index.d.mts",
 			"import": "./dist/index.mjs"
-		}
+		},
+		"./schema.json": "./schema.json"
 	},
 	"main": "dist/index.mjs",
 	"module": "dist/index.mjs",
 	"types": "dist/index.d.mts",
 	"files": [
-		"dist"
+		"dist",
+		"schema.json"
 	],
 	"engines": {
 		"node": "^22.14.0 || ^24.0.0"
@@ -41,16 +43,10 @@
 		"typecheck:package": "tsc --project ./tsconfig.package.json --noEmit",
 		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit"
 	},
-	"peerDependencies": {
-		"vue": "^3.5.0"
-	},
-	"dependencies": {
-		"@deviltea/tiny-state-machine": "workspace:*"
-	},
 	"devDependencies": {
+		"ajv": "catalog:",
 		"fast-check": "catalog:",
 		"tsdown": "catalog:",
-		"vitest": "catalog:",
-		"vue": "catalog:"
+		"vitest": "catalog:"
 	}
 }

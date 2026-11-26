@@ -45,11 +45,8 @@ if (isCancel(pkgName)) {
 const root = fileURLToPath(new URL('..', import.meta.url))
 const packageDir = join(root, 'packages', pkgDirname)
 
-await $`(rm -rf ${packageDir} || true) \
-		&& mkdir -p ${packageDir} \
-		&& mkdir -p ${join(packageDir, 'src')} \
-		&& mkdir -p ${join(packageDir, 'tests')} \
-`
+await $`mkdir ${packageDir}`
+await $`mkdir -p ${join(packageDir, 'src')} ${join(packageDir, 'tests')}`
 
 const templates = {
 	'package.json': `

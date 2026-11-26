@@ -1,0 +1,15 @@
+{
+	"extends": "@deviltea/tsconfig/node-bundler",
+	"compilerOptions": {
+		"composite": true
+	},
+	"include": [
+		"./src/index.ts",
+		"./src/**/*.unit.test.ts",
+		"./src/definition.ts",
+		"./src/graph.ts",
+		"./schema.json",
+		"./src/compiler.ts",
+		"./src/diagnostics.ts"
+	]
+}
