@@ -97,6 +97,19 @@ machine.send('done') // Logs: Transitioned from loading to finished via event 'd
 unsubscribe()
 ```
 
+## Runtime contract
+
+- The declarative machine definition is validated and copied at construction. Unknown initial states, missing targets, invalid state definitions, and outgoing transitions from explicit final states throw.
+- `machine.can(event)` tests whether the current state accepts an event. Unknown events are ignored by `send`; self-transitions are observable transitions.
+- Observers receive a read-only transition record and payload after the new state is committed. Filters combine all specified fields with AND. A target declared as `{ type: 'final' }` always yields `send: null`.
+- Nested sends are queued in FIFO order; every observer sees the current transition before the next transition runs. The outermost send drains the queue synchronously. The bound send function operates on the machine's current state, not a captured state.
+- Synchronous observer exceptions are collected and rethrown after notifications and queued work complete (one error by identity, multiple as an AggregateError). Asynchronous handlers are not awaited and must handle their own rejections.
+- Destroying during a transition defers destruction until that notification completes and discards pending events. Before-destroy observers may read state/context but cannot send or register new handlers. After-destroy observers run after cleanup. Cleanup completes even when observers throw.
+
+## Verification
+
+The workspace uses Vitest, fast-check property-based tests (generated machine graphs and event sequences), and StrykerJS mutation testing. Run `pnpm test:mutation` from the repository root; the report covers the core and Vue adapter.
+
 ## License
 
 [MIT](https://github.com/DevilTea/deviltea-labs/blob/main/packages/tiny-state-machine/LICENSE) License © 2023-PRESENT [DevilTea](https://github.com/DevilTea)

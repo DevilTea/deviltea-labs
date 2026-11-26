@@ -8,9 +8,9 @@ This ESM-only package implements the framework-agnostic finite-state-machine API
 - `src/index.unit.test.ts` is the Vitest behavioral suite; do not add a separate `tests/` tree for unit tests.
 - `tsdown.config.ts` builds `src/index.ts` to ESM plus declarations in `dist/`; `dist/` is generated and must not be edited.
 
-`createMachine(config, context?)` starts at `config.initial`. `context` may be an object, `null`, or a lazy factory. `send(event)` ignores events unavailable from the current state. A successful transition updates `currentState` before notifying `onTransition` subscribers. Subscriber payloads contain the exact `{ transition, machine, context, send }` contract; `send` must remain bound to its machine. Filters on `source`, `event`, and `target` are conjunctive when multiple fields are supplied. Filtered handlers for a target state declared with runtime `type: 'final'` receive `send: null`.
+`createMachine(config, context?)` starts at `config.initial`. `context` may be an object, `null`, or a lazy factory. `send(event)` ignores events unavailable from the current state. A successful transition updates `currentState` before notifying `onTransition` subscribers. Subscriber payloads contain the exact `{ transition, machine, context, send }` contract; `send` must remain bound to its machine. Filters on `source`, `event`, and `target` are conjunctive when multiple fields are supplied. All handlers for a target declared with `type: 'final'` receive `send: null`. Definitions are validated and snapshotted. Nested sends queue FIFO until current notification completes; synchronous errors are collected without interrupting other handlers.
 
-`destroy()` runs `onBeforeDestroyed` handlers while state/context remain readable, clears destruction registrations and internal state, marks the machine destroyed, then runs `onAfterDestroyed` handlers. Once destroyed, state/context access and operational registration/sending/destroying throw `Error('The machine has been destroyed.')`; `isDestroyed` remains readable. Unsubscribe functions are safe to call after removal or destruction.
+`destroy()` runs `onBeforeDestroyed` handlers while state/context remain readable, clears destruction registrations and internal state, marks the machine destroyed, then runs `onAfterDestroyed` handlers. Destruction requested during notification is deferred until that notification completes and pending events are discarded. Cleanup completes despite synchronous handler errors. Once destroyed, state/context access and operational registration/sending/destroying throw `Error('The machine has been destroyed.')`; `isDestroyed` remains readable. Unsubscribe functions are safe to call after removal or destruction.
 
 ## Commands
 
@@ -35,3 +35,5 @@ Use Vitest and name colocated tests `*.unit.test.ts`. Test behavior, not impleme
 - use coverage only as a diagnostic: high coverage is never sufficient evidence of correct behavior.
 
 Avoid production changes solely to make tests easier. Preserve the synchronous notification and lifecycle semantics unless the public API is intentionally changed.
+
+Use fast-check for graph and event-sequence properties, and run `pnpm test:mutation` from the workspace root. Treat surviving mutants as evidence to investigate, not a reason to test private implementation details.

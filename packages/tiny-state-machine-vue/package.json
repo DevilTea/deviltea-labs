@@ -41,10 +41,14 @@
 		"typecheck:package": "tsc --project ./tsconfig.package.json --noEmit",
 		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit"
 	},
+	"peerDependencies": {
+		"vue": "^3.5.0"
+	},
 	"dependencies": {
 		"@deviltea/tiny-state-machine": "workspace:*"
 	},
 	"devDependencies": {
+		"fast-check": "catalog:",
 		"tsdown": "catalog:",
 		"vitest": "catalog:",
 		"vue": "catalog:"
