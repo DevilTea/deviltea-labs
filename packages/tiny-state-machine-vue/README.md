@@ -25,41 +25,39 @@ pnpm add @deviltea/tiny-state-machine-vue
 
 ## Usage
 
-### Example: `useMachine`
-
-```typescript
+```ts
 import { createMachine, useMachine } from '@deviltea/tiny-state-machine-vue'
 
-// Define a simple state machine with three states: idle, loading, and finished
 const machine = createMachine({
 	initial: 'idle',
 	states: {
-		idle: {
-			on: {
-				start: 'loading',
-			},
-		},
-		loading: {
-			on: {
-				done: 'finished',
-			},
-		},
-		finished: {},
+		idle: { on: { start: 'loading' } },
+		loading: { on: { done: 'finished' } },
+		finished: { type: 'final' },
 	},
 })
-// Get a vue ref representing the current state
-const { currentState } = useMachine(machine)
 
-watch(currentState, (value) => {
-	console.log(value)
-})
+const { currentState, isDisposed, send, can, dispose } = useMachine(machine)
 
-// Transition to the next state
-machine.send('start') // The watch will log "loading"
-
-// Finish the transition
-machine.send('done') // The watch will log "finished"
+send('start')
+console.log(currentState.value) // loading
+console.log(can('done')) // true
+send('done')
+dispose()
 ```
+
+### Ownership and disposal
+
+- `currentState` and `isDisposed` are read-only computed refs.
+- `send` infers event names from the machine definition; `can` is reactive and accepts arbitrary string input.
+- By default, `useMachine(machine)` borrows an existing machine. Scope disposal unsubscribes the binding but leaves the machine alive; multiple components can share it.
+- Use `useMachine(machine, { autoDestroy: true })` when the scope exclusively owns the machine.
+- Outside an active Vue scope, call `dispose()` manually. Disposal is idempotent. External machine destruction also marks the binding disposed; its last observed state remains readable, `can` returns false, and `send` throws.
+- Vue is a peer dependency and is not bundled.
+
+### Migration
+
+Previously `autoDestroy` defaulted to true and the state ref was writable. Ownership now defaults to borrowed and state can only change through the machine. Opt in to automatic destruction for exclusively owned instances. Disposal errors are propagated instead of logged and swallowed.
 
 ## License
 

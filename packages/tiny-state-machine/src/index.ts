@@ -1,10 +1,8 @@
 type Prettify<T> = { [Key in keyof T]: T[Key] } & {}
 
-interface MachineState<StateKey extends string> {
-	on?: {
-		[Event in string]: StateKey
-	}
-}
+type MachineState<StateKey extends string>
+	= | { type?: never, on?: Record<string, StateKey> }
+		| { type: 'final', on?: Record<string, never> }
 
 export interface MachineConfig<StateKey extends string = string> {
 	id?: string
@@ -16,102 +14,171 @@ export interface MachineConfig<StateKey extends string = string> {
 
 export type MachineContext = Record<any, any> | null
 
-export type StateKeyOf<Config extends MachineConfig> = keyof Config['states']
-type SourceState<Config extends MachineConfig> = Config extends { states: infer StatesConfig }
-	? { [Key in keyof StatesConfig as StatesConfig[Key] extends { on: any } ? Key : never]: StatesConfig[Key] }
-	: never
-type SourceStateKeyOf<Config extends MachineConfig> = keyof SourceState<Config>
-type EventKeyOf<
-	Config extends MachineConfig,
-	StateKey extends SourceStateKeyOf<Config> = SourceStateKeyOf<Config>,
-> = StateKey extends StateKeyOf<Config>
-	? Config['states'][StateKey] extends infer O extends { on: any }
-		? keyof O['on']
+export type StateKeyOf<Config extends MachineConfig> = keyof Config['states'] & string
+type StateEvents<State> = State extends { type: 'final' }
+	? never
+	: State extends { on?: infer On }
+		? keyof NonNullable<On> & string
 		: never
-	: never
-type EventTargetStateKeyOf<
+
+export type EventKeyOf<
 	Config extends MachineConfig,
-	StateKey extends SourceStateKeyOf<Config>,
-	Event extends EventKeyOf<Config, StateKey>,
-> = StateKey extends StateKeyOf<Config>
-	? Event extends EventKeyOf<Config, StateKey>
-		? Config['states'][StateKey] extends infer O extends { on: any }
-			? O['on'][Event]
+	StateKey extends StateKeyOf<Config> = StateKeyOf<Config>,
+> = StateKey extends StateKeyOf<Config> ? StateEvents<Config['states'][StateKey]> : never
+
+type StateEventTarget<State, Event> = State extends { type: 'final' }
+	? never
+	: State extends { on?: infer On }
+		? Event extends keyof NonNullable<On>
+			? Extract<NonNullable<On>[Event], string>
 			: never
 		: never
-	: never
+
+type EventTargetStateKeyOf<
+	Config extends MachineConfig,
+	StateKey extends StateKeyOf<Config>,
+	Event extends EventKeyOf<Config, StateKey>,
+> = StateEventTarget<Config['states'][StateKey], Event>
 
 type AllPossibleTransitionDataOf<Config extends MachineConfig> = {
 	[StateKey in StateKeyOf<Config>]: {
 		[EventKey in EventKeyOf<Config, StateKey>]: {
-			source: StateKey
-			event: EventKey
-			target: EventTargetStateKeyOf<Config, StateKey, EventKey>
+			readonly source: StateKey
+			readonly event: EventKey
+			readonly target: EventTargetStateKeyOf<Config, StateKey, EventKey>
 		}
 	}[EventKeyOf<Config, StateKey>]
 }[StateKeyOf<Config>]
 
-type TransitionFilter<
-	Config extends MachineConfig,
-	PossibleTransitionData extends AllPossibleTransitionDataOf<Config> = AllPossibleTransitionDataOf<Config>,
-> = PossibleTransitionData extends any
-	? (
-		| Pick<PossibleTransitionData, 'source'>
-		| Pick<PossibleTransitionData, 'event'>
-		| Pick<PossibleTransitionData, 'target'>
-		| Pick<PossibleTransitionData, 'source' | 'event'>
-		| Pick<PossibleTransitionData, 'source' | 'target'>
-		| Pick<PossibleTransitionData, 'event' | 'target'>
-		| PossibleTransitionData
-		)
-	: never
+type TransitionFilter<Config extends MachineConfig> = {
+	readonly [Key in keyof RuntimeTransition]?: AllPossibleTransitionDataOf<Config>[Key]
+}
+
+type NarrowTransition<Data extends RuntimeTransition, Filter> = {
+	readonly [Key in keyof RuntimeTransition]: Data[Key] & (Filter extends Record<Key, infer Value> ? Value : string)
+}
+
 type TransitionDataOf<
 	Config extends MachineConfig,
-	Filter extends TransitionFilter<Config> = TransitionFilter<Config>,
-	PossibleTransitionData extends AllPossibleTransitionDataOf<Config> = AllPossibleTransitionDataOf<Config>,
-> = PossibleTransitionData extends Filter
-	? PossibleTransitionData
+	Filter = unknown,
+	Data extends AllPossibleTransitionDataOf<Config> = AllPossibleTransitionDataOf<Config>,
+> = Data extends RuntimeTransition
+	? NarrowTransition<Data, Filter> extends infer Narrowed extends RuntimeTransition
+		? [Narrowed['source']] extends [never] ? never
+				: [Narrowed['event']] extends [never] ? never
+						: [Narrowed['target']] extends [never] ? never : Narrowed
+		: never
 	: never
+
+type FinalStateKeyOf<Config extends MachineConfig> = {
+	[State in StateKeyOf<Config>]: Config['states'][State] extends { type: 'final' } ? State : never
+}[StateKeyOf<Config>]
+
+type PossibleFinalStateKeyOf<Config extends MachineConfig> = {
+	[State in StateKeyOf<Config>]: Extract<Config['states'][State], { type: 'final' }> extends never ? never : State
+}[StateKeyOf<Config>]
 
 type TransitionHandlerPayload<
 	Config extends MachineConfig,
 	Context extends MachineContext,
-	Filter extends TransitionFilter<Config> = TransitionFilter<Config>,
-	EventKey extends EventKeyOf<Config, TransitionDataOf<Config, Filter>['target']> = EventKeyOf<Config, TransitionDataOf<Config, Filter>['target']>,
+	Filter = unknown,
+	EventKey extends EventKeyOf<Config, Extract<TransitionDataOf<Config, Filter>['target'], StateKeyOf<Config>>> = EventKeyOf<Config, Extract<TransitionDataOf<Config, Filter>['target'], StateKeyOf<Config>>>,
 > = Prettify<
 	// Always have these properties
 	& {
-		transition: TransitionDataOf<Config, Filter>
-		machine: Machine<Config, Context>
-		context: Context
+		readonly transition: TransitionDataOf<Config, Filter>
+		readonly machine: Machine<Config, Context>
+		readonly context: Context
 	}
 	// Conditionally provide the send function
-	& { send: (event: EventKey) => void }
+	& { readonly send: [TransitionDataOf<Config, Filter>['target']] extends [FinalStateKeyOf<Config>]
+		? null
+		: ((event: EventKey) => void) | (Extract<TransitionDataOf<Config, Filter>['target'], PossibleFinalStateKeyOf<Config>> extends never ? never : null) }
 >
 type TransitionHandler<
 	Config extends MachineConfig,
 	Context extends MachineContext,
-	Filter extends TransitionFilter<Config> = TransitionFilter<Config>,
-> = (payload: TransitionHandlerPayload<Config, Context, Filter>) => any | Promise<any>
+	Filter = unknown,
+> = (payload: TransitionHandlerPayload<Config, Context, Filter>) => unknown
 
-export class Machine<
-	Config extends MachineConfig,
-	Context extends MachineContext,
-> {
-	private _config: Config
+type RuntimeTransition = Readonly<{ source: string, event: string, target: string }>
+type RuntimePayload = Readonly<{
+	transition: RuntimeTransition
+	machine: unknown
+	context: MachineContext
+	send: ((event: string) => void) | null
+}>
+type RuntimeHandler = (payload: RuntimePayload) => unknown
+interface RuntimeState { final: boolean, transitions: Map<string, string> }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function compile(config: MachineConfig) {
+	if (!isRecord(config) || !isRecord(config.states) || typeof config.initial !== 'string')
+		throw new Error('Invalid machine configuration.')
+	const states = new Map<string, RuntimeState>()
+	for (const [key, state] of Object.entries(config.states)) {
+		if (!isRecord(state) || (state.type !== undefined && state.type !== 'final'))
+			throw new Error(`Invalid state: ${key}.`)
+		const transitions = new Map<string, string>()
+		if (state.on !== undefined) {
+			if (!isRecord(state.on))
+				throw new Error(`Invalid transitions for state: ${key}.`)
+			for (const [event, target] of Object.entries(state.on)) {
+				if (typeof target !== 'string' || !Object.prototype.propertyIsEnumerable.call(config.states, target))
+					throw new Error(`Invalid transition: ${key} -> ${event}.`)
+				transitions.set(event, target)
+			}
+		}
+		if (state.type === 'final' && transitions.size > 0)
+			throw new Error(`Final state cannot have transitions: ${key}.`)
+		states.set(key, { final: state.type === 'final', transitions })
+	}
+	if (!states.has(config.initial))
+		throw new Error(`Invalid initial state: ${config.initial}.`)
+	return { initial: config.initial, states }
+}
+
+function notify<T>(handlers: Set<(value: T) => unknown>, value: T, errors: unknown[]) {
+	for (const handler of [...handlers]) {
+		if (!handlers.has(handler))
+			continue
+		try {
+			handler(value)
+		}
+		catch (error) {
+			errors.push(error)
+		}
+	}
+}
+
+function throwErrors(errors: unknown[]) {
+	if (errors.length === 1)
+		throw errors[0]
+	if (errors.length > 1)
+		throw new AggregateError(errors, 'Multiple machine handlers failed.')
+}
+
+export class Machine<Config extends MachineConfig, Context extends MachineContext> {
+	private _states: Map<string, RuntimeState>
 	private _context: Context
 	private _currentState: string
-	private _transitionHandlers = new Set<TransitionHandler<Config, Context>>()
-	private _beforeTransitionHandlers = new Set<TransitionHandler<Config, Context>>()
-	private _afterTransitionHandlers = new Set<TransitionHandler<Config, Context>>()
+	private _transitionHandlers = new Set<RuntimeHandler>()
+	private _beforeDestroyedHandlers = new Set<(machine: Machine<Config, Context>) => unknown>()
+	private _afterDestroyedHandlers = new Set<() => unknown>()
+	private _queue: string[] = []
+	private _dispatching = false
+	private _destroyRequested = false
+	private _destroying = false
 	private _isDestroyed = false
-	private _beforeDestroyedHandlers = new Set<(machine: Machine<Config, Context>) => any>()
-	private _afterDestroyedHandlers = new Set<() => any>()
 
 	constructor(config: Config, context: Context) {
-		this._config = config
+		const { initial, states } = compile(config)
+		this._states = states
 		this._context = context
-		this._currentState = config.initial
+		this._currentState = initial
 	}
 
 	private _throwIfDestroyed() {
@@ -119,64 +186,9 @@ export class Machine<
 			throw new Error('The machine has been destroyed.')
 	}
 
-	private _createTransitionHandlerPayload(transition: {
-		source: any
-		event: any
-		target: any
-	}) {
-		return {
-			transition,
-			machine: this,
-			context: this._context,
-			send: this.send.bind(this),
-		}
-	}
-
-	private _createTransitionHandler(
-		...args:
-			| [handler: ((...args: any[]) => any)]
-			| [filter: TransitionFilter<Config>, handler: ((...args: any[]) => any)]
-	) {
-		if (args.length === 1) {
-			return args[0]
-		}
-		else if (
-			args.length === 2
-		) {
-			const [
-				_filter,
-				handler,
-			] = args
-			const filter = _filter as Partial<Record<'source' | 'event' | 'target', string>>
-			return (payload: any) => {
-				if (
-					(filter.source == null || filter.source === payload.transition.source)
-					&& (filter.event == null || filter.event === payload.transition.event)
-					&& (filter.target == null || filter.target === payload.transition.target)
-				) {
-					const stateObj = this._config.states[payload.transition.target]!
-
-					if ('type' in stateObj && stateObj.type === 'final')
-						payload.send = null
-
-					return handler(payload)
-				}
-			}
-		}
-
-		throw new Error('Invalid arguments.')
-	}
-
-	private _notifyTransitionHandlers(payload: any) {
-		this._transitionHandlers.forEach(fn => fn(payload))
-	}
-
-	private _notifyBeforeDestroyedHandlers() {
-		this._beforeDestroyedHandlers.forEach(fn => fn(this))
-	}
-
-	private _notifyAfterDestroyedHandlers() {
-		this._afterDestroyedHandlers.forEach(fn => fn())
+	private _throwIfDestroying() {
+		if (this._destroying)
+			throw new Error('The machine is being destroyed.')
 	}
 
 	get context() {
@@ -193,100 +205,131 @@ export class Machine<
 		return this._isDestroyed
 	}
 
-	/**
-	 * Add a handler that will be called when the transition is triggered.
-	 */
+	/** Observe committed transitions in registration order. */
 	onTransition(handler: TransitionHandler<Config, Context>): () => void
-	/**
-	 * Add a handler that will be called when the transition is triggered and the specified "filter" is matched.
-	 */
-	onTransition<Filter extends TransitionFilter<Config>>(filter: Filter, handler: TransitionHandler<Config, Context, Filter>): () => void
-	onTransition(
-		...args:
-			| [handler: ((...args: any[]) => any)]
-			| [filter: TransitionFilter<Config>, handler: ((...args: any[]) => any)]
-	) {
+	onTransition<const Filter extends TransitionFilter<Config>>(
+		filter: Filter & (TransitionDataOf<Config, Filter> extends never ? never : unknown),
+		handler: TransitionHandler<Config, Context, Filter>,
+	): () => void
+	onTransition(...args: [handler: (...args: any[]) => unknown] | [filter: Partial<RuntimeTransition>, handler: (...args: any[]) => unknown]): () => void {
 		this._throwIfDestroyed()
-
-		const handler = this._createTransitionHandler(...args)
+		this._throwIfDestroying()
+		const filter = args.length === 2 ? { ...args[0] } : undefined
+		const callback = args.length === 2 ? args[1] : args[0]
+		const handler: RuntimeHandler = (payload) => {
+			const { source, event, target } = payload.transition
+			if (filter === undefined || (
+				(filter.source == null || filter.source === source)
+				&& (filter.event == null || filter.event === event)
+				&& (filter.target == null || filter.target === target)
+			)) {
+				return callback(payload)
+			}
+			return undefined
+		}
 		this._transitionHandlers.add(handler)
 		return () => {
 			this._transitionHandlers.delete(handler)
 		}
 	}
 
-	/**
-	 * **[Note]:** Generally, you should not call this method directly. Instead, you should call the `send` function provided by the `onStateChanged` handler.
-	 *
-	 * Send an event to the machine, and transit to the target state if the event is matched.
-	 */
-	send(event: EventKeyOf<Config>) {
+	/** Whether the current state accepts an event. */
+	can(event: string): event is EventKeyOf<Config> {
 		this._throwIfDestroyed()
-
-		const target = (this._config.states[this._currentState] as any).on?.[event] as string | undefined
-
-		if (target == null)
-			return
-
-		const payload = this._createTransitionHandlerPayload({
-			source: this._currentState,
-			event,
-			target,
-		})
-
-		this._currentState = target
-		this._notifyTransitionHandlers(payload)
+		return this._states.get(this._currentState)!.transitions.has(event)
 	}
 
-	/**
-	 * Add a handler that will be called before the machine is destroyed.
-	 */
-	onBeforeDestroyed(handler: (machine: Machine<Config, Context>) => any) {
+	/** Nested sends are queued until all observers have seen the current transition. */
+	send(event: EventKeyOf<Config>): void {
 		this._throwIfDestroyed()
+		this._throwIfDestroying()
+		this._queue.push(event)
+		if (this._dispatching)
+			return
+
+		const errors: unknown[] = []
+		this._dispatching = true
+		try {
+			for (let index = 0; index < this._queue.length; index++) {
+				const next = this._queue[index]!
+				const source = this._currentState
+				const target = this._states.get(source)!.transitions.get(next)
+				if (target === undefined)
+					continue
+				this._currentState = target
+				const payload: RuntimePayload = Object.freeze({
+					transition: Object.freeze({ source, event: next, target }),
+					machine: this,
+					context: this._context,
+					send: this._states.get(target)!.final ? null : this.send.bind(this) as (event: string) => void,
+				})
+				notify(this._transitionHandlers, payload, errors)
+				if (this._destroyRequested) {
+					this._destroy(errors)
+					break
+				}
+			}
+		}
+		finally {
+			this._queue.length = 0
+			this._dispatching = false
+		}
+		throwErrors(errors)
+	}
+
+	onBeforeDestroyed(handler: (machine: Machine<Config, Context>) => unknown) {
+		this._throwIfDestroyed()
+		this._throwIfDestroying()
 		this._beforeDestroyedHandlers.add(handler)
 		return () => {
 			this._beforeDestroyedHandlers.delete(handler)
 		}
 	}
 
-	/**
-	 * Add a handler that will be called after the machine is destroyed.
-	 */
-	onAfterDestroyed(handler: () => any) {
+	onAfterDestroyed(handler: () => unknown) {
 		this._throwIfDestroyed()
+		this._throwIfDestroying()
 		this._afterDestroyedHandlers.add(handler)
 		return () => {
 			this._afterDestroyedHandlers.delete(handler)
 		}
 	}
 
-	/**
-	 * Destroy the machine. After calling this method, the machine will not be able to transit to any state.
-	 */
+	private _destroy(errors: unknown[]) {
+		this._destroying = true
+		notify(this._beforeDestroyedHandlers, this, errors)
+		this._beforeDestroyedHandlers.clear()
+		this._transitionHandlers.clear()
+		this._states.clear()
+		this._context = null as Context
+		this._isDestroyed = true
+		notify(this._afterDestroyedHandlers, undefined, errors)
+		this._afterDestroyedHandlers.clear()
+	}
+
+	/** Destroy after the active notification, discarding any remaining queued events. */
 	destroy() {
 		this._throwIfDestroyed()
-		this._notifyBeforeDestroyedHandlers()
-		this._beforeDestroyedHandlers.clear()
-		this._config = null as never
-		this._context = null as never
-		this._currentState = null as never
-		this._beforeTransitionHandlers.clear()
-		this._afterTransitionHandlers.clear()
-		this._isDestroyed = true
-		this._notifyAfterDestroyedHandlers()
-		this._afterDestroyedHandlers.clear()
+		this._throwIfDestroying()
+		if (this._dispatching) {
+			this._destroyRequested = true
+			return
+		}
+		const errors: unknown[] = []
+		this._destroy(errors)
+		throwErrors(errors)
 	}
 }
 
 export function createMachine<
-	Config extends MachineConfig<State>,
+	const Config extends MachineConfig<State>,
 	State extends keyof Config['states'] & string,
-	Context extends MachineContext = null,
->(config: Config, context?: Context | (() => Context)) {
-	const theContext = context == null
-		? null
-		: typeof context === 'function'
-			? context()
-			: context
-	return new Machine<Config, Context>(config, theContext)
+>(config: Config, context?: undefined): Machine<Config, null>
+export function createMachine<
+	const Config extends MachineConfig<State>,
+	State extends keyof Config['states'] & string,
+	Context extends MachineContext,
+>(config: Config, context: Context | (() => Context)): Machine<Config, Context>
+export function createMachine(config: MachineConfig, context?: MachineContext | (() => MachineContext)): any {
+	return new Machine(config, typeof context === 'function' ? context() : context ?? null)
 }

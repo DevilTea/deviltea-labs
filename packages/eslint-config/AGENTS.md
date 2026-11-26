@@ -36,3 +36,5 @@ The root `pnpm test:unit` also discovers `src/index.unit.test.ts`. `test:coverag
 
 - `eslint.config.js` imports `dist/index.mjs`; run `pnpm build` before linting this package.
 - Versions come from the monorepo catalog in `pnpm-workspace.yaml`. Do not add a standalone lockfile or describe this package as a separate workspace.
+
+The supported TypeScript peer range is `>=6.0.0 <7.0.0` (optional for JavaScript-only use). The packed consumer smoke test defaults to the minimum stable TypeScript 6 and minimum ESLint 10.4 release; CI also tests the latest supported versions. Preserve strict peer checking.

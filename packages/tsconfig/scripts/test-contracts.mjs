@@ -6,7 +6,7 @@ import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const typescriptVersion = readArgument('--typescript') ?? '6.0.3'
+const typescriptVersion = readArgument('--typescript') ?? '6.0.2'
 const workspace = await mkdtemp(join(tmpdir(), 'deviltea-tsconfig-contracts-'))
 
 const nodeTypes = {

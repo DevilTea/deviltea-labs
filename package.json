@@ -6,6 +6,9 @@
 	"packageManager": "pnpm@10.34.4",
 	"description": "The DevilTea Labs package monorepo.",
 	"license": "MIT",
+	"engines": {
+		"node": "^22.22.1 || ^24.11.0"
+	},
 	"scripts": {
 		"build": "pnpm -r --if-present run build",
 		"check": "pnpm run build && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run publint",
@@ -20,12 +23,15 @@
 		"release:tag": "tsx scripts/release.ts tag",
 		"test": "pnpm run test:unit && pnpm --filter @deviltea/eslint-config run test:package && pnpm --filter @deviltea/spec-tool run test:package && pnpm --filter @deviltea/tsconfig run test:contracts",
 		"test:unit": "vitest run",
-		"typecheck": "pnpm -r --if-present run typecheck && pnpm --filter vue-temp-var run type-check"
+		"typecheck": "pnpm -r --if-present run typecheck && pnpm --filter vue-temp-var run type-check",
+		"test:mutation": "stryker run"
 	},
 	"devDependencies": {
 		"@clack/prompts": "catalog:",
 		"@deviltea/eslint-config": "workspace:^",
 		"@deviltea/tsconfig": "workspace:^",
+		"@stryker-mutator/core": "catalog:",
+		"@stryker-mutator/vitest-runner": "catalog:",
 		"@types/node": "catalog:",
 		"@vitest/coverage-v8": "catalog:",
 		"bumpp": "catalog:",

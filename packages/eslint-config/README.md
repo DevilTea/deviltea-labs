@@ -12,13 +12,14 @@ This package keeps Antfu's composable factory API while applying DevilTea's proj
 | --- | --- |
 | Node.js | `^22.14.0 \|\| ^24.0.0` |
 | ESLint | `^10.4.0` |
+| TypeScript (when used) | `>=6.0.0 <7.0.0` |
 | Configuration format | ESLint flat config |
 
 TypeScript and Vue support are enabled by default. They can be disabled explicitly when a project does not need them.
 
 ## Opinionated defaults
 
-The package inherits all defaults from `@antfu/eslint-config@9.1.0` and adds the following rules.
+The package inherits all defaults from `@antfu/eslint-config@9.5.1` and adds the following rules.
 
 ### Stylistic
 
@@ -46,8 +47,10 @@ User-provided nested options are preserved, and user rule overrides take precede
 ## Installation
 
 ```bash
-pnpm add -D eslint@^10.4.0 @deviltea/eslint-config
+pnpm add -D eslint@^10.4.0 typescript@^6 @deviltea/eslint-config
 ```
+
+TypeScript 5.x is no longer supported by the current config; older consumers should retain a compatible previously resolved toolchain. JavaScript-only projects can disable TypeScript support.
 
 ## Usage
 

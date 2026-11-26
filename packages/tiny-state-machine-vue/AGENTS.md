@@ -8,7 +8,7 @@ This ESM-only Vue adapter wraps `@deviltea/tiny-state-machine` without owning tr
 - `src/index.unit.test.ts` is the Vitest behavioral suite; do not add a separate `tests/` tree for unit tests.
 - `tsdown.config.ts` emits ESM and declarations to `dist/`, leaving `vue` external (`neverBundle`). Do not edit generated `dist/` files.
 
-`useMachine` creates a Vue `Ref` initialized from `machine.currentState` and keeps it synchronized after core transitions. `autoDestroy` defaults to `true`: it registers an `onScopeDispose` callback that destroys the machine and catches/logs disposal errors with `console.error`. Passing `{ autoDestroy: false }` must not register disposal or destroy the machine. Preserve core exports as direct re-exports; the adapter must not fork or wrap their runtime identity.
+`useMachine` returns read-only reactive state and disposal status, typed `send`, reactive `can`, and idempotent `dispose`. The default borrows the machine; an active Vue scope unsubscribes on disposal, with explicit `autoDestroy: true` for exclusively owned instances. Outside a scope the caller must dispose manually. External destruction marks the binding disposed. Preserve core exports as direct re-exports.
 
 ## Commands
 
@@ -25,9 +25,9 @@ pnpm exec eslint src
 
 ## Unit-test standard
 
-Use Vitest and colocate unit tests beside source as `*.unit.test.ts`. Mock/control Vue scope APIs where needed so tests verify registration and execute dispose callbacks deterministically. Test behavior rather than lines executed, and make each test reject semantically similar but wrong implementations:
+Use Vitest and colocate unit tests beside source as `*.unit.test.ts`. Prefer real Vue effect scopes and reactive tests; use focused mocks for unsubscribe contracts. Test behavior rather than lines executed, and make each test reject semantically similar but wrong implementations:
 
-- assert exact ref initial values, transition synchronization, export identity, calls, and logged error values;
+- assert exact ref initial values, transition synchronization, export identity, calls, and error values;
 - cover default/explicit/disabled `autoDestroy`, successful and failing disposal, and inverse paths;
 - cover boundaries, negative conditions, error paths, and exact observable output for every changed behavior;
 - treat coverage as a diagnostic only: coverage alone is not evidence of correctness.
