@@ -1,97 +1,52 @@
+import type { CompiledGraph } from './compiler'
+import type { Diagnostic } from './diagnostics'
 import type { MachineConfig } from './index'
-import * as v from 'valibot'
+import { compileDefinition } from './compiler'
 
-const string = v.string()
-const stateType = v.optional(v.literal('final'))
-const optionalId = v.optional(string)
-const transitionsShape = v.record(string, string)
+export type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T
 
-// The portable schema describes JSON shape. Cross-reference checks belong to
-// the runtime schema; JSON Schema cannot express arbitrary sibling key lookup.
-export const machineConfigShape = v.object({
-	id: optionalId,
-	initial: string,
-	states: v.record(string, v.union([
-		v.object({ type: v.optional(v.never()), on: v.optional(transitionsShape) }),
-		v.object({ type: v.literal('final'), on: v.optional(v.record(string, v.never())) }),
-	])),
-})
+// A private nominal type and runtime identity registry prevent a structural
+// object with valid: true from becoming an executable definition.
+declare const definitionBrand: unique symbol
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value)
+export interface ValidDefinition<Config extends MachineConfig = MachineConfig> {
+	readonly valid: true
+	readonly data: DeepReadonly<Config>
+	readonly diagnostics: readonly Diagnostic[]
+	readonly [definitionBrand]: Config
 }
 
-function pathItem(input: object, key: string): v.ObjectPathItem {
-	return { type: 'object', origin: 'value', input: input as Record<string, unknown>, key, value: Reflect.get(input, key) }
+export interface InvalidDefinition {
+	readonly valid: false
+	readonly data: unknown
+	readonly diagnostics: readonly Diagnostic[]
 }
 
-/** Full validation without record parsing that would discard reserved object keys. */
-export const machineConfigSchema = v.pipe(
-	v.custom<Record<string, unknown>>(isRecord, 'Invalid machine configuration.'),
-	v.rawCheck(({ dataset, addIssue }) => {
-		if (!dataset.typed)
-			return
-		const config = dataset.value
-		if (!isRecord(config.states) || !v.is(string, config.initial) || !v.is(optionalId, config.id)) {
-			addIssue({ message: 'Invalid machine configuration.' })
-			return
-		}
-		const statesPath = pathItem(config, 'states')
-		for (const [key, state] of Object.entries(config.states)) {
-			const statePath: [v.ObjectPathItem, ...v.ObjectPathItem[]] = [statesPath, pathItem(config.states, key)]
-			if (!isRecord(state) || !v.is(stateType, state.type)) {
-				addIssue({ message: `Invalid state: ${key}.`, path: statePath })
-				continue
-			}
-			if (state.on !== undefined) {
-				const onPath: [v.ObjectPathItem, ...v.ObjectPathItem[]] = [...statePath, pathItem(state, 'on')]
-				if (!isRecord(state.on)) {
-					addIssue({ message: `Invalid transitions for state: ${key}.`, path: onPath })
-					continue
-				}
-				for (const [event, target] of Object.entries(state.on)) {
-					if (!v.is(string, target) || !Object.prototype.propertyIsEnumerable.call(config.states, target)) {
-						addIssue({ message: `Invalid transition: ${key} -> ${event}.`, path: [...onPath, pathItem(state.on, event)] })
-					}
-				}
-				if (state.type === 'final' && Object.keys(state.on).length > 0)
-					addIssue({ message: `Final state cannot have transitions: ${key}.`, path: onPath })
-			}
-		}
-		if (!Object.prototype.propertyIsEnumerable.call(config.states, config.initial))
-			addIssue({ message: `Invalid initial state: ${config.initial}.`, path: [pathItem(config, 'initial')] })
-	}),
-	v.transform(config => config as unknown as MachineConfig),
-)
+export type Definition<Config extends MachineConfig = MachineConfig> = ValidDefinition<Config> | InvalidDefinition
 
-export function safeParseMachineConfig(input: unknown) {
-	return v.safeParse(machineConfigSchema, input)
+const graphs = new WeakMap<object, CompiledGraph>()
+
+/** Validate and compile once; invalid input becomes diagnostics, not an exception. */
+export function defineMachine<const Config extends MachineConfig<State>, State extends keyof Config['states'] & string>(input: Config): Definition<Config>
+export function defineMachine(input: unknown): Definition
+export function defineMachine(input: unknown): Definition {
+	const { data, diagnostics, graph } = compileDefinition(input)
+	if (!graph)
+		return Object.freeze({ valid: false, data, diagnostics: Object.freeze(diagnostics) })
+	const definition = Object.freeze({ valid: true, data, diagnostics: Object.freeze(diagnostics) }) as ValidDefinition
+	graphs.set(definition, graph)
+	return definition
 }
 
-export function parseMachineConfig(input: unknown): MachineConfig {
-	return v.parse(machineConfigSchema, input)
+/** Internal identity lookup; no validation or recompilation at use sites. */
+export function getCompiledGraph(definition: unknown): CompiledGraph {
+	const graph = graphs.get(definition as object)
+	if (!graph)
+		throw new Error('Expected a valid definition produced by defineMachine().')
+	return graph
 }
 
-/** Validate a definition and preserve its exact inferred type and identity. */
-export function defineMachine<
-	const Config extends MachineConfig<State>,
-	State extends keyof Config['states'] & string,
->(config: Config): Config {
-	parseMachineConfig(config)
-	return config
-}
-
-interface RuntimeState { final: boolean, transitions: Map<string, string> }
-
-/** Shared compiler: every consumer validates before snapshotting own entries. */
-export function compile(config: MachineConfig) {
-	const validated = parseMachineConfig(config)
-	const states = new Map<string, RuntimeState>()
-	for (const [key, state] of Object.entries(validated.states)) {
-		states.set(key, {
-			final: state.type === 'final',
-			transitions: new Map(Object.entries(state.on ?? {})),
-		})
-	}
-	return { initial: validated.initial, states }
+/** Fail fast if a definition is invalid or not produced by this package instance. */
+export function assertValidDefinition<Config extends MachineConfig>(definition: Definition<Config>): asserts definition is ValidDefinition<Config> {
+	getCompiledGraph(definition)
 }

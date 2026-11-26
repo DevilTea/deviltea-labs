@@ -6,6 +6,8 @@
 	"include": [
 		"./src/index.ts",
 		"./src/definition.ts",
-		"./src/graph.ts"
+		"./src/graph.ts",
+		"./src/compiler.ts",
+		"./src/diagnostics.ts"
 	]
 }

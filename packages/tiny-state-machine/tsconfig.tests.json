@@ -8,6 +8,8 @@
 		"./src/**/*.unit.test.ts",
 		"./src/definition.ts",
 		"./src/graph.ts",
-		"./schema.json"
+		"./schema.json",
+		"./src/compiler.ts",
+		"./src/diagnostics.ts"
 	]
 }

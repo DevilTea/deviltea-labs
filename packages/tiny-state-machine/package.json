@@ -41,17 +41,12 @@
 		"test": "vitest run --config vitest.config.ts",
 		"typecheck": "pnpm typecheck:package && pnpm typecheck:test",
 		"typecheck:package": "tsc --project ./tsconfig.package.json --noEmit",
-		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit",
-		"schema:generate": "tsx scripts/generate-schema.ts"
-	},
-	"dependencies": {
-		"valibot": "catalog:"
+		"typecheck:test": "tsc --project ./tsconfig.tests.json --noEmit"
 	},
 	"devDependencies": {
-		"@valibot/to-json-schema": "catalog:",
+		"ajv": "catalog:",
 		"fast-check": "catalog:",
 		"tsdown": "catalog:",
-		"tsx": "catalog:",
 		"vitest": "catalog:"
 	}
 }

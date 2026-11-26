@@ -31,8 +31,8 @@ catalog:
   '@stryker-mutator/core': 10.1.1
   '@stryker-mutator/vitest-runner': 10.1.1
   '@types/node': ^24.19.2
-  '@valibot/to-json-schema': ^1.8.0
   '@vitest/coverage-v8': 5.1.1
+  ajv: ^8.20.0
   bumpp: 12.3.0
   eslint: 10.15.0
   fast-check: ^4.11.0
@@ -45,7 +45,6 @@ catalog:
   tsx: ^4.23.15
   typescript: ^6.0.3
   unplugin-vue: ^8.0.1
-  valibot: ^1.5.0
   vite: ^8.3.8
   vitepress: 2.0.0-alpha.20
   vitest: 5.1.1

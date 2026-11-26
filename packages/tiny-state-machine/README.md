@@ -30,10 +30,10 @@ Here is an example of how to create a simple state machine using `@deviltea/tiny
 ### Example: Basic State Machine
 
 ```typescript
-import { createMachine } from '@deviltea/tiny-state-machine'
+import { assertValidDefinition, createMachine, defineMachine } from '@deviltea/tiny-state-machine'
 
 // Define a simple state machine with three states: idle, loading, and finished
-const machine = createMachine({
+const definition = defineMachine({
 	initial: 'idle',
 	states: {
 		idle: {
@@ -49,6 +49,8 @@ const machine = createMachine({
 		finished: {},
 	},
 })
+assertValidDefinition(definition)
+const machine = createMachine(definition)
 
 console.log(machine.currentState) // "idle"
 
@@ -66,9 +68,9 @@ console.log(machine.currentState) // "finished"
 You can also add handlers that will be called during state transitions.
 
 ```typescript
-import { createMachine } from '@deviltea/tiny-state-machine'
+import { assertValidDefinition, createMachine, defineMachine } from '@deviltea/tiny-state-machine'
 
-const machine = createMachine({
+const definition = defineMachine({
 	initial: 'idle',
 	states: {
 		idle: {
@@ -84,6 +86,8 @@ const machine = createMachine({
 		finished: {},
 	},
 })
+assertValidDefinition(definition)
+const machine = createMachine(definition)
 
 const unsubscribe = machine.onTransition(({ transition }) => {
 	console.log(
@@ -99,10 +103,10 @@ unsubscribe()
 
 ## Definitions and pure graph analysis
 
-A definition remains a flat JSON-compatible adjacency map. Define it separately from its runtime instances:
+The configuration remains a flat JSON-compatible adjacency map. A Definition is the result of validating and compiling that configuration, separate from its runtime instances:
 
 ```ts
-import { createMachine, defineMachine, getReachableStates, getTransitions, transition } from '@deviltea/tiny-state-machine'
+import { assertValidDefinition, createMachine, defineMachine, getReachableStates, getTransitions, transition } from '@deviltea/tiny-state-machine'
 
 const definition = defineMachine({
 	initial: 'idle',
@@ -114,6 +118,7 @@ const definition = defineMachine({
 	},
 })
 
+assertValidDefinition(definition)
 const first = createMachine(definition)
 const second = createMachine(definition)
 first.send('start')
@@ -125,45 +130,54 @@ transition(definition, 'idle', 'start') // 'running'
 transition(definition, 'done', 'start') // undefined
 ```
 
-`defineMachine` validates the configuration and returns the original object with its exact inferred TypeScript type. It does not freeze, clone, or start a machine. Treat definitions as data; each runtime instance independently validates and snapshots the graph. Graph helpers validate the current input on every call and do not mutate it or execute callbacks.
+`defineMachine(input)` accepts both typed configurations and unknown data, and returns a discriminated union `Definition<Config> = ValidDefinition<Config> | InvalidDefinition`. Invalid data does not throw during definition. For valid definitions, `data` is an independent deeply frozen snapshot with preserved literal types, and `diagnostics` is immutable. Invalid definitions retain the original input as `data: unknown` for inspection or editing; changing it does not revalidate the result.
+
+Both `createMachine` (including the public `Machine` constructor) and graph helpers accept only a genuine `ValidDefinition`. Narrow with `if (definition.valid)` or use `assertValidDefinition(definition)` to throw and narrow. They perform a constant-time internal identity lookup, not structural revalidation. A copy, deserialized wrapper or definition from another installed copy of the package is not executable; call `defineMachine` again with its configuration data.
+
+The compiled graph is private and shared by the instances and analysis helpers. Destroying one machine releases only its own reference and resources, not the graph. Graph helpers do not execute observers or mutate the graph.
 
 | Pure function | Result |
 | --- | --- |
-| `getStates(config)` | State keys |
-| `getEvents(config, state)` | Events accepted by the specified state |
-| `getTransitions(config)` | All typed source/event/target records, including self-transitions |
-| `transition(config, state, event)` | Target state, or `undefined` if the event is unavailable |
-| `getReachableStates(config, start?)` | Reachable states, including the start, in breadth-first discovery order |
-| `getUnreachableStates(config, start?)` | States not reachable from the start |
-| `getFinalStates(config)` | Explicitly declared final states |
-| `getDeadEndStates(config)` | Non-final states with no outgoing edges, including unreachable ones |
+| `getStates(definition)` | State keys |
+| `getEvents(definition, state)` | Events accepted by the specified state |
+| `getTransitions(definition)` | All typed source/event/target records, including self-transitions |
+| `transition(definition, state, event)` | Target state, or `undefined` if the event is unavailable |
+| `getReachableStates(definition, start?)` | Reachable states, including the start, in breadth-first discovery order |
+| `getUnreachableStates(definition, start?)` | States not reachable from the start |
+| `getFinalStates(definition)` | Explicitly declared final states |
+| `getDeadEndStates(definition)` | Non-final states with no outgoing edges, including unreachable ones |
 
-The default traversal start is the initial state. Unknown source states throw. Other lists follow JavaScript own-key enumeration order. Cycles, unreachable states, and non-final dead ends are valid; analysis reports them rather than rejecting the definition. Each helper compiles its input once per call (linear in the size of the graph); the running machine retains its own indexed graph.
+The default traversal start is the initial state. Unknown source states throw. Other lists follow JavaScript own-key enumeration order. Cycles, unreachable states, and non-final dead ends are valid; analysis reports them rather than rejecting the definition. Graph queries operate on the compiled graph without recompilation. Single transition resolution is a map lookup; traversal is linear in the reachable nodes and edges.
 
 ## Validation and JSON Schema
 
 ```ts
-import { machineConfigSchema, parseMachineConfig, safeParseMachineConfig } from '@deviltea/tiny-state-machine'
+import { createMachine, defineMachine } from '@deviltea/tiny-state-machine'
 
-const result = safeParseMachineConfig(JSON.parse(jsonText))
-if (result.success) {
-	const machine = createMachine(result.output)
+const definition = defineMachine(JSON.parse(jsonText))
+if (definition.valid) {
+	const machine = createMachine(definition)
 }
 else {
-	for (const issue of result.issues) {
-		console.error(issue.message, issue.path)
+	for (const diagnostic of definition.diagnostics) {
+		console.error(diagnostic.code, diagnostic.message, diagnostic.path)
 	}
 }
 ```
 
-- `machineConfigSchema` is a Valibot schema (also usable through Standard Schema). `parseMachineConfig(input)` throws a Valibot ValiError; `safeParseMachineConfig(input)` returns structured issues without throwing for malformed JSON data. Successful parsing preserves the input object; it does not sanitize or clone it.
-- Validation checks the declared shape, string IDs if present, existing initial and target states, and forbids outgoing transitions from explicit final states. Extra fields are not interpreted by the FSM. The runtime and graph helpers use the same validation. Own enumerable state/event keys, including empty strings and reserved object names, are preserved.
-- A portable draft-07 JSON Schema is shipped at `@deviltea/tiny-state-machine/schema.json` (package-relative JSON file). Use it for editor autocomplete and structural validation. JSON Schema cannot verify that a dynamic initial or target string names an existing state; use the Valibot schema for those semantic checks. Regenerate the JSON file with `pnpm schema:generate` from this package; a test detects schema drift.
-- Valibot is a runtime dependency; its JSON Schema converter is development-only.
+Diagnostics have stable `code`, `severity`, `message`, and a string-segment `path` (not a dot-separated path). Currently all diagnostics are errors; cycles, unreachable states, and non-final dead ends remain valid and are reported only by explicit graph queries.
+
+Validation checks the declared shape, string IDs if present, existing initial and target states, and forbids outgoing transitions from explicit final states. All own enumerable state/event keys (including empty strings and reserved object names) are preserved. Additional JSON-compatible fields are snapshotted but not interpreted by the FSM. The compiler accepts plain objects (including null-prototype objects), dense arrays, JSON primitives, and optional undefined values. It rejects accessors, cycles in the input data, exotic objects, enumerable symbol keys, and unsupported values rather than silently losing data or invoking getters. Non-enumerable fields are not definition data. The JSON input contract is not a general JavaScript object-cloning contract.
+
+A portable draft-07 JSON Schema is shipped at `@deviltea/tiny-state-machine/schema.json`. Use it for editor autocomplete and structural validation. JSON Schema cannot verify that a dynamic initial or target string names an existing state; use `defineMachine` for those semantic checks. The schema is maintained directly, with Ajv/fast-check contract tests comparing its structural acceptance to the compiler. The core has no runtime dependencies.
+
+### Migration from raw config construction
+
+Previously `createMachine(rawConfig)` and `new Machine(rawConfig, context)` accepted unvalidated configurations. First call `defineMachine(rawConfig)`, check `valid` (or assert it), then pass the resulting definition. To edit a valid configuration, create and validate new data rather than mutate the snapshot. Persist or transmit `definition.data`, not the definition wrapper.
 
 ## Runtime contract
 
-- The declarative machine definition is validated and copied at construction. Unknown initial states, missing targets, invalid state definitions, and outgoing transitions from explicit final states throw.
+- Only genuine valid definitions are accepted; no configuration validation or compilation occurs during construction. Context factories are not invoked for invalid or forged definitions.
 - `machine.can(event)` tests whether the current state accepts an event. Unknown events are ignored by `send`; self-transitions are observable transitions.
 - Observers receive a read-only transition record and payload after the new state is committed. Filters combine all specified fields with AND. A target declared as `{ type: 'final' }` always yields `send: null`.
 - Nested sends are queued in FIFO order; every observer sees the current transition before the next transition runs. The outermost send drains the queue synchronously. The bound send function operates on the machine's current state, not a captured state.
@@ -172,7 +186,7 @@ else {
 
 ## Verification
 
-The workspace uses Vitest, fast-check property-based tests (generated machine graphs and event sequences), and StrykerJS mutation testing. Run `pnpm test:mutation` from the repository root; the report covers the core and Vue adapter.
+The workspace uses Vitest, fast-check property-based tests (generated machine graphs, event sequences, and JSON schema contract cases), Ajv as an independent structural validator, and StrykerJS mutation testing. Run `pnpm test:mutation` from the repository root; the report covers the core and Vue adapter.
 
 ## License
 

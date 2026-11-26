@@ -1,7 +1,7 @@
 import type { MachineConfig } from './index'
 import * as fc from 'fast-check'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
-import { createMachine, Machine } from './index'
+import { assertValidDefinition, createMachine, defineMachine, Machine } from './index'
 
 const workflow = {
 	initial: 'idle',
@@ -11,6 +11,9 @@ const workflow = {
 		done: { type: 'final' },
 	},
 } as const
+
+const workflowDefinition = defineMachine(workflow)
+assertValidDefinition(workflowDefinition)
 
 const properties = { numRuns: 200, seed: 20261126 }
 const stateKey = fc.oneof(fc.string({ maxLength: 10 }), fc.constantFrom('', '__proto__', 'toString', 'constructor', 'hasOwnProperty'))
@@ -45,8 +48,10 @@ const graph = fc.uniqueArray(stateKey, { minLength: 1, maxLength: 8 })
 
 describe('state transition properties', () => {
 	it('matches an independent edge-list model, including notification and filter semantics', () => fc.assert(fc.property(graph, ({ config, sequence, edges, keys, filter }) => {
-		const machine = createMachine(config)
-		const other = createMachine(config)
+		const definition = defineMachine(config)
+		assertValidDefinition(definition)
+		const machine = createMachine(definition)
+		const other = createMachine(definition)
 		const seen: unknown[] = []
 		const filtered: unknown[] = []
 		const expected: unknown[] = []
@@ -95,8 +100,8 @@ describe('state transition properties', () => {
 	}), properties))
 
 	it('processes nested events in FIFO order for every observer', () => fc.assert(fc.property(fc.array(fc.constantFrom('start', 'finish', 'retry', 'cancel', 'skip', 'invalid'), { maxLength: 40 }), (events) => {
-		const machine = createMachine(workflow)
-		const reference = createMachine(workflow)
+		const machine = createMachine(workflowDefinition)
+		const reference = createMachine(workflowDefinition)
 		const expected: unknown[] = []
 		const observed: unknown[] = []
 		reference.onTransition(({ transition }) => expected.push(transition))
@@ -129,55 +134,42 @@ describe('configuration and context', () => {
 	it('supports context identity, a factory, and absent context', () => {
 		const context = { count: 1 }
 		const factory = vi.fn(() => context)
-		expect(createMachine(workflow, context).context)
+		expect(createMachine(workflowDefinition, context).context)
 			.toBe(context)
-		expect(createMachine(workflow, factory).context)
+		expect(createMachine(workflowDefinition, factory).context)
 			.toBe(context)
 		expect(factory)
 			.toHaveBeenCalledExactlyOnceWith()
-		expect(createMachine(workflow).context)
+		expect(createMachine(workflowDefinition).context)
 			.toBeNull()
-		expect(createMachine(workflow, undefined).context)
+		expect(createMachine(workflowDefinition, undefined).context)
 			.toBeNull()
-		expect(createMachine(workflow, null).context)
+		expect(createMachine(workflowDefinition, null).context)
 			.toBeNull()
-	})
-
-	it.each([
-		[null, 'Invalid machine configuration.'],
-		[[], 'Invalid machine configuration.'],
-		[{ initial: 'a', states: [] }, 'Invalid machine configuration.'],
-		[{ initial: 1, states: {} }, 'Invalid machine configuration.'],
-		[{ initial: 'missing', states: { a: {} } }, 'Invalid initial state: missing.'],
-		[{ initial: 'a', states: { a: null } }, 'Invalid state: a.'],
-		[{ initial: 'a', states: { a: 'not an object' } }, 'Invalid state: a.'],
-		[{ initial: 'a', states: { a: { type: 'other' } } }, 'Invalid state: a.'],
-		[{ initial: 'a', states: { a: { on: [] } } }, 'Invalid transitions for state: a.'],
-		[{ initial: 'a', states: { a: { on: { go: 1 } } } }, 'Invalid transition: a -> go.'],
-		[{ initial: 'a', states: { a: { on: { go: 1 } }, 1: {} } }, 'Invalid transition: a -> go.'],
-		[{ initial: 'a', states: { a: { on: { go: 'toString' } } } }, 'Invalid transition: a -> go.'],
-		[{ initial: 'a', states: { a: { type: 'final', on: { go: 'a' } } } }, 'Final state cannot have transitions: a.'],
-	])('rejects invalid data at the public runtime boundary: %j', (config, message) => {
-		expect(() => new Machine(config as never, null))
-			.toThrow(message)
 	})
 
 	it('snapshots the graph independently of subsequent config mutations', () => {
 		const config: MachineConfig = { initial: 'a', states: { a: { on: { go: 'b' } }, b: {} } }
-		const machine = createMachine(config)
+		const definition = defineMachine(config)
+		assertValidDefinition(definition)
+		const machine = createMachine(definition)
 		config.states.a!.on!.go = 'a'
 		machine.send('go')
 		expect(machine.currentState)
 			.toBe('b')
-		expect(createMachine(config).currentState)
+		const updated = defineMachine(config)
+		assertValidDefinition(updated)
+		expect(createMachine(updated).currentState)
 			.toBe('a')
 	})
 	it('does not recognize inherited events, but accepts explicitly declared special keys', () => {
-		const machine = createMachine(workflow)
+		const machine = createMachine(workflowDefinition)
 		machine.send('toString' as never)
 		expect(machine.currentState)
 			.toBe('idle')
-		const special = createMachine({ initial: 'a', states: { a: { on: { ['__proto__']: 'constructor' } }, constructor: {} } })
+		const specialDefinition = defineMachine({ initial: 'a', states: { a: { on: { ['__proto__']: 'constructor' } }, constructor: {} } })
+		assertValidDefinition(specialDefinition)
+		const special = new Machine(specialDefinition, null)
 		special.send('__proto__')
 		expect(special.currentState)
 			.toBe('constructor')
@@ -186,7 +178,7 @@ describe('configuration and context', () => {
 
 describe('notifications and lifecycle', () => {
 	it('uses immutable shared payloads and consistently supplies null in final states', () => {
-		const machine = createMachine(workflow, { count: 1 })
+		const machine = createMachine(workflowDefinition, { count: 1 })
 		const observed: unknown[] = []
 		machine.onTransition({ target: 'done' }, (payload) => {
 			expect(Object.isFrozen(payload))
@@ -213,7 +205,7 @@ describe('notifications and lifecycle', () => {
 	})
 
 	it('snapshots filters, skips removed subscriptions, and delays newly added subscriptions', () => {
-		const machine = createMachine(workflow)
+		const machine = createMachine(workflowDefinition)
 		const calls: string[] = []
 		let stop: () => void
 		const filter: { source: 'idle' | 'working' } = { source: 'idle' }
@@ -235,7 +227,7 @@ describe('notifications and lifecycle', () => {
 	})
 
 	it('notifies all observers and drains queued work even after synchronous errors', () => {
-		const machine = createMachine(workflow)
+		const machine = createMachine(workflowDefinition)
 		const a = new Error('first')
 		const b = new Error('second')
 		machine.onTransition({ event: 'start' }, ({ send }) => {
@@ -266,7 +258,7 @@ describe('notifications and lifecycle', () => {
 	})
 
 	it('rethrows a single error by identity and accepts later events', () => {
-		const machine = createMachine(workflow)
+		const machine = createMachine(workflowDefinition)
 		const error = new Error('single')
 		machine.onTransition({ event: 'start' }, () => {
 			throw error
@@ -279,7 +271,7 @@ describe('notifications and lifecycle', () => {
 	})
 
 	it('defers destruction during notification, discards queued events, and cleans up after errors', () => {
-		const machine = createMachine(workflow)
+		const machine = createMachine(workflowDefinition)
 		const calls: string[] = []
 		const error = new Error('before')
 		const unsubscribe = machine.onTransition(({ machine }) => {
@@ -338,7 +330,7 @@ describe('notifications and lifecycle', () => {
 	})
 
 	it('supports direct destruction, removing lifecycle subscriptions, and multiple lifecycle errors', () => {
-		const machine = createMachine(workflow)
+		const machine = createMachine(workflowDefinition)
 		const removed = vi.fn()
 		const stopBefore = machine.onBeforeDestroyed(removed)
 		const stopAfter = machine.onAfterDestroyed(removed)
@@ -363,7 +355,7 @@ describe('notifications and lifecycle', () => {
 })
 
 it('infers public state, event, context and target-specific handler types', () => {
-	const machine = createMachine(workflow, { count: 1 })
+	const machine = createMachine(workflowDefinition, { count: 1 })
 	expectTypeOf(machine.currentState)
 		.toEqualTypeOf<'idle' | 'working' | 'done'>()
 	expectTypeOf(machine.send)
@@ -383,12 +375,10 @@ it('infers public state, event, context and target-specific handler types', () =
 	// @ts-expect-error source/event combination does not exist in the graph
 	machine.onTransition({ source: 'idle', event: 'finish' }, () => {})
 	const invalid = () => {
-		// @ts-expect-error unknown initial state
-		createMachine({ initial: 'missing', states: { a: {} } })
-		// @ts-expect-error unknown transition target
-		createMachine({ initial: 'a', states: { a: { on: { go: 'missing' } } } })
-		// @ts-expect-error final states cannot have outgoing edges
-		createMachine({ initial: 'a', states: { a: { type: 'final', on: { go: 'a' } } } })
+		// @ts-expect-error raw configs cannot create a machine
+		createMachine(workflow)
+		// @ts-expect-error raw configs cannot bypass the factory
+		void new Machine(workflow, null)
 		// @ts-expect-error unknown event
 		machine.send('unknown')
 	}

@@ -26,9 +26,9 @@ pnpm add @deviltea/tiny-state-machine-vue
 ## Usage
 
 ```ts
-import { createMachine, useMachine } from '@deviltea/tiny-state-machine-vue'
+import { assertValidDefinition, createMachine, defineMachine, useMachine } from '@deviltea/tiny-state-machine-vue'
 
-const machine = createMachine({
+const definition = defineMachine({
 	initial: 'idle',
 	states: {
 		idle: { on: { start: 'loading' } },
@@ -36,6 +36,8 @@ const machine = createMachine({
 		finished: { type: 'final' },
 	},
 })
+assertValidDefinition(definition)
+const machine = createMachine(definition)
 
 const { currentState, isDisposed, send, can, dispose } = useMachine(machine)
 
@@ -56,6 +58,8 @@ dispose()
 - Vue is a peer dependency and is not bundled.
 
 ### Migration
+
+Core machine creation now requires a valid definition. Define and check the configuration before creating the machine; core definition and graph APIs are re-exported unchanged.
 
 Previously `autoDestroy` defaulted to true and the state ref was writable. Ownership now defaults to borrowed and state can only change through the machine. Opt in to automatic destruction for exclusively owned instances. Disposal errors are propagated instead of logged and swallowed.
 

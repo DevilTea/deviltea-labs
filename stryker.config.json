@@ -3,6 +3,8 @@
 	"mutate": [
 		"packages/tiny-state-machine/src/index.ts",
 		"packages/tiny-state-machine/src/definition.ts",
+		"packages/tiny-state-machine/src/compiler.ts",
+		"packages/tiny-state-machine/src/diagnostics.ts",
 		"packages/tiny-state-machine/src/graph.ts",
 		"packages/tiny-state-machine-vue/src/index.ts"
 	],

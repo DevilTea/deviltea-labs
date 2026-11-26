@@ -1,7 +1,7 @@
 import type { MachineConfig } from './index'
 import * as fc from 'fast-check'
 import { describe, expect, expectTypeOf, it } from 'vitest'
-import { createMachine, defineMachine, getDeadEndStates, getEvents, getFinalStates, getReachableStates, getStates, getTransitions, getUnreachableStates, transition } from './index'
+import { assertValidDefinition, createMachine, defineMachine, getDeadEndStates, getEvents, getFinalStates, getReachableStates, getStates, getTransitions, getUnreachableStates, transition } from './index'
 
 const graph = defineMachine({
 	initial: 'idle',
@@ -14,6 +14,7 @@ const graph = defineMachine({
 		unused: { type: 'final', on: {} },
 	},
 })
+assertValidDefinition(graph)
 
 describe('pure graph operations', () => {
 	it('returns ordered states, local events, exact edges and explicit finals', () => {
@@ -79,11 +80,11 @@ describe('pure graph operations', () => {
 			.toBe(snapshot)
 	})
 
-	it('validates malformed definitions and rejects unknown source states', () => {
-		const invalid = { initial: 'a', states: { a: { on: { go: 'missing' } } } }
+	it('rejects untrusted definitions and unknown source states', () => {
+		const invalid = defineMachine({ initial: 'a', states: { a: { on: { go: 'missing' } } } })
 		for (const inspect of [getStates, getTransitions, getFinalStates, getDeadEndStates, getReachableStates, getUnreachableStates]) {
-			expect(() => inspect(invalid))
-				.toThrow('Invalid transition: a -> go.')
+			expect(() => inspect(invalid as never))
+				.toThrow('Expected a valid definition produced by defineMachine().')
 		}
 		for (const inspect of [
 			() => getEvents(graph, 'unknown' as never),
@@ -113,6 +114,8 @@ describe('pure graph operations', () => {
 				initial,
 				states: Object.fromEntries(keys.map((key, i) => [key, nodes[i]!.final ? { type: 'final' } : { on: Object.fromEntries(nodes[i]!.edges) }])),
 			}
+			const definition = defineMachine(config)
+			assertValidDefinition(definition)
 			// Fixed point over an independently generated edge list, not the library traversal.
 			const reachable = new Set([initial])
 			for (let i = 0; i < keys.length; i++) {
@@ -121,25 +124,25 @@ describe('pure graph operations', () => {
 						reachable.add(edge.target)
 				}
 			}
-			expect(new Set(getStates(config)))
+			expect(new Set(getStates(definition)))
 				.toEqual(new Set(keys))
-			expect(new Set(getTransitions(config)
+			expect(new Set(getTransitions(definition)
 				.map(edge => JSON.stringify(edge))))
 				.toEqual(new Set(edges.map(edge => JSON.stringify(edge))))
-			expect(new Set(getReachableStates(config)))
+			expect(new Set(getReachableStates(definition)))
 				.toEqual(reachable)
-			expect(new Set(getUnreachableStates(config)))
+			expect(new Set(getUnreachableStates(definition)))
 				.toEqual(new Set(keys.filter(key => !reachable.has(key))))
-			expect(new Set(getFinalStates(config)))
+			expect(new Set(getFinalStates(definition)))
 				.toEqual(new Set(keys.filter((_, i) => nodes[i]!.final)))
-			expect(new Set(getDeadEndStates(config)))
+			expect(new Set(getDeadEndStates(definition)))
 				.toEqual(new Set(keys.filter((_, i) => !nodes[i]!.final && nodes[i]!.edges.length === 0)))
 			for (const source of keys) {
 				const outgoing = edges.filter(edge => edge.source === source)
-				expect(new Set(getEvents(config, source)))
+				expect(new Set(getEvents(definition, source)))
 					.toEqual(new Set(outgoing.map(edge => edge.event)))
 				for (const edge of outgoing) {
-					expect(transition(config, source, edge.event))
+					expect(transition(definition, source, edge.event))
 						.toBe(edge.target)
 				}
 			}
