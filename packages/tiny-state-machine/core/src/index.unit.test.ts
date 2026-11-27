@@ -1,7 +1,8 @@
-import type { MachineConfig } from './index'
+import type { Machine, MachineConfig } from './index'
 import * as fc from 'fast-check'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
-import { assertValidDefinition, createMachine, defineMachine, Machine } from './index'
+import * as core from './index'
+import { assertValidDefinition, createMachine, defineMachine, transition } from './index'
 
 const workflow = {
 	initial: 'idle',
@@ -74,6 +75,8 @@ describe('state transition properties', () => {
 		machine.onTransition(filter as never, ({ transition }) => filtered.push(transition))
 		for (const event of sequence) {
 			const edge = edges.find(edge => edge.source === state && edge.event === event)
+			expect(transition(definition, state, event))
+				.toBe(edge?.target)
 			expect(machine.can(event))
 				.toBe(edge !== undefined)
 			machine.send(event)
@@ -130,6 +133,109 @@ describe('state transition properties', () => {
 	}), properties))
 })
 
+describe('factory runtime', () => {
+	it('exports Machine only as a type and keeps instance state private', () => {
+		const machine: Machine<typeof workflow, null> = createMachine(workflowDefinition)
+		expect(Object.hasOwn(core, 'Machine'))
+			.toBe(false)
+		expect(Object.keys(machine)
+			.sort())
+			.toEqual(['can', 'context', 'currentState', 'destroy', 'isDestroyed', 'onAfterDestroyed', 'onBeforeDestroyed', 'onTransition', 'send'].sort())
+		expect(Reflect.set(machine, 'currentState', 'done'))
+			.toBe(false)
+		expect(Reflect.set(machine, 'context', {}))
+			.toBe(false)
+		expect(Reflect.set(machine, 'isDestroyed', true))
+			.toBe(false)
+		expect(machine.currentState)
+			.toBe('idle')
+		expect(machine.context)
+			.toBeNull()
+		expect(machine.isDestroyed)
+			.toBe(false)
+	})
+
+	it('supports detached methods and stable callback identity without a receiver', () => {
+		const machine = createMachine(workflowDefinition, { count: 1 })
+		const other = createMachine(workflowDefinition)
+		const { can, send, onTransition, onBeforeDestroyed, onAfterDestroyed, destroy } = machine
+		const trace: string[] = []
+		const unsubscribe = onTransition({ event: 'start' }, (payload) => {
+			expect(payload.machine)
+				.toBe(machine)
+			expect(payload.send)
+				.toBe(send)
+			trace.push('start')
+			payload.send('finish')
+			expect(machine.currentState)
+				.toBe('working')
+		})
+		onTransition(({ transition, send }) => {
+			trace.push(transition.event)
+			if (transition.target === 'done') {
+				expect(send)
+					.toBeNull()
+			}
+		})
+		onBeforeDestroyed((received) => {
+			expect(received)
+				.toBe(machine)
+			trace.push('before')
+		})
+		onAfterDestroyed(() => trace.push('after'))
+		expect(can('start'))
+			.toBe(true)
+		Reflect.apply(send, other, ['start'])
+		expect(trace)
+			.toEqual(['start', 'start', 'finish'])
+		expect(other.currentState)
+			.toBe('idle')
+		expect(machine.currentState)
+			.toBe('done')
+		expect(can('start'))
+			.toBe(false)
+		destroy()
+		expect(trace)
+			.toEqual(['start', 'start', 'finish', 'before', 'after'])
+		expect(machine.isDestroyed)
+			.toBe(true)
+		expect(() => send('start'))
+			.toThrow('The machine has been destroyed.')
+		expect(() => can('start'))
+			.toThrow('The machine has been destroyed.')
+		expect(unsubscribe).not.toThrow()
+	})
+
+	it('distinguishes empty state keys from unavailable events in both runtime and pure lookup', () => {
+		const definition = defineMachine({ initial: 'a', states: { 'a': { on: { go: '' } }, '': { on: { '': '' } } } })
+		assertValidDefinition(definition)
+		const machine = createMachine(definition)
+		const observer = vi.fn()
+		machine.onTransition(observer)
+		expect(transition(definition, 'a', 'go'))
+			.toBe('')
+		expect(machine.can('go'))
+			.toBe(true)
+		machine.send('go')
+		expect(machine.currentState)
+			.toBe('')
+		expect(machine.can(''))
+			.toBe(true)
+		machine.send('')
+		expect(observer)
+			.toHaveBeenCalledTimes(2)
+		expect(observer.mock.calls[1]?.[0].transition)
+			.toEqual({ source: '', event: '', target: '' })
+		expect(transition(definition, '', 'go'))
+			.toBeUndefined()
+		expect(machine.can('go'))
+			.toBe(false)
+		machine.send('go')
+		expect(observer)
+			.toHaveBeenCalledTimes(2)
+	})
+})
+
 describe('configuration and context', () => {
 	it('supports context identity, a factory, and absent context', () => {
 		const context = { count: 1 }
@@ -169,7 +275,7 @@ describe('configuration and context', () => {
 			.toBe('idle')
 		const specialDefinition = defineMachine({ initial: 'a', states: { a: { on: { ['__proto__']: 'constructor' } }, constructor: {} } })
 		assertValidDefinition(specialDefinition)
-		const special = new Machine(specialDefinition, null)
+		const special = createMachine(specialDefinition, null)
 		special.send('__proto__')
 		expect(special.currentState)
 			.toBe('constructor')
@@ -377,8 +483,8 @@ it('infers public state, event, context and target-specific handler types', () =
 	const invalid = () => {
 		// @ts-expect-error raw configs cannot create a machine
 		createMachine(workflow)
-		// @ts-expect-error raw configs cannot bypass the factory
-		void new Machine(workflow, null)
+		// @ts-expect-error Machine is a type, not a constructor export
+		void new core.Machine(workflowDefinition, null)
 		// @ts-expect-error unknown event
 		machine.send('unknown')
 	}

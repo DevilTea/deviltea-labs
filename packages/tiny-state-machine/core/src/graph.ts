@@ -2,15 +2,9 @@ import type { CompiledGraph } from './compiler'
 import type { ValidDefinition } from './definition'
 import type { AllPossibleTransitionDataOf, EventKeyOf, MachineConfig, StateKeyOf } from './index'
 import { getCompiledGraph } from './definition'
+import { resolveTransition, stateOf } from './transition-engine'
 
 type Graph = CompiledGraph
-
-function stateOf(graph: Graph, state: string) {
-	const node = graph.states.get(state)
-	if (!node)
-		throw new Error(`Unknown state: ${state}.`)
-	return node
-}
 
 /** State keys in definition enumeration order. */
 export function getStates<Config extends MachineConfig>(definition: ValidDefinition<Config>): StateKeyOf<Config>[] {
@@ -31,7 +25,7 @@ export function getTransitions<Config extends MachineConfig>(definition: ValidDe
 
 /** Resolve an event without executing a machine or notifying subscribers. */
 export function transition<Config extends MachineConfig>(definition: ValidDefinition<Config>, state: StateKeyOf<Config>, event: string): StateKeyOf<Config> | undefined {
-	return stateOf(getCompiledGraph(definition), state).transitions.get(event) as StateKeyOf<Config> | undefined
+	return resolveTransition(getCompiledGraph(definition), state, event) as StateKeyOf<Config> | undefined
 }
 
 function reachable(graph: Graph, start: string) {

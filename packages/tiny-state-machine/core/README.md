@@ -132,7 +132,7 @@ transition(definition, 'done', 'start') // undefined
 
 `defineMachine(input)` accepts both typed configurations and unknown data, and returns a discriminated union `Definition<Config> = ValidDefinition<Config> | InvalidDefinition`. Invalid data does not throw during definition. For valid definitions, `data` is an independent deeply frozen snapshot with preserved literal types, and `diagnostics` is immutable. Invalid definitions retain the original input as `data: unknown` for inspection or editing; changing it does not revalidate the result.
 
-Both `createMachine` (including the public `Machine` constructor) and graph helpers accept only a genuine `ValidDefinition`. Narrow with `if (definition.valid)` or use `assertValidDefinition(definition)` to throw and narrow. They perform a constant-time internal identity lookup, not structural revalidation. A copy, deserialized wrapper or definition from another installed copy of the package is not executable; call `defineMachine` again with its configuration data.
+Both `createMachine` and graph helpers accept only a genuine `ValidDefinition`. Narrow with `if (definition.valid)` or use `assertValidDefinition(definition)` to throw and narrow. They perform a constant-time internal identity lookup, not structural revalidation. A copy, deserialized wrapper or definition from another installed copy of the package is not executable; call `defineMachine` again with its configuration data.
 
 The compiled graph is private and shared by the instances and analysis helpers. Destroying one machine releases only its own reference and resources, not the graph. Graph helpers do not execute observers or mutate the graph.
 
@@ -147,7 +147,7 @@ The compiled graph is private and shared by the instances and analysis helpers. 
 | `getFinalStates(definition)` | Explicitly declared final states |
 | `getDeadEndStates(definition)` | Non-final states with no outgoing edges, including unreachable ones |
 
-The default traversal start is the initial state. Unknown source states throw. Other lists follow JavaScript own-key enumeration order. Cycles, unreachable states, and non-final dead ends are valid; analysis reports them rather than rejecting the definition. Graph queries operate on the compiled graph without recompilation. Single transition resolution is a map lookup; traversal is linear in the reachable nodes and edges.
+The default traversal start is the initial state. Unknown source states throw. Other lists follow JavaScript own-key enumeration order. Cycles, unreachable states, and non-final dead ends are valid; analysis reports them rather than rejecting the definition. Graph queries operate on the compiled graph without recompilation. Pure transition resolution, runtime sending, and can() share the same internal lookup; the lookup never invokes callbacks or mutates the graph. Single transition resolution is a map lookup; traversal is linear in the reachable nodes and edges.
 
 ## Validation and JSON Schema
 
@@ -171,9 +171,11 @@ Validation checks the declared shape, string IDs if present, existing initial an
 
 A portable draft-07 JSON Schema is shipped at `@deviltea/tiny-state-machine/schema.json`. Use it for editor autocomplete and structural validation. JSON Schema cannot verify that a dynamic initial or target string names an existing state; use `defineMachine` for those semantic checks. The schema is maintained directly, with Ajv/fast-check contract tests comparing its structural acceptance to the compiler. The core has no runtime dependencies.
 
-### Migration from raw config construction
+### Factory runtime and migration
 
-Previously `createMachine(rawConfig)` and `new Machine(rawConfig, context)` accepted unvalidated configurations. First call `defineMachine(rawConfig)`, check `valid` (or assert it), then pass the resulting definition. To edit a valid configuration, create and validate new data rather than mutate the snapshot. Persist or transmit `definition.data`, not the definition wrapper.
+The public `Machine<Config, Context>` is now a TypeScript interface, not a runtime class. Use `import type { Machine }` for type annotations and `createMachine(validDefinition, context?)` for construction; `new Machine(...)` and `instanceof Machine` are no longer supported. The factory returns an object with closure-backed methods, so destructuring `send`, `can`, subscriptions, or `destroy` does not require binding a receiver. Non-final transition payloads expose the instance’s send function directly. The interface is structural; TypeScript conformance alone is not proof of factory origin.
+
+Previously `createMachine(rawConfig)` and `new Machine(rawConfig, context)` accepted unvalidated configurations. First call `defineMachine(rawConfig)`, check `valid` (or assert it), then pass the resulting definition to the factory. To edit a valid configuration, create and validate new data rather than mutate the snapshot. Persist or transmit `definition.data`, not the definition wrapper.
 
 ## Runtime contract
 

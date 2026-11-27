@@ -2,6 +2,7 @@
 	"$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
 	"mutate": [
 		"packages/tiny-state-machine/core/src/index.ts",
+		"packages/tiny-state-machine/core/src/transition-engine.ts",
 		"packages/tiny-state-machine/core/src/definition.ts",
 		"packages/tiny-state-machine/core/src/compiler.ts",
 		"packages/tiny-state-machine/core/src/diagnostics.ts",

@@ -8,6 +8,7 @@
 		"./src/definition.ts",
 		"./src/graph.ts",
 		"./src/compiler.ts",
-		"./src/diagnostics.ts"
+		"./src/diagnostics.ts",
+		"./src/transition-engine.ts"
 	]
 }

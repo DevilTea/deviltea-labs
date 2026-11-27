@@ -1,8 +1,10 @@
+import type { Machine } from './index'
 import * as core from '@deviltea/tiny-state-machine'
 import * as fc from 'fast-check'
 import { expect, expectTypeOf, it, vi } from 'vitest'
 import { computed, effectScope, isReadonly, watch } from 'vue'
-import { assertValidDefinition, createMachine, defineMachine, Machine, useMachine } from './index'
+import * as adapter from './index'
+import { assertValidDefinition, createMachine, defineMachine, useMachine } from './index'
 
 const config = {
 	initial: 'idle',
@@ -18,8 +20,12 @@ assertValidDefinition(definition)
 it('re-exports the original core', () => {
 	expect(createMachine)
 		.toBe(core.createMachine)
-	expect(Machine)
-		.toBe(core.Machine)
+	expect(defineMachine)
+		.toBe(core.defineMachine)
+	expect(Object.hasOwn(adapter, 'Machine'))
+		.toBe(false)
+	expectTypeOf<Machine<typeof config, null>>()
+		.toEqualTypeOf<core.Machine<typeof config, null>>()
 })
 
 it('maintains a readonly reactive state and can() across generated event sequences', () => fc.assert(fc.property(fc.array(fc.constantFrom('start', 'stop', 'finish'), { maxLength: 40 }), (events) => {
