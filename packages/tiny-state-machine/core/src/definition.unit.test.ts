@@ -3,7 +3,7 @@ import Ajv from 'ajv'
 import * as fc from 'fast-check'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import schema from '../schema.json'
-import { assertValidDefinition, createMachine, defineMachine, getEvents, getReachableStates, getStates, getTransitions, Machine, transition } from './index'
+import { assertValidDefinition, createMachine, defineMachine, getEvents, getReachableStates, getStates, getTransitions, transition } from './index'
 
 const config = {
 	initial: 'idle',
@@ -40,7 +40,7 @@ describe('definition boundary', () => {
 		expectTypeOf(definition.data.states.idle.on.start)
 			.toEqualTypeOf<'done'>()
 		const a = createMachine(definition)
-		const b = new Machine(definition, null)
+		const b = createMachine(definition, null)
 		a.send('start')
 		expect(a.currentState)
 			.toBe('done')
@@ -110,7 +110,6 @@ describe('definition boundary', () => {
 			for (const consume of [
 				() => assertValidDefinition(value as never),
 				() => createMachine(value as never, factory),
-				() => new Machine(value as never, null),
 				() => getStates(value as never),
 				() => getEvents(value as never, 'idle'),
 				() => getTransitions(value as never),

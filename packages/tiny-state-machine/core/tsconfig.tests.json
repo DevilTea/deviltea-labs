@@ -10,6 +10,7 @@
 		"./src/graph.ts",
 		"./schema.json",
 		"./src/compiler.ts",
-		"./src/diagnostics.ts"
+		"./src/diagnostics.ts",
+		"./src/transition-engine.ts"
 	]
 }

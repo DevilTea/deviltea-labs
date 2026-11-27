@@ -1,6 +1,7 @@
 import type { CompiledGraph } from './compiler'
 import type { ValidDefinition } from './definition'
 import { getCompiledGraph } from './definition'
+import { resolveTransition } from './transition-engine'
 
 export type { DeepReadonly, Definition, InvalidDefinition, ValidDefinition } from './definition'
 export { assertValidDefinition, defineMachine } from './definition'
@@ -138,59 +139,74 @@ function throwErrors(errors: unknown[]) {
 		throw new AggregateError(errors, 'Multiple machine handlers failed.')
 }
 
-export class Machine<Config extends MachineConfig, Context extends MachineContext> {
-	#states: CompiledGraph['states'] | undefined
-	private _context: Context
-	private _currentState: string
-	private _transitionHandlers = new Set<RuntimeHandler>()
-	private _beforeDestroyedHandlers = new Set<(machine: Machine<Config, Context>) => unknown>()
-	private _afterDestroyedHandlers = new Set<() => unknown>()
-	private _queue: string[] = []
-	private _dispatching = false
-	private _destroyRequested = false
-	private _destroying = false
-	private _isDestroyed = false
+export interface Machine<Config extends MachineConfig, Context extends MachineContext> {
+	readonly context: Context
+	readonly currentState: StateKeyOf<Config>
+	readonly isDestroyed: boolean
+	/** Observe committed transitions in registration order. */
+	onTransition: ((handler: TransitionHandler<Config, Context>) => () => void) & (<const Filter extends TransitionFilter<Config>>(
+		filter: Filter & (TransitionDataOf<Config, Filter> extends never ? never : unknown),
+		handler: TransitionHandler<Config, Context, Filter>,
+	) => () => void)
+	can: (event: string) => event is EventKeyOf<Config>
+	send: (event: EventKeyOf<Config>) => void
+	onBeforeDestroyed: (handler: (machine: Machine<Config, Context>) => unknown) => () => void
+	onAfterDestroyed: (handler: () => unknown) => () => void
+	destroy: () => void
+}
 
-	constructor(definition: ValidDefinition<Config>, context: Context) {
-		const { initial, states } = getCompiledGraph(definition)
-		this.#states = states
-		this._context = context
-		this._currentState = initial
+function createRuntime<Config extends MachineConfig, Context extends MachineContext>(compiled: CompiledGraph, initialContext: Context): Machine<Config, Context> {
+	let graph: CompiledGraph | undefined = compiled
+	let context = initialContext
+	let currentState = compiled.initial
+	const transitionHandlers = new Set<RuntimeHandler>()
+	const beforeDestroyedHandlers = new Set<(machine: Machine<Config, Context>) => unknown>()
+	const afterDestroyedHandlers = new Set<() => unknown>()
+	const queue: string[] = []
+	let dispatching = false
+	let destroyRequested = false
+	let destroying = false
+	let isDestroyed = false
+
+	const machine: Machine<Config, Context> = {
+		get context() {
+			throwIfDestroyed()
+			return context
+		},
+		get currentState() {
+			throwIfDestroyed()
+			return currentState as StateKeyOf<Config>
+		},
+		get isDestroyed() {
+			return isDestroyed
+		},
+		onTransition,
+		can,
+		send,
+		onBeforeDestroyed,
+		onAfterDestroyed,
+		destroy,
 	}
 
-	private _throwIfDestroyed() {
-		if (this._isDestroyed)
+	function throwIfDestroyed() {
+		if (isDestroyed)
 			throw new Error('The machine has been destroyed.')
 	}
 
-	private _throwIfDestroying() {
-		if (this._destroying)
+	function throwIfDestroying() {
+		if (destroying)
 			throw new Error('The machine is being destroyed.')
 	}
 
-	get context() {
-		this._throwIfDestroyed()
-		return this._context
-	}
-
-	get currentState(): StateKeyOf<Config> {
-		this._throwIfDestroyed()
-		return this._currentState as StateKeyOf<Config>
-	}
-
-	get isDestroyed() {
-		return this._isDestroyed
-	}
-
 	/** Observe committed transitions in registration order. */
-	onTransition(handler: TransitionHandler<Config, Context>): () => void
-	onTransition<const Filter extends TransitionFilter<Config>>(
+	function onTransition(handler: TransitionHandler<Config, Context>): () => void
+	function onTransition<const Filter extends TransitionFilter<Config>>(
 		filter: Filter & (TransitionDataOf<Config, Filter> extends never ? never : unknown),
 		handler: TransitionHandler<Config, Context, Filter>,
 	): () => void
-	onTransition(...args: [handler: (...args: any[]) => unknown] | [filter: Partial<RuntimeTransition>, handler: (...args: any[]) => unknown]): () => void {
-		this._throwIfDestroyed()
-		this._throwIfDestroying()
+	function onTransition(...args: [handler: (...args: any[]) => unknown] | [filter: Partial<RuntimeTransition>, handler: (...args: any[]) => unknown]): () => void {
+		throwIfDestroyed()
+		throwIfDestroying()
 		const filter = args.length === 2 ? { ...args[0] } : undefined
 		const callback = args.length === 2 ? args[1] : args[0]
 		const handler: RuntimeHandler = (payload) => {
@@ -204,104 +220,106 @@ export class Machine<Config extends MachineConfig, Context extends MachineContex
 			}
 			return undefined
 		}
-		this._transitionHandlers.add(handler)
+		transitionHandlers.add(handler)
 		return () => {
-			this._transitionHandlers.delete(handler)
+			transitionHandlers.delete(handler)
 		}
 	}
 
 	/** Whether the current state accepts an event. */
-	can(event: string): event is EventKeyOf<Config> {
-		this._throwIfDestroyed()
-		return this.#states!.get(this._currentState)!.transitions.has(event)
+	function can(event: string): event is EventKeyOf<Config> {
+		throwIfDestroyed()
+		return resolveTransition(graph!, currentState, event) !== undefined
 	}
 
 	/** Nested sends are queued until all observers have seen the current transition. */
-	send(event: EventKeyOf<Config>): void {
-		this._throwIfDestroyed()
-		this._throwIfDestroying()
-		this._queue.push(event)
-		if (this._dispatching)
+	function send(event: EventKeyOf<Config>): void {
+		throwIfDestroyed()
+		throwIfDestroying()
+		queue.push(event)
+		if (dispatching)
 			return
 
 		const errors: unknown[] = []
-		this._dispatching = true
+		dispatching = true
 		try {
-			for (let index = 0; index < this._queue.length; index++) {
-				const next = this._queue[index]!
-				const source = this._currentState
-				const target = this.#states!.get(source)!.transitions.get(next)
+			for (let index = 0; index < queue.length; index++) {
+				const next = queue[index]!
+				const source = currentState
+				const target = resolveTransition(graph!, source, next)
 				if (target === undefined)
 					continue
-				this._currentState = target
+				currentState = target
 				const payload: RuntimePayload = Object.freeze({
 					transition: Object.freeze({ source, event: next, target }),
-					machine: this,
-					context: this._context,
-					send: this.#states!.get(target)!.final ? null : this.send.bind(this) as (event: string) => void,
+					machine,
+					context,
+					send: graph!.states.get(target)!.final ? null : send as (event: string) => void,
 				})
-				notify(this._transitionHandlers, payload, errors)
-				if (this._destroyRequested) {
-					this._destroy(errors)
+				notify(transitionHandlers, payload, errors)
+				if (destroyRequested) {
+					performDestroy(errors)
 					break
 				}
 			}
 		}
 		finally {
-			this._queue.length = 0
-			this._dispatching = false
+			queue.length = 0
+			dispatching = false
 		}
 		throwErrors(errors)
 	}
 
-	onBeforeDestroyed(handler: (machine: Machine<Config, Context>) => unknown) {
-		this._throwIfDestroyed()
-		this._throwIfDestroying()
-		this._beforeDestroyedHandlers.add(handler)
+	function onBeforeDestroyed(handler: (machine: Machine<Config, Context>) => unknown) {
+		throwIfDestroyed()
+		throwIfDestroying()
+		beforeDestroyedHandlers.add(handler)
 		return () => {
-			this._beforeDestroyedHandlers.delete(handler)
+			beforeDestroyedHandlers.delete(handler)
 		}
 	}
 
-	onAfterDestroyed(handler: () => unknown) {
-		this._throwIfDestroyed()
-		this._throwIfDestroying()
-		this._afterDestroyedHandlers.add(handler)
+	function onAfterDestroyed(handler: () => unknown) {
+		throwIfDestroyed()
+		throwIfDestroying()
+		afterDestroyedHandlers.add(handler)
 		return () => {
-			this._afterDestroyedHandlers.delete(handler)
+			afterDestroyedHandlers.delete(handler)
 		}
 	}
 
-	private _destroy(errors: unknown[]) {
-		this._destroying = true
-		notify(this._beforeDestroyedHandlers, this, errors)
-		this._beforeDestroyedHandlers.clear()
-		this._transitionHandlers.clear()
-		this.#states = undefined
-		this._context = null as Context
-		this._isDestroyed = true
-		notify(this._afterDestroyedHandlers, undefined, errors)
-		this._afterDestroyedHandlers.clear()
+	function performDestroy(errors: unknown[]) {
+		destroying = true
+		notify(beforeDestroyedHandlers, machine, errors)
+		beforeDestroyedHandlers.clear()
+		transitionHandlers.clear()
+		graph = undefined
+		context = null as Context
+		isDestroyed = true
+		notify(afterDestroyedHandlers, undefined, errors)
+		afterDestroyedHandlers.clear()
 	}
 
 	/** Destroy after the active notification, discarding any remaining queued events. */
-	destroy() {
-		this._throwIfDestroyed()
-		this._throwIfDestroying()
-		if (this._dispatching) {
-			this._destroyRequested = true
+	function destroy() {
+		throwIfDestroyed()
+		throwIfDestroying()
+		if (dispatching) {
+			destroyRequested = true
 			return
 		}
 		const errors: unknown[] = []
-		this._destroy(errors)
+		performDestroy(errors)
 		throwErrors(errors)
 	}
+
+	return machine
 }
 
 export function createMachine<Config extends MachineConfig>(definition: ValidDefinition<Config>, context?: undefined): Machine<Config, null>
 export function createMachine<Config extends MachineConfig, Context extends MachineContext>(definition: ValidDefinition<Config>, context: Context | (() => Context)): Machine<Config, Context>
-export function createMachine(definition: ValidDefinition, context?: MachineContext | (() => MachineContext)): any {
+export function createMachine<Config extends MachineConfig, Context extends MachineContext>(definition: ValidDefinition<Config>, context?: Context | (() => Context)): Machine<Config, Context | null> {
 	// Reject forged/invalid definitions before running a caller's context factory.
-	getCompiledGraph(definition)
-	return new Machine(definition, typeof context === 'function' ? context() : context ?? null)
+	const graph = getCompiledGraph(definition)
+	return createRuntime(graph, typeof context === 'function' ? context() : context ?? null)
 }
