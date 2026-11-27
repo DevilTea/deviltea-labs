@@ -59,7 +59,7 @@ dispose()
 
 ### Migration
 
-Machine is a type-only interface re-exported from Core; create instances through createMachine rather than a class constructor. Core machine creation now requires a valid definition. Define and check the configuration before creating the machine; core definition and graph APIs are re-exported unchanged.
+Machine is a type-only interface re-exported from Core; create instances through createMachine rather than a class constructor. Core machine creation now requires a valid definition. Define and check the configuration before creating the machine; core definition and graph APIs are re-exported unchanged. Machine now has only the Config generic; store domain data in Vue refs, application stores, or closures rather than machine or transition context.
 
 Previously `autoDestroy` defaulted to true and the state ref was writable. Ownership now defaults to borrowed and state can only change through the machine. Opt in to automatic destruction for exclusively owned instances. Disposal errors are propagated instead of logged and swallowed.
 

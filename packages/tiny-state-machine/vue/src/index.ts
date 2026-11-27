@@ -1,4 +1,4 @@
-import type { EventKeyOf, Machine, MachineConfig, MachineContext, StateKeyOf } from '@deviltea/tiny-state-machine'
+import type { EventKeyOf, Machine, MachineConfig, StateKeyOf } from '@deviltea/tiny-state-machine'
 import { computed, getCurrentScope, onScopeDispose, shallowRef } from 'vue'
 
 export * from '@deviltea/tiny-state-machine'
@@ -9,11 +9,11 @@ export interface UseMachineOptions {
 }
 
 /**
- * Observe an existing machine without making its state or context writable.
+ * Observe an existing machine without making its state writable.
  * By default the machine is borrowed; stopping the scope only unsubscribes.
  */
-export function useMachine<Config extends MachineConfig, Context extends MachineContext>(
-	machine: Machine<Config, Context>,
+export function useMachine<Config extends MachineConfig>(
+	machine: Machine<Config>,
 	{ autoDestroy = false }: UseMachineOptions = {},
 ) {
 	const state = shallowRef<StateKeyOf<Config>>(machine.currentState)

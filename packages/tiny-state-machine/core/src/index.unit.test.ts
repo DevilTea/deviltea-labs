@@ -58,11 +58,9 @@ describe('state transition properties', () => {
 		const expected: unknown[] = []
 		const expectedFiltered: unknown[] = []
 		let state = config.initial
-		machine.onTransition(({ transition, machine: received, context, send }) => {
+		machine.onTransition(({ transition, machine: received, send }) => {
 			expect(received)
 				.toBe(machine)
-			expect(context)
-				.toBeNull()
 			expect(machine.currentState)
 				.toBe(transition.target)
 			expect(Object.isFrozen(transition))
@@ -135,34 +133,35 @@ describe('state transition properties', () => {
 
 describe('factory runtime', () => {
 	it('exports Machine only as a type and keeps instance state private', () => {
-		const machine: Machine<typeof workflow, null> = createMachine(workflowDefinition)
+		const machine: Machine<typeof workflow> = createMachine(workflowDefinition)
 		expect(Object.hasOwn(core, 'Machine'))
 			.toBe(false)
 		expect(Object.keys(machine)
 			.sort())
-			.toEqual(['can', 'context', 'currentState', 'destroy', 'isDestroyed', 'onAfterDestroyed', 'onBeforeDestroyed', 'onTransition', 'send'].sort())
+			.toEqual(['can', 'currentState', 'destroy', 'isDestroyed', 'onAfterDestroyed', 'onBeforeDestroyed', 'onTransition', 'send'].sort())
 		expect(Reflect.set(machine, 'currentState', 'done'))
 			.toBe(false)
-		expect(Reflect.set(machine, 'context', {}))
+		expect('context' in machine)
 			.toBe(false)
 		expect(Reflect.set(machine, 'isDestroyed', true))
 			.toBe(false)
 		expect(machine.currentState)
 			.toBe('idle')
-		expect(machine.context)
-			.toBeNull()
 		expect(machine.isDestroyed)
 			.toBe(false)
 	})
 
 	it('supports detached methods and stable callback identity without a receiver', () => {
-		const machine = createMachine(workflowDefinition, { count: 1 })
+		const machine = createMachine(workflowDefinition)
 		const other = createMachine(workflowDefinition)
 		const { can, send, onTransition, onBeforeDestroyed, onAfterDestroyed, destroy } = machine
 		const trace: string[] = []
 		const unsubscribe = onTransition({ event: 'start' }, (payload) => {
 			expect(payload.machine)
 				.toBe(machine)
+			expect(Object.keys(payload)
+				.sort())
+				.toEqual(['machine', 'send', 'transition'])
 			expect(payload.send)
 				.toBe(send)
 			trace.push('start')
@@ -236,24 +235,7 @@ describe('factory runtime', () => {
 	})
 })
 
-describe('configuration and context', () => {
-	it('supports context identity, a factory, and absent context', () => {
-		const context = { count: 1 }
-		const factory = vi.fn(() => context)
-		expect(createMachine(workflowDefinition, context).context)
-			.toBe(context)
-		expect(createMachine(workflowDefinition, factory).context)
-			.toBe(context)
-		expect(factory)
-			.toHaveBeenCalledExactlyOnceWith()
-		expect(createMachine(workflowDefinition).context)
-			.toBeNull()
-		expect(createMachine(workflowDefinition, undefined).context)
-			.toBeNull()
-		expect(createMachine(workflowDefinition, null).context)
-			.toBeNull()
-	})
-
+describe('configuration', () => {
 	it('snapshots the graph independently of subsequent config mutations', () => {
 		const config: MachineConfig = { initial: 'a', states: { a: { on: { go: 'b' } }, b: {} } }
 		const definition = defineMachine(config)
@@ -275,7 +257,7 @@ describe('configuration and context', () => {
 			.toBe('idle')
 		const specialDefinition = defineMachine({ initial: 'a', states: { a: { on: { ['__proto__']: 'constructor' } }, constructor: {} } })
 		assertValidDefinition(specialDefinition)
-		const special = createMachine(specialDefinition, null)
+		const special = createMachine(specialDefinition)
 		special.send('__proto__')
 		expect(special.currentState)
 			.toBe('constructor')
@@ -284,13 +266,14 @@ describe('configuration and context', () => {
 
 describe('notifications and lifecycle', () => {
 	it('uses immutable shared payloads and consistently supplies null in final states', () => {
-		const machine = createMachine(workflowDefinition, { count: 1 })
+		const machine = createMachine(workflowDefinition)
 		const observed: unknown[] = []
 		machine.onTransition({ target: 'done' }, (payload) => {
 			expect(Object.isFrozen(payload))
 				.toBe(true)
-			expect(payload.context)
-				.toBe(machine.context)
+			expect(Object.keys(payload)
+				.sort())
+				.toEqual(['machine', 'send', 'transition'])
 			expect(payload.send)
 				.toBeNull()
 			observed.push(payload)
@@ -392,8 +375,6 @@ describe('notifications and lifecycle', () => {
 				.toBe(machine)
 			expect(machine.currentState)
 				.toBe('working')
-			expect(machine.context)
-				.toBeNull()
 			expect(() => machine.send('retry'))
 				.toThrow('The machine is being destroyed.')
 			expect(() => machine.destroy())
@@ -421,7 +402,6 @@ describe('notifications and lifecycle', () => {
 			.toBe(true)
 		for (const operation of [
 			() => machine.currentState,
-			() => machine.context,
 			() => machine.can('start'),
 			() => machine.send('start'),
 			() => machine.onTransition(() => {}),
@@ -460,16 +440,17 @@ describe('notifications and lifecycle', () => {
 	})
 })
 
-it('infers public state, event, context and target-specific handler types', () => {
-	const machine = createMachine(workflowDefinition, { count: 1 })
+it('infers public state, event and target-specific handler types', () => {
+	const machine = createMachine(workflowDefinition)
 	expectTypeOf(machine.currentState)
 		.toEqualTypeOf<'idle' | 'working' | 'done'>()
 	expectTypeOf(machine.send)
 		.parameter(0)
 		.toEqualTypeOf<'start' | 'skip' | 'finish' | 'retry' | 'cancel'>()
-	expectTypeOf(machine.context)
-		.toMatchTypeOf<{ count: number }>()
-	machine.onTransition({ target: 'working' }, ({ send, transition }) => {
+	machine.onTransition({ target: 'working' }, (payload) => {
+		const { send, transition } = payload
+		expectTypeOf<keyof typeof payload>()
+			.toEqualTypeOf<'machine' | 'send' | 'transition'>()
 		expectTypeOf(send)
 			.parameter(0)
 			.toEqualTypeOf<'finish' | 'retry' | 'cancel'>()
@@ -484,7 +465,19 @@ it('infers public state, event, context and target-specific handler types', () =
 		// @ts-expect-error raw configs cannot create a machine
 		createMachine(workflow)
 		// @ts-expect-error Machine is a type, not a constructor export
-		void new core.Machine(workflowDefinition, null)
+		void new core.Machine(workflowDefinition)
+		// @ts-expect-error context is no longer accepted
+		createMachine(workflowDefinition, {})
+		// @ts-expect-error context factories are no longer accepted
+		createMachine(workflowDefinition, () => ({}))
+		// @ts-expect-error context is no longer a member
+		void machine.context
+		// @ts-expect-error context generic is removed
+		const legacy: Machine<typeof workflow, null> = machine
+		void legacy
+		// @ts-expect-error MachineContext is no longer exported
+		const context: core.MachineContext = {}
+		void context
 		// @ts-expect-error unknown event
 		machine.send('unknown')
 	}

@@ -173,18 +173,42 @@ A portable draft-07 JSON Schema is shipped at `@deviltea/tiny-state-machine/sche
 
 ### Factory runtime and migration
 
-The public `Machine<Config, Context>` is now a TypeScript interface, not a runtime class. Use `import type { Machine }` for type annotations and `createMachine(validDefinition, context?)` for construction; `new Machine(...)` and `instanceof Machine` are no longer supported. The factory returns an object with closure-backed methods, so destructuring `send`, `can`, subscriptions, or `destroy` does not require binding a receiver. Non-final transition payloads expose the instance’s send function directly. The interface is structural; TypeScript conformance alone is not proof of factory origin.
+The public `Machine<Config>` is now a TypeScript interface, not a runtime class. Use `import type { Machine }` for type annotations and `createMachine(validDefinition)` for construction; `new Machine(...)` and `instanceof Machine` are no longer supported. The factory returns an object with closure-backed methods, so destructuring `send`, `can`, subscriptions, or `destroy` does not require binding a receiver. Non-final transition payloads expose the instance’s send function directly. The interface is structural; TypeScript conformance alone is not proof of factory origin.
 
 Previously `createMachine(rawConfig)` and `new Machine(rawConfig, context)` accepted unvalidated configurations. First call `defineMachine(rawConfig)`, check `valid` (or assert it), then pass the resulting definition to the factory. To edit a valid configuration, create and validate new data rather than mutate the snapshot. Persist or transmit `definition.data`, not the definition wrapper.
 
+### Migrating application data
+
+The machine no longer owns a context object. Remove the second argument to
+`createMachine`, the former Context generic, and reads of `machine.context`
+or `payload.context`. Keep domain data, dependency injection, and side effects
+in application-owned closures or stores:
+
+```ts
+import type { MachineConfig, ValidDefinition } from '@deviltea/tiny-state-machine'
+import { createMachine } from '@deviltea/tiny-state-machine'
+
+function createUploadProcess<Config extends MachineConfig>(definition: ValidDefinition<Config>) {
+	const machine = createMachine(definition)
+	const data = { transitions: 0 }
+	machine.onTransition(() => {
+		data.transitions++
+	})
+	return { machine, data }
+}
+```
+
+The application owns the lifetime of its data; destroying the FSM releases
+its graph and subscriptions, not arbitrary application resources.
+
 ## Runtime contract
 
-- Only genuine valid definitions are accepted; no configuration validation or compilation occurs during construction. Context factories are not invoked for invalid or forged definitions.
+- Only genuine valid definitions are accepted; no configuration validation or compilation occurs during construction. The factory accepts only the definition.
 - `machine.can(event)` tests whether the current state accepts an event. Unknown events are ignored by `send`; self-transitions are observable transitions.
-- Observers receive a read-only transition record and payload after the new state is committed. Filters combine all specified fields with AND. A target declared as `{ type: 'final' }` always yields `send: null`.
+- Observers receive a read-only transition record and payload containing exactly `{ transition, machine, send }` after the new state is committed. Filters combine all specified fields with AND. A target declared as `{ type: 'final' }` always yields `send: null`.
 - Nested sends are queued in FIFO order; every observer sees the current transition before the next transition runs. The outermost send drains the queue synchronously. The bound send function operates on the machine's current state, not a captured state.
 - Synchronous observer exceptions are collected and rethrown after notifications and queued work complete (one error by identity, multiple as an AggregateError). Asynchronous handlers are not awaited and must handle their own rejections.
-- Destroying during a transition defers destruction until that notification completes and discards pending events. Before-destroy observers may read state/context but cannot send or register new handlers. After-destroy observers run after cleanup. Cleanup completes even when observers throw.
+- Destroying during a transition defers destruction until that notification completes and discards pending events. Before-destroy observers may read state but cannot send or register new handlers. After-destroy observers run after cleanup. Cleanup completes even when observers throw.
 
 ## Verification
 

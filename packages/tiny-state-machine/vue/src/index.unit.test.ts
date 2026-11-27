@@ -24,8 +24,8 @@ it('re-exports the original core', () => {
 		.toBe(core.defineMachine)
 	expect(Object.hasOwn(adapter, 'Machine'))
 		.toBe(false)
-	expectTypeOf<Machine<typeof config, null>>()
-		.toEqualTypeOf<core.Machine<typeof config, null>>()
+	expectTypeOf<Machine<typeof config>>()
+		.toEqualTypeOf<core.Machine<typeof config>>()
 })
 
 it('maintains a readonly reactive state and can() across generated event sequences', () => fc.assert(fc.property(fc.array(fc.constantFrom('start', 'stop', 'finish'), { maxLength: 40 }), (events) => {

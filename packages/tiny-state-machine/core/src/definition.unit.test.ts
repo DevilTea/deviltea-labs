@@ -40,7 +40,7 @@ describe('definition boundary', () => {
 		expectTypeOf(definition.data.states.idle.on.start)
 			.toEqualTypeOf<'done'>()
 		const a = createMachine(definition)
-		const b = createMachine(definition, null)
+		const b = createMachine(definition)
 		a.send('start')
 		expect(a.currentState)
 			.toBe('done')
@@ -101,15 +101,14 @@ describe('definition boundary', () => {
 			.toBe('b')
 	})
 
-	it('rejects invalid and forged definitions at every consumption boundary before executing a context factory', () => {
+	it('rejects invalid and forged definitions at every consumption boundary', () => {
 		const invalid = defineMachine({ initial: 'missing', states: {} })
 		const valid = defineMachine(config)
 		assertValidDefinition(valid)
 		for (const value of [undefined, null, 42, config, invalid, { valid: true, data: config, diagnostics: [] }, { ...valid }, JSON.parse(JSON.stringify(valid))]) {
-			const factory = vi.fn(() => ({}))
 			for (const consume of [
 				() => assertValidDefinition(value as never),
-				() => createMachine(value as never, factory),
+				() => createMachine(value as never),
 				() => getStates(value as never),
 				() => getEvents(value as never, 'idle'),
 				() => getTransitions(value as never),
@@ -119,7 +118,6 @@ describe('definition boundary', () => {
 				expect(consume)
 					.toThrow('Expected a valid definition produced by defineMachine().')
 			}
-			expect(factory).not.toHaveBeenCalled()
 		}
 	})
 
