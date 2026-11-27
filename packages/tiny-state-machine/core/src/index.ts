@@ -22,8 +22,6 @@ export interface MachineConfig<StateKey extends string = string> {
 	}
 }
 
-export type MachineContext = Record<any, any> | null
-
 export type StateKeyOf<Config extends MachineConfig> = keyof Config['states'] & string
 type StateEvents<State> = State extends { type: 'final' }
 	? never
@@ -90,15 +88,13 @@ type PossibleFinalStateKeyOf<Config extends MachineConfig> = {
 
 type TransitionHandlerPayload<
 	Config extends MachineConfig,
-	Context extends MachineContext,
 	Filter = unknown,
 	EventKey extends EventKeyOf<Config, Extract<TransitionDataOf<Config, Filter>['target'], StateKeyOf<Config>>> = EventKeyOf<Config, Extract<TransitionDataOf<Config, Filter>['target'], StateKeyOf<Config>>>,
 > = Prettify<
 	// Always have these properties
 	& {
 		readonly transition: TransitionDataOf<Config, Filter>
-		readonly machine: Machine<Config, Context>
-		readonly context: Context
+		readonly machine: Machine<Config>
 	}
 	// Conditionally provide the send function
 	& { readonly send: [TransitionDataOf<Config, Filter>['target']] extends [FinalStateKeyOf<Config>]
@@ -107,15 +103,13 @@ type TransitionHandlerPayload<
 >
 type TransitionHandler<
 	Config extends MachineConfig,
-	Context extends MachineContext,
 	Filter = unknown,
-> = (payload: TransitionHandlerPayload<Config, Context, Filter>) => unknown
+> = (payload: TransitionHandlerPayload<Config, Filter>) => unknown
 
 type RuntimeTransition = Readonly<{ source: string, event: string, target: string }>
 type RuntimePayload = Readonly<{
 	transition: RuntimeTransition
 	machine: unknown
-	context: MachineContext
 	send: ((event: string) => void) | null
 }>
 type RuntimeHandler = (payload: RuntimePayload) => unknown
@@ -139,28 +133,26 @@ function throwErrors(errors: unknown[]) {
 		throw new AggregateError(errors, 'Multiple machine handlers failed.')
 }
 
-export interface Machine<Config extends MachineConfig, Context extends MachineContext> {
-	readonly context: Context
+export interface Machine<Config extends MachineConfig> {
 	readonly currentState: StateKeyOf<Config>
 	readonly isDestroyed: boolean
 	/** Observe committed transitions in registration order. */
-	onTransition: ((handler: TransitionHandler<Config, Context>) => () => void) & (<const Filter extends TransitionFilter<Config>>(
+	onTransition: ((handler: TransitionHandler<Config>) => () => void) & (<const Filter extends TransitionFilter<Config>>(
 		filter: Filter & (TransitionDataOf<Config, Filter> extends never ? never : unknown),
-		handler: TransitionHandler<Config, Context, Filter>,
+		handler: TransitionHandler<Config, Filter>,
 	) => () => void)
 	can: (event: string) => event is EventKeyOf<Config>
 	send: (event: EventKeyOf<Config>) => void
-	onBeforeDestroyed: (handler: (machine: Machine<Config, Context>) => unknown) => () => void
+	onBeforeDestroyed: (handler: (machine: Machine<Config>) => unknown) => () => void
 	onAfterDestroyed: (handler: () => unknown) => () => void
 	destroy: () => void
 }
 
-function createRuntime<Config extends MachineConfig, Context extends MachineContext>(compiled: CompiledGraph, initialContext: Context): Machine<Config, Context> {
+function createRuntime<Config extends MachineConfig>(compiled: CompiledGraph): Machine<Config> {
 	let graph: CompiledGraph | undefined = compiled
-	let context = initialContext
 	let currentState = compiled.initial
 	const transitionHandlers = new Set<RuntimeHandler>()
-	const beforeDestroyedHandlers = new Set<(machine: Machine<Config, Context>) => unknown>()
+	const beforeDestroyedHandlers = new Set<(machine: Machine<Config>) => unknown>()
 	const afterDestroyedHandlers = new Set<() => unknown>()
 	const queue: string[] = []
 	let dispatching = false
@@ -168,11 +160,7 @@ function createRuntime<Config extends MachineConfig, Context extends MachineCont
 	let destroying = false
 	let isDestroyed = false
 
-	const machine: Machine<Config, Context> = {
-		get context() {
-			throwIfDestroyed()
-			return context
-		},
+	const machine: Machine<Config> = {
 		get currentState() {
 			throwIfDestroyed()
 			return currentState as StateKeyOf<Config>
@@ -199,10 +187,10 @@ function createRuntime<Config extends MachineConfig, Context extends MachineCont
 	}
 
 	/** Observe committed transitions in registration order. */
-	function onTransition(handler: TransitionHandler<Config, Context>): () => void
+	function onTransition(handler: TransitionHandler<Config>): () => void
 	function onTransition<const Filter extends TransitionFilter<Config>>(
 		filter: Filter & (TransitionDataOf<Config, Filter> extends never ? never : unknown),
-		handler: TransitionHandler<Config, Context, Filter>,
+		handler: TransitionHandler<Config, Filter>,
 	): () => void
 	function onTransition(...args: [handler: (...args: any[]) => unknown] | [filter: Partial<RuntimeTransition>, handler: (...args: any[]) => unknown]): () => void {
 		throwIfDestroyed()
@@ -253,7 +241,6 @@ function createRuntime<Config extends MachineConfig, Context extends MachineCont
 				const payload: RuntimePayload = Object.freeze({
 					transition: Object.freeze({ source, event: next, target }),
 					machine,
-					context,
 					send: graph!.states.get(target)!.final ? null : send as (event: string) => void,
 				})
 				notify(transitionHandlers, payload, errors)
@@ -270,7 +257,7 @@ function createRuntime<Config extends MachineConfig, Context extends MachineCont
 		throwErrors(errors)
 	}
 
-	function onBeforeDestroyed(handler: (machine: Machine<Config, Context>) => unknown) {
+	function onBeforeDestroyed(handler: (machine: Machine<Config>) => unknown) {
 		throwIfDestroyed()
 		throwIfDestroying()
 		beforeDestroyedHandlers.add(handler)
@@ -294,7 +281,6 @@ function createRuntime<Config extends MachineConfig, Context extends MachineCont
 		beforeDestroyedHandlers.clear()
 		transitionHandlers.clear()
 		graph = undefined
-		context = null as Context
 		isDestroyed = true
 		notify(afterDestroyedHandlers, undefined, errors)
 		afterDestroyedHandlers.clear()
@@ -316,10 +302,6 @@ function createRuntime<Config extends MachineConfig, Context extends MachineCont
 	return machine
 }
 
-export function createMachine<Config extends MachineConfig>(definition: ValidDefinition<Config>, context?: undefined): Machine<Config, null>
-export function createMachine<Config extends MachineConfig, Context extends MachineContext>(definition: ValidDefinition<Config>, context: Context | (() => Context)): Machine<Config, Context>
-export function createMachine<Config extends MachineConfig, Context extends MachineContext>(definition: ValidDefinition<Config>, context?: Context | (() => Context)): Machine<Config, Context | null> {
-	// Reject forged/invalid definitions before running a caller's context factory.
-	const graph = getCompiledGraph(definition)
-	return createRuntime(graph, typeof context === 'function' ? context() : context ?? null)
+export function createMachine<Config extends MachineConfig>(definition: ValidDefinition<Config>): Machine<Config> {
+	return createRuntime<Config>(getCompiledGraph(definition))
 }
